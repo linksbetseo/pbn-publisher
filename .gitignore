@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.env.*
+*.db
+*.sqlite
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+backend/frontend_dist/
+
+# Secrets & data
+*.csv
+wp_check_result.txt
+update_*.py
+fix_*.py
+diagnose.py
+check_wp.py
+gen_*.sh
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
