@@ -1,7 +1,7 @@
 import aiosqlite
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from config import DB_PATH
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
@@ -10,6 +10,38 @@ router = APIRouter(prefix="/api/domains", tags=["domains"])
 class DomainToggle(BaseModel):
     active: Optional[int] = None
     wp_ok: Optional[int] = None
+
+
+class DomainImportItem(BaseModel):
+    domain: str
+    wp_login: str
+    wp_pass: str
+    server: str
+    active: int = 1
+    wp_ok: Optional[int] = None
+
+
+@router.post("/bulk-import")
+async def bulk_import_domains(items: List[DomainImportItem]):
+    """Import multiple domains at once. Skips duplicates by domain name."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        inserted = 0
+        skipped = 0
+        for item in items:
+            async with db.execute(
+                "SELECT id FROM my_domains WHERE domain = ?", (item.domain,)
+            ) as cursor:
+                existing = await cursor.fetchone()
+            if existing:
+                skipped += 1
+                continue
+            await db.execute(
+                "INSERT INTO my_domains (domain, wp_login, wp_pass, server, active, wp_ok) VALUES (?,?,?,?,?,?)",
+                (item.domain, item.wp_login, item.wp_pass, item.server, item.active, item.wp_ok),
+            )
+            inserted += 1
+        await db.commit()
+    return {"inserted": inserted, "skipped": skipped, "total": len(items)}
 
 
 @router.get("/servers")
