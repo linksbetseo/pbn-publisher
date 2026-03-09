@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS my_domains (
     wp_login TEXT NOT NULL,
     wp_pass TEXT NOT NULL,
     server TEXT NOT NULL,
-    active INTEGER DEFAULT 1
+    active INTEGER DEFAULT 1,
+    wp_ok INTEGER DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS posts (
@@ -98,7 +99,12 @@ async def import_csv_domains(db: aiosqlite.Connection):
 async def lifespan(app: FastAPI):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(CREATE_TABLES_SQL)
-        await db.commit()
+        # Migration: add wp_ok column if missing
+        try:
+            await db.execute("ALTER TABLE my_domains ADD COLUMN wp_ok INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass  # column already exists
         await import_csv_domains(db)
     yield
 
