@@ -13,7 +13,8 @@ COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm ci
 
 COPY frontend/ ./frontend/
-RUN cd frontend && npm run build && cp -r dist ../backend/frontend_dist
+RUN mkdir -p backend/frontend_dist && \
+    cd frontend && npm run build && cp -r dist/* ../backend/frontend_dist/
 
 # Install Python deps
 COPY backend/requirements.txt ./backend/
