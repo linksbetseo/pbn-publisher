@@ -135,6 +135,7 @@ async def publish_posts(body: PublishRequest):
         ) as cursor:
             domains = await cursor.fetchall()
 
+    print(f"[PUBLISH] topic='{body.topic}' unique={body.unique_per_domain} domains={len(domains)}", flush=True)
     variation_pool = VARIATION_HINTS_PL if body.language == "pl" else VARIATION_HINTS_EN
     used_variations = []
 
@@ -161,6 +162,9 @@ async def publish_posts(body: PublishRequest):
                     )
                     title = article["title"]
                     content = article["content"]
+                    # Force unique title by appending variation if GPT returned same as topic
+                    if title.strip().lower() == body.topic.strip().lower():
+                        title = f"{title} — {variation}"
                 else:
                     title = body.title
                     content = body.content

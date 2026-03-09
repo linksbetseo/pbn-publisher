@@ -13,12 +13,18 @@ async def generate_article(
     custom_prompt: str = "",
     variation_hint: str = "",
 ) -> dict:
+    def clean_url(url):
+        url = url.strip()
+        if not url.startswith('http://') and not url.startswith('https://'):
+            url = 'https://' + url
+        return url
+
     # Build anchor instructions
-    anchors_info = f'<a href="https://{client_domain}">{anchor_text}</a>'
+    anchors_info = f'<a href="{clean_url(client_domain)}">{anchor_text}</a>'
     if anchor_text2 and anchor_url2:
-        anchors_info += f', <a href="https://{anchor_url2}">{anchor_text2}</a>'
+        anchors_info += f', <a href="{clean_url(anchor_url2)}">{anchor_text2}</a>'
     if anchor_text3 and anchor_url3:
-        anchors_info += f', <a href="https://{anchor_url3}">{anchor_text3}</a>'
+        anchors_info += f', <a href="{clean_url(anchor_url3)}">{anchor_text3}</a>'
 
     variation = f" Kąt tematyczny: {variation_hint}." if variation_hint else ""
 
@@ -34,9 +40,12 @@ async def generate_article(
             system_prompt += f" Dodatkowe instrukcje: {custom_prompt}"
         user_prompt = (
             f"Napisz unikalny artykuł SEO na temat: '{topic}'.{variation} "
-            f"Użyj innego podejścia, innego tytułu i innej struktury niż standardowe artykuły o tym temacie. "
-            f"Umieść w treści następujące linki (naturalnie, nie pomijaj żadnego który jest podany): {anchors_info}. "
-            f"Zwróć JSON z polami 'title' (tytuł artykułu) i 'content' (HTML artykułu). "
+            f"WAŻNE: Wymyśl WŁASNY, ORYGINALNY tytuł artykułu — NIE używaj tematu '{topic}' jako tytułu. "
+            f"Tytuł ma być zbliżony tematycznie ale sformułowany inaczej, np. jako pytanie, poradnik lub ciekawostka. "
+            f"Użyj innej struktury i podejścia niż standardowe artykuły o tym temacie. "
+            f"Umieść w treści KAŻDY z poniższych linków DOKŁADNIE RAZ (nie więcej, nie mniej): {anchors_info}. "
+            f"Każdy link może pojawić się w artykule tylko jeden raz. "
+            f"Zwróć JSON z polami 'title' (wymyślony tytuł) i 'content' (HTML artykułu). "
             f"Tylko JSON, bez markdown."
         )
     else:
@@ -51,9 +60,12 @@ async def generate_article(
             system_prompt += f" Additional instructions: {custom_prompt}"
         user_prompt = (
             f"Write a unique SEO article about: '{topic}'.{variation} "
-            f"Use a different angle, title and structure than typical articles on this topic. "
-            f"Include the following links naturally in the text (do not skip any): {anchors_info}. "
-            f"Return JSON with 'title' (article title) and 'content' (HTML article). "
+            f"IMPORTANT: Create your OWN original title — do NOT use '{topic}' as the title. "
+            f"The title should be related but phrased differently, e.g. as a question, guide or insight. "
+            f"Use a different structure and angle than typical articles on this topic. "
+            f"Include EACH of the following links EXACTLY ONCE in the text (no more, no less): {anchors_info}. "
+            f"Each link must appear only one time in the article. "
+            f"Return JSON with 'title' (your invented title) and 'content' (HTML article). "
             f"JSON only, no markdown."
         )
 
@@ -71,9 +83,27 @@ async def generate_article(
     raw = response.choices[0].message.content
     import json
     data = json.loads(raw)
+    content = data.get("content", "")
+
+    # Deduplicate links — keep only first occurrence of each href domain
+    import re
+    seen_hrefs = set()
+    def remove_duplicate_link(m):
+        href = re.search(r'href=["\']([^"\']+)["\']', m.group(0))
+        if not href:
+            return m.group(0)
+        url = href.group(1).rstrip('/')
+        if url in seen_hrefs:
+            text = re.sub(r'<[^>]+>', '', m.group(0))
+            return text
+        seen_hrefs.add(url)
+        return m.group(0)
+
+    content = re.sub(r'<a\s[^>]*?>.*?</a>', remove_duplicate_link, content, flags=re.DOTALL | re.IGNORECASE)
+
     return {
         "title": data.get("title", topic),
-        "content": data.get("content", ""),
+        "content": content,
     }
 
 

@@ -85,7 +85,8 @@ export default function Publisher() {
   const handleRegenerateImage = async () => {
     setRegeneratingImage(true)
     try {
-      const res = await fetch('/api/publish/regenerate-image', {
+      const apiBase = import.meta.env.DEV ? 'http://localhost:8001' : ''
+      const res = await fetch(`${apiBase}/api/publish/regenerate-image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic, static_image_b64: staticImageB64 || null }),
@@ -140,7 +141,8 @@ export default function Publisher() {
     }
 
     try {
-      const response = await fetch('/api/publish/post', {
+      const apiBase = import.meta.env.DEV ? 'http://localhost:8001' : ''
+      const response = await fetch(`${apiBase}/api/publish/post`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
