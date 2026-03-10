@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import api from '../api/client'
 
 const STATUS_COLOR = {
@@ -11,6 +11,355 @@ const KW_TYPE_COLOR = {
   pillar: 'bg-blue-100 text-blue-700',
   supporting: 'bg-gray-100 text-gray-600',
 }
+
+// ── Bulk Tab ──────────────────────────────────────────────────────────────────
+
+function BulkTab() {
+  const [allDomains, setAllDomains] = useState([])
+  const [schedules, setSchedules] = useState([])
+  const [selected, setSelected] = useState(new Set())
+  const [serverFilter, setServerFilter] = useState('all')
+  const [search, setSearch] = useState('')
+  const [tab, setTab] = useState('domains') // domains | schedules
+  const [loading, setLoading] = useState(true)
+  const [actionLog, setActionLog] = useState([])
+  const [running, setRunning] = useState(false)
+
+  // Shared settings
+  const [seedKw, setSeedKw] = useState('')
+  const [ppd, setPpd] = useState(1)
+  const [lang, setLang] = useState('pl')
+  const [minVol, setMinVol] = useState(10)
+  const [clientDomain, setClientDomain] = useState('')
+  const [anchorText, setAnchorText] = useState('')
+  const [runLimit, setRunLimit] = useState(1)
+
+  const log = (msg, type = 'info') => setActionLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString('pl-PL') }])
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    const [domRes, schRes] = await Promise.all([
+      api.get('/api/domains', { params: { active: 1 } }),
+      api.get('/api/autopilot/schedules'),
+    ])
+    setAllDomains(domRes.data)
+    setSchedules(schRes.data)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const servers = ['all', ...new Set(allDomains.map(d => d.server).filter(Boolean))]
+
+  const filteredDomains = allDomains.filter(d => {
+    if (serverFilter !== 'all' && d.server !== serverFilter) return false
+    if (search && !d.domain.toLowerCase().includes(search.toLowerCase())) return false
+    return true
+  })
+
+  const filteredSchedules = schedules.filter(s => {
+    if (search && !s.domain.toLowerCase().includes(search.toLowerCase())) return false
+    return true
+  })
+
+  const toggleAll = () => {
+    const items = tab === 'domains' ? filteredDomains : filteredSchedules
+    const ids = items.map(i => i.id)
+    if (ids.every(id => selected.has(id))) {
+      setSelected(s => { const n = new Set(s); ids.forEach(id => n.delete(id)); return n })
+    } else {
+      setSelected(s => { const n = new Set(s); ids.forEach(id => n.add(id)); return n })
+    }
+  }
+
+  const toggle = (id) => setSelected(s => {
+    const n = new Set(s)
+    n.has(id) ? n.delete(id) : n.add(id)
+    return n
+  })
+
+  const selectedList = [...selected]
+
+  // ── Actions ──
+
+  const bulkCreateSchedules = async () => {
+    if (!selectedList.length) return alert('Zaznacz domeny')
+    if (!seedKw.trim()) return alert('Wpisz frazę seed')
+    setRunning(true)
+    setActionLog([])
+    log(`Tworzę harmonogramy dla ${selectedList.length} domen...`)
+    try {
+      const res = await api.post('/api/autopilot/bulk-create', {
+        domain_ids: selectedList,
+        seed_keyword: seedKw,
+        posts_per_day: Number(ppd),
+        language: lang,
+        min_volume: Number(minVol),
+        client_domain: clientDomain,
+        anchor_text: anchorText,
+      })
+      log(`✓ Utworzono: ${res.data.created}, pominięto: ${res.data.skipped}, błędy: ${res.data.errors}`, 'ok')
+      await load()
+      setSelected(new Set())
+    } catch (e) {
+      log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const bulkGenerateMaps = async () => {
+    if (!selectedList.length) return alert('Zaznacz harmonogramy')
+    setRunning(true)
+    setActionLog([])
+    log(`Generuję Topical Map dla ${selectedList.length} harmonogramów... (może potrwać kilka minut)`)
+    try {
+      const res = await api.post('/api/autopilot/bulk-generate-maps', { schedule_ids: selectedList }, { timeout: 600000 })
+      log(`✓ OK: ${res.data.ok}/${res.data.processed}`, 'ok')
+      res.data.results.forEach(r => {
+        if (r.error) log(`  ✗ ${r.domain || r.schedule_id}: ${r.error}`, 'err')
+        else log(`  ✓ ${r.domain}: ${r.inserted} nowych fraz (${r.pillars} klastrów)`, 'ok')
+      })
+      await load()
+    } catch (e) {
+      log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const bulkRun = async () => {
+    if (!selectedList.length) return alert('Zaznacz harmonogramy')
+    setRunning(true)
+    setActionLog([])
+    log(`Uruchamiam publikację dla ${selectedList.length} harmonogramów (${runLimit} artykuł/domena)...`)
+    try {
+      const res = await api.post('/api/autopilot/bulk-run', { schedule_ids: selectedList, limit: Number(runLimit) }, { timeout: 600000 })
+      log(`✓ Łącznie: ${res.data.total_published} opublikowanych, ${res.data.total_failed} błędów`, 'ok')
+      res.data.results.forEach(r => {
+        if (r.skipped) log(`  ⚠ ${r.domain}: pominięto (${r.reason})`, 'warn')
+        else if (r.error) log(`  ✗ ${r.domain}: ${r.error}`, 'err')
+        else log(`  ✓ ${r.domain}: ${r.published} pub, ${r.failed} err`, r.failed > 0 ? 'warn' : 'ok')
+      })
+      await load()
+    } catch (e) {
+      log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const bulkSetPpd = async () => {
+    if (!selectedList.length) return alert('Zaznacz harmonogramy')
+    setRunning(true)
+    try {
+      await api.post('/api/autopilot/bulk-set-ppd', { schedule_ids: selectedList, limit: Number(ppd) })
+      log(`✓ Ustawiono ${ppd} postów/dzień dla ${selectedList.length} harmonogramów`, 'ok')
+      await load()
+    } catch (e) {
+      log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const logColor = { ok: 'text-green-400', err: 'text-red-400', warn: 'text-yellow-300', info: 'text-gray-300' }
+
+  if (loading) return <div className="flex items-center justify-center h-40"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" /></div>
+
+  return (
+    <div className="space-y-5">
+      {/* Sub-tabs */}
+      <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        {[['domains', `Domeny (${allDomains.length})`], ['schedules', `Harmonogramy (${schedules.length})`]].map(([k, label]) => (
+          <button key={k} onClick={() => { setTab(k); setSelected(new Set()) }}
+            className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === k ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex gap-4">
+        {/* Left: list */}
+        <div className="flex-1 min-w-0">
+          {/* Filters */}
+          <div className="flex gap-2 mb-3 flex-wrap">
+            <input value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Szukaj domeny..."
+              className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            {tab === 'domains' && (
+              <select value={serverFilter} onChange={e => setServerFilter(e.target.value)}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                {servers.map(s => <option key={s} value={s}>{s === 'all' ? 'Wszystkie serwery' : s}</option>)}
+              </select>
+            )}
+            <button onClick={toggleAll}
+              className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-50">
+              {(tab === 'domains' ? filteredDomains : filteredSchedules).every(i => selected.has(i.id))
+                ? 'Odznacz wszystkie' : 'Zaznacz wszystkie'}
+            </button>
+            <span className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-xs font-medium">
+              Zaznaczono: {selectedList.length}
+            </span>
+          </div>
+
+          {/* Table */}
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+            <div className="max-h-[420px] overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-gray-50 border-b border-gray-100 z-10">
+                  <tr>
+                    <th className="px-3 py-2 w-8">
+                      <input type="checkbox"
+                        checked={(tab === 'domains' ? filteredDomains : filteredSchedules).length > 0 &&
+                          (tab === 'domains' ? filteredDomains : filteredSchedules).every(i => selected.has(i.id))}
+                        onChange={toggleAll}
+                        className="rounded" />
+                    </th>
+                    <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Domena</th>
+                    {tab === 'domains' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Serwer</th>}
+                    {tab === 'schedules' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Seed</th>}
+                    {tab === 'schedules' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Frazy</th>}
+                    {tab === 'schedules' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Mapa</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {(tab === 'domains' ? filteredDomains : filteredSchedules).map(item => (
+                    <tr key={item.id} onClick={() => toggle(item.id)}
+                      className={`cursor-pointer hover:bg-blue-50 transition-colors ${selected.has(item.id) ? 'bg-blue-50' : ''}`}>
+                      <td className="px-3 py-2">
+                        <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggle(item.id)}
+                          onClick={e => e.stopPropagation()} className="rounded" />
+                      </td>
+                      <td className="px-3 py-2 font-medium text-gray-800 max-w-[200px] truncate">{item.domain}</td>
+                      {tab === 'domains' && <td className="px-3 py-2 text-gray-500">{item.server || '—'}</td>}
+                      {tab === 'schedules' && <td className="px-3 py-2 text-purple-700 max-w-[140px] truncate">{item.seed_keyword}</td>}
+                      {tab === 'schedules' && (
+                        <td className="px-3 py-2 text-gray-600">
+                          {item.published_count || 0}/{item.total_keywords || 0}
+                        </td>
+                      )}
+                      {tab === 'schedules' && (
+                        <td className="px-3 py-2">
+                          {item.map_generated
+                            ? <span className="text-green-600 font-medium">✓</span>
+                            : <span className="text-orange-500">brak</span>}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                  {(tab === 'domains' ? filteredDomains : filteredSchedules).length === 0 && (
+                    <tr><td colSpan={5} className="px-3 py-8 text-center text-gray-400">Brak wyników</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: actions panel */}
+        <div className="w-72 shrink-0 space-y-4">
+          {/* Settings */}
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 space-y-3">
+            <h3 className="text-sm font-semibold text-gray-800">Ustawienia</h3>
+
+            {tab === 'domains' && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Fraza seed *</label>
+                  <input value={seedKw} onChange={e => setSeedKw(e.target.value)}
+                    placeholder="np. prawo pracy"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Domena klienta</label>
+                  <input value={clientDomain} onChange={e => setClientDomain(e.target.value)}
+                    placeholder="https://klient.pl"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Anchor text klienta</label>
+                  <input value={anchorText} onChange={e => setAnchorText(e.target.value)}
+                    placeholder="usługi prawne"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Posty/dzień</label>
+                    <input type="number" min={1} max={20} value={ppd} onChange={e => setPpd(e.target.value)}
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Min. vol.</label>
+                    <input type="number" min={0} value={minVol} onChange={e => setMinVol(e.target.value)}
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Język</label>
+                  <select value={lang} onChange={e => setLang(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="pl">Polski</option>
+                    <option value="en">English</option>
+                  </select>
+                </div>
+                <button onClick={bulkCreateSchedules} disabled={running || !selectedList.length}
+                  className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+                  {running ? '⟳ Tworzę...' : `+ Utwórz harmonogramy (${selectedList.length})`}
+                </button>
+              </>
+            )}
+
+            {tab === 'schedules' && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Artykuły/uruchomienie</label>
+                  <input type="number" min={1} max={50} value={runLimit} onChange={e => setRunLimit(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <button onClick={bulkGenerateMaps} disabled={running || !selectedList.length}
+                  className="w-full py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:opacity-50">
+                  {running ? '⟳ Generuję...' : `↻ Generuj mapy (${selectedList.length})`}
+                </button>
+                <button onClick={bulkRun} disabled={running || !selectedList.length}
+                  className="w-full py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50">
+                  {running ? '⟳ Publikuję...' : `▶ Uruchom publikację (${selectedList.length})`}
+                </button>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Ustaw posty/dzień</label>
+                  <div className="flex gap-2">
+                    <input type="number" min={1} max={20} value={ppd} onChange={e => setPpd(e.target.value)}
+                      className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <button onClick={bulkSetPpd} disabled={running || !selectedList.length}
+                      className="px-3 py-2 bg-gray-700 text-white rounded-lg text-xs font-medium hover:bg-gray-800 disabled:opacity-50">
+                      Ustaw
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Log */}
+          {actionLog.length > 0 && (
+            <div className="bg-gray-900 rounded-xl p-3 max-h-60 overflow-y-auto">
+              <p className="text-xs text-gray-500 mb-2 font-medium">Log operacji</p>
+              <div className="space-y-0.5 font-mono text-xs">
+                {actionLog.map((e, i) => (
+                  <div key={i} className={logColor[e.type]}>
+                    <span className="text-gray-600">{e.ts} </span>{e.msg}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
 
 export default function Autopilot() {
   const [schedules, setSchedules] = useState([])
@@ -180,6 +529,8 @@ export default function Autopilot() {
   const fmt = (s) => s ? new Date(s).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
   const pending_count = (id) => keywords[id]?.filter(k => k.status === 'pending').length ?? '?'
 
+  const [mainTab, setMainTab] = useState('schedules')
+
   return (
     <div className="p-8 max-w-7xl">
       <div className="flex items-center justify-between mb-2">
@@ -187,13 +538,29 @@ export default function Autopilot() {
           <h2 className="text-2xl font-bold text-gray-900">Autopilot PBN</h2>
           <p className="text-gray-500 text-sm mt-0.5">Automatyczne uzupełnianie treści na domenach PBN na podstawie Topical Map</p>
         </div>
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
-        >
-          + Dodaj domenę
-        </button>
+        {mainTab === 'schedules' && (
+          <button
+            onClick={() => setShowAdd(!showAdd)}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+          >
+            + Dodaj domenę
+          </button>
+        )}
       </div>
+
+      {/* Main tabs */}
+      <div className="flex gap-1 bg-gray-100 rounded-lg p-1 mb-5 w-fit">
+        {[['schedules', 'Harmonogramy'], ['bulk', '⚡ Bulk Setup']].map(([k, label]) => (
+          <button key={k} onClick={() => setMainTab(k)}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${mainTab === k ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mainTab === 'bulk' && <BulkTab />}
+      {mainTab === 'schedules' && <>
+
 
       {/* Global stats */}
       <div className="flex gap-3 mt-4 mb-6 flex-wrap">
@@ -525,6 +892,7 @@ export default function Autopilot() {
           ))}
         </div>
       )}
+      </>}
     </div>
   )
 }
