@@ -205,6 +205,8 @@ async def publish_posts(body: PublishRequest):
                 image_b64=body.image_b64,
                 excerpt=excerpt,
                 keyword=body.topic or None,
+                http_user=d.get("http_user", "") or "",
+                http_pass=d.get("http_pass", "") or "",
             )
             status = "published" if result.get("success") else "failed"
             wp_url = result.get("url", "")

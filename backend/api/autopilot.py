@@ -146,7 +146,9 @@ async def ensure_tables():
 async def get_schedule(db, schedule_id: int) -> Optional[dict]:
     db.row_factory = aiosqlite.Row
     async with db.execute(
-        """SELECT s.*, md.domain, md.wp_login, md.wp_pass
+        """SELECT s.*, md.domain, md.wp_login, md.wp_pass,
+                  COALESCE(md.http_user,'') as http_user,
+                  COALESCE(md.http_pass,'') as http_pass
            FROM domain_schedules s
            JOIN my_domains md ON md.id = s.my_domain_id
            WHERE s.id = ?""",
@@ -424,6 +426,8 @@ async def sync_categories(schedule_id: int):
             wp_pass=sched["wp_pass"],
             name=label,
             slug=slug,
+            http_user=sched.get("http_user", ""),
+            http_pass=sched.get("http_pass", ""),
         )
 
         if cat_id:
@@ -478,7 +482,8 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
         return {"done": True, "message": "Brak pending keywords", "published": 0, "failed": 0, "results": []}
 
     # Pre-check WP credentials before burning tokens on generation
-    wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"])
+    wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"],
+                                       http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""))
     if not wp_ok:
         logger.warning(f"[Autopilot] WP credentials invalid for {sched['domain']} — aborting")
         return {"done": False, "error": f"WP credentials invalid for {sched['domain']}", "published": 0, "failed": 0, "results": []}
@@ -558,6 +563,8 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
                 category_id=category_id,
                 excerpt=excerpt,
                 keyword=keyword,
+                http_user=sched.get("http_user", ""),
+                http_pass=sched.get("http_pass", ""),
             )
 
             if result.get("success"):
@@ -619,7 +626,9 @@ async def run_daily_all():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT s.*, md.domain, md.wp_login, md.wp_pass
+            """SELECT s.*, md.domain, md.wp_login, md.wp_pass,
+                      COALESCE(md.http_user,'') as http_user,
+                      COALESCE(md.http_pass,'') as http_pass
                FROM domain_schedules s
                JOIN my_domains md ON md.id = s.my_domain_id
                WHERE s.active = 1 AND md.active = 1 AND s.map_generated = 1"""
@@ -634,7 +643,8 @@ async def run_daily_all():
         limit = sched["posts_per_day"]
 
         # Pre-check WP credentials
-        wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"])
+        wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"],
+                                           http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""))
         if not wp_ok:
             logger.warning(f"[Daily] WP credentials invalid for {sched['domain']} — skipping")
             results.append({"domain": sched["domain"], "schedule_id": schedule_id, "published": 0, "failed": 0, "skipped": True, "reason": "WP credentials invalid"})
@@ -706,6 +716,8 @@ async def run_daily_all():
                     category_id=kw_row.get("wp_category_id") or None,
                     excerpt=excerpt,
                     keyword=keyword,
+                    http_user=sched.get("http_user", ""),
+                    http_pass=sched.get("http_pass", ""),
                 )
                 if result.get("success"):
                     wp_url = result.get("url", "")

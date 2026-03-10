@@ -16,12 +16,21 @@ def _base_url(domain: str) -> list[str]:
     return [f"https://{domain}", f"http://{domain}"]
 
 
+def _http_auth(http_user: str, http_pass: str):
+    """Return httpx BasicAuth tuple if htpasswd credentials provided."""
+    if http_user and http_pass:
+        return (http_user, http_pass)
+    return None
+
+
 async def get_or_create_category(
     domain: str,
     wp_login: str,
     wp_pass: str,
     name: str,
     slug: str = "",
+    http_user: str = "",
+    http_pass: str = "",
 ) -> Optional[int]:
     """
     Pobiera ID istniejącej kategorii WP lub tworzy nową.
@@ -29,12 +38,13 @@ async def get_or_create_category(
     """
     auth = _auth_header(wp_login, wp_pass)
     headers = {"Authorization": auth, "Content-Type": "application/json"}
+    site_auth = _http_auth(http_user, http_pass)
 
     # Generuj slug z nazwy jeśli nie podano
     if not slug:
         slug = re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")
 
-    async with httpx.AsyncClient(verify=False, timeout=20) as client:
+    async with httpx.AsyncClient(verify=False, timeout=20, auth=site_auth) as client:
         for base in _base_url(domain):
             try:
                 # Sprawdź czy kategoria już istnieje (po slug)
@@ -61,12 +71,13 @@ async def get_or_create_category(
     return None
 
 
-async def get_categories(domain: str, wp_login: str, wp_pass: str) -> list[dict]:
+async def get_categories(domain: str, wp_login: str, wp_pass: str, http_user: str = "", http_pass: str = "") -> list[dict]:
     """Pobiera listę wszystkich kategorii z WP."""
     auth = _auth_header(wp_login, wp_pass)
     headers = {"Authorization": auth}
+    site_auth = _http_auth(http_user, http_pass)
     result = []
-    async with httpx.AsyncClient(verify=False, timeout=20) as client:
+    async with httpx.AsyncClient(verify=False, timeout=20, auth=site_auth) as client:
         for base in _base_url(domain):
             try:
                 resp = await client.get(
@@ -137,12 +148,15 @@ async def publish_post(
     excerpt: Optional[str] = None,
     keyword: Optional[str] = None,
     tags: Optional[list] = None,
+    http_user: str = "",
+    http_pass: str = "",
 ) -> dict:
     auth = _auth_header(wp_login, wp_pass)
     headers = {
         "Authorization": auth,
         "Content-Type": "application/json",
     }
+    site_auth = _http_auth(http_user, http_pass)
 
     # SEO slug from keyword
     slug = _keyword_to_slug(keyword) if keyword else _keyword_to_slug(title)
@@ -152,7 +166,7 @@ async def publish_post(
     urls_to_try = _base_url(domain)
 
     last_error = None
-    async with httpx.AsyncClient(verify=False, timeout=30) as client:
+    async with httpx.AsyncClient(verify=False, timeout=30, auth=site_auth) as client:
         for base_url in urls_to_try:
             try:
                 media_id = None
@@ -252,10 +266,11 @@ async def _get_or_create_tags(
     return [i for i in ids if i]
 
 
-async def check_wp_credentials(domain: str, wp_login: str, wp_pass: str) -> bool:
+async def check_wp_credentials(domain: str, wp_login: str, wp_pass: str, http_user: str = "", http_pass: str = "") -> bool:
     """Quick WP REST API credentials check. Returns True if valid."""
     auth = _auth_header(wp_login, wp_pass)
-    async with httpx.AsyncClient(verify=False, timeout=10) as client:
+    site_auth = _http_auth(http_user, http_pass)
+    async with httpx.AsyncClient(verify=False, timeout=10, auth=site_auth) as client:
         for base in _base_url(domain):
             try:
                 resp = await client.get(

@@ -172,6 +172,57 @@ function SnapshotsTab() {
 
 // ── Live zakładka ─────────────────────────────────────────────────────────────
 
+function HttpAuthModal({ domain, onClose }) {
+  const [user, setUser] = useState('')
+  const [pass, setPass] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      await api.patch(`/api/domains/${domain.id}`, { http_user: user, http_pass: pass })
+      setSaved(true)
+      setTimeout(onClose, 800)
+    } catch (e) {
+      alert('Błąd zapisu: ' + (e.response?.data?.detail || e.message))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl p-6 w-96" onClick={e => e.stopPropagation()}>
+        <h3 className="text-base font-semibold text-gray-900 mb-1">Basic Auth (htpasswd)</h3>
+        <p className="text-xs text-gray-500 mb-4">{domain.domain}</p>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Login HTTP</label>
+            <input value={user} onChange={e => setUser(e.target.value)}
+              placeholder="użytkownik"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Hasło HTTP</label>
+            <input type="password" value={pass} onChange={e => setPass(e.target.value)}
+              placeholder="hasło"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <p className="text-xs text-gray-400">Zostaw puste jeśli domena nie ma Basic Auth.</p>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">Anuluj</button>
+          <button onClick={save} disabled={saving}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+            {saved ? '✓ Zapisano' : saving ? 'Zapisuję...' : 'Zapisz'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function LiveTab() {
   const [domains, setDomains] = useState([])
   const [total, setTotal] = useState(0)
@@ -181,6 +232,7 @@ function LiveTab() {
   const [sortKey, setSortKey] = useState('traffic')
   const [sortDir, setSortDir] = useState('desc')
   const [filter, setFilter] = useState('all')
+  const [authModal, setAuthModal] = useState(null)
 
   const load = useCallback(async (off = 0, append = false) => {
     setLoading(true)
@@ -234,6 +286,7 @@ function LiveTab() {
 
   return (
     <div>
+      {authModal && <HttpAuthModal domain={authModal} onClose={() => setAuthModal(null)} />}
       {/* Summary cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
         <StatCard label="Wszystkie" value={total} color="text-gray-800" />
@@ -294,6 +347,7 @@ function LiveTab() {
                 <th className={thCls} onClick={() => handleSort('days_to_expiry')}>Wygasa <SortIcon k="days_to_expiry" /></th>
                 <th className={thCls}>WP</th>
                 <th className={thCls} onClick={() => handleSort('health_score')}>Zdrowie <SortIcon k="health_score" /></th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Auth</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
@@ -318,10 +372,17 @@ function LiveTab() {
                   <td className="px-4 py-3"><ExpiryBadge days={d.days_to_expiry} date={d.expiry_date} /></td>
                   <td className="px-4 py-3"><WpBadge ok={d.wp_ok} /></td>
                   <td className="px-4 py-3"><ScoreBadge score={d.health_score} /></td>
+                  <td className="px-4 py-3">
+                    <button onClick={() => setAuthModal(d)}
+                      title="Ustaw Basic Auth (htpasswd)"
+                      className="text-gray-400 hover:text-blue-600 text-sm px-2 py-0.5 rounded hover:bg-blue-50 transition-colors">
+                      🔑
+                    </button>
+                  </td>
                 </tr>
               ))}
               {filtered.length === 0 && !loading && (
-                <tr><td colSpan={7} className="px-4 py-12 text-center text-gray-400">Brak domen</td></tr>
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-gray-400">Brak domen</td></tr>
               )}
             </tbody>
           </table>

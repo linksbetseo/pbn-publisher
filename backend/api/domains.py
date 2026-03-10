@@ -7,9 +7,22 @@ from config import DB_PATH
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 
 
+async def _ensure_http_auth_columns():
+    """Migration: add http_user / http_pass columns if missing."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for col in [("http_user", "TEXT DEFAULT ''"), ("http_pass", "TEXT DEFAULT ''")]:
+            try:
+                await db.execute(f"ALTER TABLE my_domains ADD COLUMN {col[0]} {col[1]}")
+            except Exception:
+                pass
+        await db.commit()
+
+
 class DomainToggle(BaseModel):
     active: Optional[int] = None
     wp_ok: Optional[int] = None
+    http_user: Optional[str] = None
+    http_pass: Optional[str] = None
 
 
 class DomainImportItem(BaseModel):
@@ -19,11 +32,19 @@ class DomainImportItem(BaseModel):
     server: str
     active: int = 1
     wp_ok: Optional[int] = None
+    http_user: Optional[str] = None
+    http_pass: Optional[str] = None
+
+
+@router.on_event("startup")
+async def startup():
+    await _ensure_http_auth_columns()
 
 
 @router.post("/bulk-import")
 async def bulk_import_domains(items: List[DomainImportItem]):
     """Import multiple domains at once. Skips duplicates by domain name."""
+    await _ensure_http_auth_columns()
     async with aiosqlite.connect(DB_PATH) as db:
         inserted = 0
         skipped = 0
@@ -36,8 +57,9 @@ async def bulk_import_domains(items: List[DomainImportItem]):
                 skipped += 1
                 continue
             await db.execute(
-                "INSERT INTO my_domains (domain, wp_login, wp_pass, server, active, wp_ok) VALUES (?,?,?,?,?,?)",
-                (item.domain, item.wp_login, item.wp_pass, item.server, item.active, item.wp_ok),
+                "INSERT INTO my_domains (domain, wp_login, wp_pass, server, active, wp_ok, http_user, http_pass) VALUES (?,?,?,?,?,?,?,?)",
+                (item.domain, item.wp_login, item.wp_pass, item.server, item.active, item.wp_ok,
+                 item.http_user or "", item.http_pass or ""),
             )
             inserted += 1
         await db.commit()
@@ -128,14 +150,19 @@ async def toggle_domain(domain_id: int, body: DomainToggle):
             raise HTTPException(status_code=404, detail="Domain not found")
 
         new_active = body.active if body.active is not None else (0 if row["active"] else 1)
+        updates = ["active = ?"]
+        params = [new_active]
         if body.wp_ok is not None:
-            await db.execute(
-                "UPDATE my_domains SET active = ?, wp_ok = ? WHERE id = ?", (new_active, body.wp_ok, domain_id)
-            )
-        else:
-            await db.execute(
-                "UPDATE my_domains SET active = ? WHERE id = ?", (new_active, domain_id)
-            )
+            updates.append("wp_ok = ?")
+            params.append(body.wp_ok)
+        if body.http_user is not None:
+            updates.append("http_user = ?")
+            params.append(body.http_user)
+        if body.http_pass is not None:
+            updates.append("http_pass = ?")
+            params.append(body.http_pass)
+        params.append(domain_id)
+        await db.execute(f"UPDATE my_domains SET {', '.join(updates)} WHERE id = ?", params)
         await db.commit()
 
         async with db.execute(
