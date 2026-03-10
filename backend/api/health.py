@@ -255,7 +255,8 @@ async def startup():
 
 @router.get("")
 async def domain_health(limit: int = 50, offset: int = 0):
-    """Live health check for all domains (batched, parallel)."""
+    """Returns domains with last snapshot data (fast). Live check via /{id}."""
+    await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -266,11 +267,36 @@ async def domain_health(limit: int = 50, offset: int = 0):
         async with db.execute("SELECT COUNT(*) FROM my_domains") as cur:
             total = (await cur.fetchone())[0]
 
+        # Get last snapshot for each domain
+        async with db.execute(
+            """SELECT my_domain_id, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score
+               FROM domain_health_snapshots
+               WHERE id IN (
+                   SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id
+               )"""
+        ) as cur:
+            snapshots = {r["my_domain_id"]: dict(r) for r in await cur.fetchall()}
+
     results = []
-    for i in range(0, len(rows), 5):
-        batch = rows[i:i + 5]
-        batch_results = await asyncio.gather(*[_domain_health(r) for r in batch])
-        results.extend(batch_results)
+    for row in rows:
+        snap = snapshots.get(row["id"], {})
+        traffic = snap.get("traffic", 0) or 0
+        keywords = snap.get("keywords", 0) or 0
+        days = snap.get("days_to_expiry")
+        results.append({
+            "id": row["id"],
+            "domain": row["domain"],
+            "server": row.get("server", ""),
+            "active": row.get("active", 1),
+            "wp_ok": bool(snap.get("wp_ok", False)),
+            "traffic": traffic,
+            "keywords": keywords,
+            "expiry_date": snap.get("expiry_date"),
+            "days_to_expiry": days,
+            "expiry_status": "critical" if days is not None and days < 14 else "warning" if days is not None and days < 60 else "ok" if days is not None else "unknown",
+            "health_score": snap.get("health_score", "weak"),
+            "from_snapshot": True,
+        })
 
     return {"total": total, "offset": offset, "limit": limit, "domains": results}
 
