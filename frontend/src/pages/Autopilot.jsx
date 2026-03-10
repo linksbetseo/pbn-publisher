@@ -112,54 +112,25 @@ export default function Autopilot() {
     setRunning(r => ({ ...r, [id]: true }))
     setRunLog(l => ({ ...l, [id]: [] }))
 
-    const appendLog = (entry) => {
-      setRunLog(l => ({ ...l, [id]: [...(l[id] || []), entry] }))
+    const limit = limitOverride || sched.posts_per_day
+    try {
+      const res = await api.post(`/api/autopilot/schedules/${id}/run`, { schedule_id: id, limit })
+      const data = res.data
+      // Wyświetl każdy wynik
+      const entries = data.results || []
+      if (entries.length === 0 && data.message) {
+        entries.push({ status: 'info', keyword: '—', error: data.message })
+      }
+      setRunLog(l => ({ ...l, [id]: [...entries, { done: true, published: data.published, failed: data.failed }] }))
       setTimeout(() => {
         const el = logRefs.current[id]
         if (el) el.scrollTop = el.scrollHeight
       }, 50)
-    }
-
-    const limit = limitOverride || sched.posts_per_day
-    try {
-      const resp = await fetch(`/api/autopilot/schedules/${id}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ schedule_id: id, limit }),
-      })
-
-      if (!resp.ok) {
-        appendLog({ status: 'failed', keyword: '—', error: `HTTP ${resp.status}: ${await resp.text()}` })
-        setRunning(r => ({ ...r, [id]: false }))
-        return
-      }
-
-      const reader = resp.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() // zachowaj niepełną linię
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              appendLog(data)
-              if (data.done) {
-                await load()
-                if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
-              }
-            } catch {}
-          }
-        }
-      }
+      await load()
+      if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
     } catch (e) {
-      appendLog({ status: 'failed', keyword: '—', error: e.message || 'Błąd połączenia' })
+      const err = e.response?.data?.detail || e.message || 'Błąd połączenia'
+      setRunLog(l => ({ ...l, [id]: [{ status: 'failed', keyword: '—', error: err }] }))
     } finally {
       setRunning(r => ({ ...r, [id]: false }))
     }

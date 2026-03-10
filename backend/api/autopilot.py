@@ -451,7 +451,7 @@ async def sync_categories(schedule_id: int):
 async def run_schedule_now(schedule_id: int, body: RunNowRequest):
     """
     Uruchom publikację teraz — generuje i publikuje X artykułów z kolejki.
-    Streamuje wyniki na bieżąco.
+    Zwraca wyniki po zakończeniu (Railway blokuje SSE streaming).
     """
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -462,119 +462,95 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
 
     limit = body.limit if body.limit else sched["posts_per_day"]
 
-    async def stream():
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            # Pobierz pending keywords — najpierw pillar, potem supporting
-            async with db.execute(
-                """SELECT * FROM domain_keywords
-                   WHERE schedule_id = ? AND status = 'pending'
-                   ORDER BY keyword_type DESC, search_volume DESC
-                   LIMIT ?""",
-                (schedule_id, limit)
-            ) as cur:
-                keywords = [dict(r) for r in await cur.fetchall()]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM domain_keywords
+               WHERE schedule_id = ? AND status = 'pending'
+               ORDER BY keyword_type DESC, search_volume DESC
+               LIMIT ?""",
+            (schedule_id, limit)
+        ) as cur:
+            keywords = [dict(r) for r in await cur.fetchall()]
 
-        if not keywords:
-            yield f"data: {json.dumps({'done': True, 'message': 'Brak pending keywords', 'published': 0})}\n\n"
-            return
+    if not keywords:
+        return {"done": True, "message": "Brak pending keywords", "published": 0, "failed": 0, "results": []}
 
-        published = 0
-        failed = 0
+    published = 0
+    failed = 0
+    results = []
 
-        for kw_row in keywords:
-            keyword = kw_row["keyword"]
-            variation = random.choice(VARIATION_HINTS)
+    for kw_row in keywords:
+        keyword = kw_row["keyword"]
+        variation = random.choice(VARIATION_HINTS)
 
-            yield f"data: {json.dumps({'status': 'generating', 'keyword': keyword, 'domain': sched['domain']})}\n\n"
+        try:
+            article = await generate_article(
+                topic=keyword,
+                client_domain=sched["client_domain"] or sched["domain"],
+                anchor_text=sched["anchor_text"] or keyword,
+                language=sched["language"],
+                variation_hint=variation,
+            )
+            title = article["title"]
+            content = article["content"]
 
-            try:
-                # Generuj artykuł
-                article = await generate_article(
-                    topic=keyword,
-                    client_domain=sched["client_domain"] or sched["domain"],
-                    anchor_text=sched["anchor_text"] or keyword,
-                    language=sched["language"],
-                    variation_hint=variation,
-                )
-                title = article["title"]
-                content = article["content"]
+            category_id = kw_row.get("wp_category_id") or None
 
-                yield f"data: {json.dumps({'status': 'publishing', 'keyword': keyword, 'title': title})}\n\n"
+            result = await publish_post(
+                domain=sched["domain"],
+                wp_login=sched["wp_login"],
+                wp_pass=sched["wp_pass"],
+                title=title,
+                content=content,
+                category_id=category_id,
+            )
 
-                # Publikuj na WP
-                category_id = kw_row.get("wp_category_id") or None
-
-                result = await publish_post(
-                    domain=sched["domain"],
-                    wp_login=sched["wp_login"],
-                    wp_pass=sched["wp_pass"],
-                    title=title,
-                    content=content,
-                    category_id=category_id,
-                )
-
-                if result.get("success"):
-                    wp_url = result.get("url", "")
-                    status = "published"
-                    published += 1
-                    # Zapisz do posts
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute(
-                            """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                               wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
-                            (None, sched["client_domain"] or sched["domain"],
-                             sched["my_domain_id"], title, content, wp_url, "published")
-                        )
-                        await db.execute(
-                            """UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=?
-                               WHERE id=?""",
-                            (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
-                        )
-                        await db.commit()
-
-                    yield f"data: {json.dumps({'status': 'published', 'keyword': keyword, 'url': wp_url, 'title': title})}\n\n"
-                else:
-                    failed += 1
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute(
-                            "UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],)
-                        )
-                        await db.commit()
-                    yield f"data: {json.dumps({'status': 'failed', 'keyword': keyword, 'error': result.get('error', 'WP error')})}\n\n"
-
-            except Exception as e:
-                failed += 1
-                logger.error(f"Autopilot error for {keyword}: {e}")
+            if result.get("success"):
+                wp_url = result.get("url", "")
+                published += 1
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute(
-                        "UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],)
+                        """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
+                           wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
+                        (None, sched["client_domain"] or sched["domain"],
+                         sched["my_domain_id"], title, content, wp_url, "published")
+                    )
+                    await db.execute(
+                        """UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=?
+                           WHERE id=?""",
+                        (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
                     )
                     await db.commit()
-                yield f"data: {json.dumps({'status': 'failed', 'keyword': keyword, 'error': str(e)})}\n\n"
+                results.append({"status": "published", "keyword": keyword, "url": wp_url, "title": title})
+            else:
+                failed += 1
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                    await db.commit()
+                results.append({"status": "failed", "keyword": keyword, "error": result.get("error", "WP error")})
 
-            await asyncio.sleep(0.1)
+        except Exception as e:
+            failed += 1
+            logger.error(f"Autopilot error for {keyword}: {e}")
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                await db.commit()
+            results.append({"status": "failed", "keyword": keyword, "error": str(e)})
 
-        # Aktualizuj licznik opublikowanych i czas
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute(
-                "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='published'",
-                (schedule_id,)
-            ) as cur:
-                total_pub = (await cur.fetchone())[0]
-            await db.execute(
-                "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
-                (total_pub, datetime.utcnow().isoformat(), schedule_id)
-            )
-            await db.commit()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='published'",
+            (schedule_id,)
+        ) as cur:
+            total_pub = (await cur.fetchone())[0]
+        await db.execute(
+            "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
+            (total_pub, datetime.utcnow().isoformat(), schedule_id)
+        )
+        await db.commit()
 
-        yield f"data: {json.dumps({'done': True, 'published': published, 'failed': failed, 'total_published': total_pub})}\n\n"
-
-    return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return {"done": True, "published": published, "failed": failed, "total_published": total_pub, "results": results}
 
 
 @router.post("/run-daily")
