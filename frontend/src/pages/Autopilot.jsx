@@ -24,6 +24,8 @@ export default function Autopilot() {
   const [runLog, setRunLog] = useState({})
   const [running, setRunning] = useState({})
   const [generatingMap, setGeneratingMap] = useState({})
+  const [syncingCats, setSyncingCats] = useState({})
+  const [catResults, setCatResults] = useState({})
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -145,6 +147,21 @@ export default function Autopilot() {
           } catch {}
         }
       }
+    }
+  }
+
+  const syncCategories = async (sched) => {
+    const id = sched.id
+    setSyncingCats(s => ({ ...s, [id]: true }))
+    setCatResults(r => ({ ...r, [id]: null }))
+    try {
+      const res = await api.post(`/api/autopilot/schedules/${id}/sync-categories`)
+      setCatResults(r => ({ ...r, [id]: res.data }))
+      setTimeout(() => setCatResults(r => ({ ...r, [id]: null })), 8000)
+    } catch (e) {
+      setCatResults(r => ({ ...r, [id]: { error: e.response?.data?.detail || e.message } }))
+    } finally {
+      setSyncingCats(s => ({ ...s, [id]: false }))
     }
   }
 
@@ -351,6 +368,14 @@ export default function Autopilot() {
                       >
                         {generatingMap[sched.id] ? '...' : '↻ Mapa'}
                       </button>
+                      <button
+                        onClick={() => syncCategories(sched)}
+                        disabled={syncingCats[sched.id]}
+                        title="Utwórz kategorie WP z klastrów topical map"
+                        className="px-2 py-1.5 text-purple-600 border border-purple-200 rounded-lg text-xs hover:bg-purple-50 disabled:opacity-50"
+                      >
+                        {syncingCats[sched.id] ? '...' : '⚡ Kategorie WP'}
+                      </button>
                     </>
                   )}
                   <button
@@ -367,6 +392,26 @@ export default function Autopilot() {
                   </button>
                 </div>
               </div>
+
+              {/* Category sync result */}
+              {catResults[sched.id] && (
+                <div className={`border-t px-4 py-2 text-xs ${catResults[sched.id].error ? 'bg-red-50 text-red-700' : 'bg-purple-50'}`}>
+                  {catResults[sched.id].error ? (
+                    <span>Błąd: {catResults[sched.id].error}</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <span className="font-medium text-purple-700">
+                        ✓ Zsynchronizowano {catResults[sched.id].synced}/{catResults[sched.id].total} kategorii WP:
+                      </span>
+                      {catResults[sched.id].categories?.map((c, i) => (
+                        <span key={i} className={`px-2 py-0.5 rounded-full text-xs font-medium ${c.ok ? 'bg-purple-100 text-purple-700' : 'bg-red-100 text-red-600'}`}>
+                          {c.ok ? '✓' : '✗'} {c.label} {c.wp_category_id ? `(ID: ${c.wp_category_id})` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Run log */}
               {runLog[sched.id] && runLog[sched.id].length > 0 && (

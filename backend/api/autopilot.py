@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from config import DB_PATH
 from services.topical_map_service import generate_topical_map
 from services.openai_service import generate_article
-from services.wordpress_service import publish_post
+from services.wordpress_service import publish_post, get_or_create_category, get_categories
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
@@ -100,14 +100,29 @@ CREATE TABLE IF NOT EXISTS domain_keywords (
     schedule_id INTEGER NOT NULL REFERENCES domain_schedules(id) ON DELETE CASCADE,
     my_domain_id INTEGER NOT NULL,
     keyword TEXT NOT NULL,
-    keyword_type TEXT DEFAULT 'supporting',  -- 'pillar' | 'supporting'
+    keyword_type TEXT DEFAULT 'supporting',
     pillar_label TEXT DEFAULT '',
+    pillar_anchor TEXT DEFAULT '',
     search_volume INTEGER DEFAULT 0,
     keyword_difficulty REAL DEFAULT 0,
-    status TEXT DEFAULT 'pending',  -- 'pending' | 'published' | 'failed'
+    status TEXT DEFAULT 'pending',
     wp_post_url TEXT DEFAULT '',
+    wp_category_id INTEGER DEFAULT NULL,
     published_at TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS domain_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER NOT NULL REFERENCES domain_schedules(id) ON DELETE CASCADE,
+    my_domain_id INTEGER NOT NULL,
+    pillar_anchor TEXT NOT NULL,
+    pillar_label TEXT NOT NULL,
+    wp_category_id INTEGER DEFAULT NULL,
+    wp_category_slug TEXT DEFAULT '',
+    synced INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(schedule_id, pillar_anchor)
 );
 """
 
@@ -115,6 +130,15 @@ CREATE TABLE IF NOT EXISTS domain_keywords (
 async def ensure_tables():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(CREATE_TABLES)
+        # Migracje — dodaj kolumny jeśli nie istnieją
+        for col, typedef in [
+            ("wp_category_id", "INTEGER DEFAULT NULL"),
+            ("pillar_anchor", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE domain_keywords ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -268,15 +292,26 @@ async def generate_map_for_schedule(schedule_id: int):
             existing_kws = {row[0] for row in await cur.fetchall()}
 
         for pillar in tmap.get("pillars", []):
+            anchor = pillar["anchor"]
+            label = pillar["label"]
+
+            # Zapisz klaster do domain_categories (jeśli nie istnieje)
+            await db.execute(
+                """INSERT OR IGNORE INTO domain_categories
+                   (schedule_id, my_domain_id, pillar_anchor, pillar_label)
+                   VALUES (?,?,?,?)""",
+                (schedule_id, sched["my_domain_id"], anchor, label)
+            )
+
             # Pillar keyword
             pk = pillar["pillar_keyword"]
             if pk and pk not in existing_kws:
                 await db.execute(
                     """INSERT INTO domain_keywords
-                       (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, search_volume, keyword_difficulty)
-                       VALUES (?,?,?,?,?,?,?)""",
+                       (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty)
+                       VALUES (?,?,?,?,?,?,?,?)""",
                     (schedule_id, sched["my_domain_id"], pk, "pillar",
-                     pillar["label"], pillar.get("pillar_volume", 0), pillar.get("pillar_difficulty", 0))
+                     label, anchor, pillar.get("pillar_volume", 0), pillar.get("pillar_difficulty", 0))
                 )
                 existing_kws.add(pk)
                 inserted += 1
@@ -287,10 +322,10 @@ async def generate_map_for_schedule(schedule_id: int):
                 if kw and kw not in existing_kws:
                     await db.execute(
                         """INSERT INTO domain_keywords
-                           (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, search_volume, keyword_difficulty)
-                           VALUES (?,?,?,?,?,?,?)""",
+                           (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty)
+                           VALUES (?,?,?,?,?,?,?,?)""",
                         (schedule_id, sched["my_domain_id"], kw, "supporting",
-                         pillar["label"], sk.get("search_volume", 0), sk.get("keyword_difficulty", 0))
+                         label, anchor, sk.get("search_volume", 0), sk.get("keyword_difficulty", 0))
                     )
                     existing_kws.add(kw)
                     inserted += 1
@@ -312,6 +347,82 @@ async def generate_map_for_schedule(schedule_id: int):
         "total_keywords": total,
         "pillars": len(tmap.get("pillars", [])),
     }
+
+
+@router.get("/schedules/{schedule_id}/categories")
+async def list_categories(schedule_id: int):
+    """Lista klastrów (kategorii WP) dla harmonogramu."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM domain_categories WHERE schedule_id=? ORDER BY id",
+            (schedule_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/schedules/{schedule_id}/sync-categories")
+async def sync_categories(schedule_id: int):
+    """
+    Tworzy kategorie w WordPress dla każdego klastra Topical Map.
+    Jeden klaster = jedna kategoria w menu WP.
+    Zapisuje wp_category_id do domain_categories i aktualizuje domain_keywords.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        sched = await get_schedule(db, schedule_id)
+        if not sched:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Harmonogram nie istnieje")
+
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM domain_categories WHERE schedule_id=?", (schedule_id,)
+        ) as cur:
+            categories = [dict(r) for r in await cur.fetchall()]
+
+    if not categories:
+        return {"synced": 0, "message": "Brak klastrów — najpierw wygeneruj mapę"}
+
+    results = []
+    for cat in categories:
+        label = cat["pillar_label"]
+        anchor = cat["pillar_anchor"]
+
+        # Generuj slug z anchora (ascii, myślniki)
+        import re as _re
+        slug = _re.sub(r"[^a-z0-9]+", "-", anchor.lower()).strip("-")
+
+        cat_id = await get_or_create_category(
+            domain=sched["domain"],
+            wp_login=sched["wp_login"],
+            wp_pass=sched["wp_pass"],
+            name=label,
+            slug=slug,
+        )
+
+        if cat_id:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE domain_categories SET wp_category_id=?, wp_category_slug=?, synced=1 WHERE id=?",
+                    (cat_id, slug, cat["id"])
+                )
+                # Zaktualizuj wszystkie frazy z tego klastra
+                await db.execute(
+                    "UPDATE domain_keywords SET wp_category_id=? WHERE schedule_id=? AND pillar_anchor=?",
+                    (cat_id, schedule_id, anchor)
+                )
+                await db.commit()
+            results.append({"label": label, "slug": slug, "wp_category_id": cat_id, "ok": True})
+            logger.info(f"[Autopilot] Category created/found: '{label}' (ID={cat_id}) on {sched['domain']}")
+        else:
+            results.append({"label": label, "slug": slug, "wp_category_id": None, "ok": False})
+            logger.warning(f"[Autopilot] Failed to create category '{label}' on {sched['domain']}")
+
+    synced = sum(1 for r in results if r["ok"])
+    return {"synced": synced, "total": len(results), "categories": results}
 
 
 @router.post("/schedules/{schedule_id}/run")
@@ -370,12 +481,15 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
                 yield f"data: {json.dumps({'status': 'publishing', 'keyword': keyword, 'title': title})}\n\n"
 
                 # Publikuj na WP
+                category_id = kw_row.get("wp_category_id") or None
+
                 result = await publish_post(
                     domain=sched["domain"],
                     wp_login=sched["wp_login"],
                     wp_pass=sched["wp_pass"],
                     title=title,
                     content=content,
+                    category_id=category_id,
                 )
 
                 if result.get("success"):
@@ -492,6 +606,7 @@ async def run_daily_all():
                     wp_pass=sched["wp_pass"],
                     title=article["title"],
                     content=article["content"],
+                    category_id=kw_row.get("wp_category_id") or None,
                 )
                 if result.get("success"):
                     wp_url = result.get("url", "")

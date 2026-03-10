@@ -1,5 +1,6 @@
 import base64
 import io
+import re
 from typing import Optional
 import httpx
 
@@ -7,6 +8,77 @@ import httpx
 def _auth_header(wp_login: str, wp_pass: str) -> str:
     token = base64.b64encode(f"{wp_login}:{wp_pass}".encode()).decode()
     return f"Basic {token}"
+
+
+def _base_url(domain: str) -> list[str]:
+    if domain.startswith("http"):
+        return [domain.rstrip("/")]
+    return [f"https://{domain}", f"http://{domain}"]
+
+
+async def get_or_create_category(
+    domain: str,
+    wp_login: str,
+    wp_pass: str,
+    name: str,
+    slug: str = "",
+) -> Optional[int]:
+    """
+    Pobiera ID istniejącej kategorii WP lub tworzy nową.
+    Zwraca category_id lub None przy błędzie.
+    """
+    auth = _auth_header(wp_login, wp_pass)
+    headers = {"Authorization": auth, "Content-Type": "application/json"}
+
+    # Generuj slug z nazwy jeśli nie podano
+    if not slug:
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")
+
+    async with httpx.AsyncClient(verify=False, timeout=20) as client:
+        for base in _base_url(domain):
+            try:
+                # Sprawdź czy kategoria już istnieje (po slug)
+                resp = await client.get(
+                    f"{base}/wp-json/wp/v2/categories",
+                    params={"slug": slug, "per_page": 1},
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    existing = resp.json()
+                    if existing:
+                        return existing[0]["id"]
+
+                # Utwórz nową kategorię
+                resp = await client.post(
+                    f"{base}/wp-json/wp/v2/categories",
+                    json={"name": name, "slug": slug},
+                    headers=headers,
+                )
+                if resp.status_code in (200, 201):
+                    return resp.json().get("id")
+            except Exception:
+                continue
+    return None
+
+
+async def get_categories(domain: str, wp_login: str, wp_pass: str) -> list[dict]:
+    """Pobiera listę wszystkich kategorii z WP."""
+    auth = _auth_header(wp_login, wp_pass)
+    headers = {"Authorization": auth}
+    result = []
+    async with httpx.AsyncClient(verify=False, timeout=20) as client:
+        for base in _base_url(domain):
+            try:
+                resp = await client.get(
+                    f"{base}/wp-json/wp/v2/categories",
+                    params={"per_page": 100},
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+            except Exception:
+                continue
+    return result
 
 
 async def _upload_image(
@@ -40,6 +112,7 @@ async def publish_post(
     title: str,
     content: str,
     image_b64: Optional[str] = None,
+    category_id: Optional[int] = None,
 ) -> dict:
     auth = _auth_header(wp_login, wp_pass)
     headers = {
@@ -47,12 +120,7 @@ async def publish_post(
         "Content-Type": "application/json",
     }
 
-    urls_to_try = []
-    if domain.startswith("http"):
-        urls_to_try.append(domain.rstrip("/"))
-    else:
-        urls_to_try.append(f"https://{domain}")
-        urls_to_try.append(f"http://{domain}")
+    urls_to_try = _base_url(domain)
 
     last_error = None
     async with httpx.AsyncClient(verify=False, timeout=30) as client:
@@ -72,6 +140,8 @@ async def publish_post(
                 }
                 if media_id:
                     post_data["featured_media"] = media_id
+                if category_id:
+                    post_data["categories"] = [category_id]
 
                 resp = await client.post(
                     f"{base_url}/wp-json/wp/v2/posts",
