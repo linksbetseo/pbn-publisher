@@ -142,13 +142,14 @@ async def _whois_expiry(domain: str) -> dict:
 
 # ── WP ping ───────────────────────────────────────────────────────────────────
 
-async def _wp_ping(domain: str) -> bool:
+async def _wp_ping(domain: str, http_user: str = "", http_pass: str = "") -> bool:
     base = domain if domain.startswith("http") else f"https://{domain}"
     base = base.rstrip("/")
+    site_auth = (http_user, http_pass) if http_user and http_pass else None
     for url in [f"{base}/wp-json/wp/v2/posts?per_page=1",
                 f"{base.replace('https://', 'http://')}/wp-json/wp/v2/posts?per_page=1"]:
         try:
-            async with httpx.AsyncClient(verify=False, timeout=8) as client:
+            async with httpx.AsyncClient(verify=False, timeout=8, auth=site_auth) as client:
                 resp = await client.get(url)
                 if resp.status_code in (200, 401, 403):
                     return True

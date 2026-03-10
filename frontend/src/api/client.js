@@ -9,6 +9,41 @@ const api = axios.create({
   timeout: 120000,
 })
 
+// Inject saved Basic Auth token on every request
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('pbn_auth_token')
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers['Authorization'] = `Basic ${token}`
+  }
+  return config
+})
+
+// On 401 — clear token and reload to show login
+api.interceptors.response.use(
+  res => res,
+  err => {
+    if (err.response?.status === 401) {
+      localStorage.removeItem('pbn_auth_token')
+      window.dispatchEvent(new Event('pbn_logout'))
+    }
+    return Promise.reject(err)
+  }
+)
+
+export function setAuthCredentials(user, password) {
+  const token = btoa(`${user}:${password}`)
+  localStorage.setItem('pbn_auth_token', token)
+}
+
+export function clearAuthCredentials() {
+  localStorage.removeItem('pbn_auth_token')
+}
+
+export function hasAuthToken() {
+  return !!localStorage.getItem('pbn_auth_token')
+}
+
 export const projects = {
   list: () => api.get('/api/projects'),
   create: (name) => api.post('/api/projects', { name }),

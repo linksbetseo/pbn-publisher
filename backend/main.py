@@ -150,8 +150,9 @@ async def basic_auth_middleware(request: Request, call_next):
     # Skip auth if no password set (local dev)
     if not APP_PASSWORD:
         return await call_next(request)
-    # Skip auth for health check
-    if request.url.path == "/health":
+    # Skip auth for health check and static assets
+    path = request.url.path
+    if path in ("/health", "/") or path.startswith("/assets"):
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
@@ -163,10 +164,12 @@ async def basic_auth_middleware(request: Request, call_next):
                 return await call_next(request)
         except Exception:
             pass
+    # Return 401 WITHOUT WWW-Authenticate to avoid browser popup
+    # Frontend handles redirect to login page
     return Response(
-        content="Unauthorized",
+        content='{"detail":"Unauthorized"}',
         status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="PBN Publisher"'},
+        media_type="application/json",
     )
 
 app.include_router(projects.router)

@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Sidebar from './components/Sidebar'
 import Dashboard from './pages/Dashboard'
@@ -8,8 +9,103 @@ import TopicalMap from './pages/TopicalMap'
 import ContentWriter from './pages/ContentWriter'
 import Autopilot from './pages/Autopilot'
 import DomainHealth from './pages/DomainHealth'
+import { hasAuthToken, setAuthCredentials, clearAuthCredentials } from './api/client'
+import api from './api/client'
+
+function LoginPage({ onLogin }) {
+  const [user, setUser] = useState('')
+  const [pass, setPass] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const submit = async (e) => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+    setAuthCredentials(user, pass)
+    try {
+      await api.get('/api/projects')
+      onLogin()
+    } catch {
+      clearAuthCredentials()
+      setError('Nieprawidłowy login lub hasło')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-8 w-full max-w-sm">
+        <div className="text-center mb-6">
+          <div className="text-3xl mb-2">🚀</div>
+          <h1 className="text-xl font-bold text-gray-900">PBN Publisher</h1>
+          <p className="text-sm text-gray-500 mt-1">Zaloguj się żeby kontynuować</p>
+        </div>
+        <form onSubmit={submit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Login</label>
+            <input
+              type="text" value={user} onChange={e => setUser(e.target.value)}
+              autoFocus required
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Hasło</label>
+            <input
+              type="password" value={pass} onChange={e => setPass(e.target.value)}
+              required
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          {error && <p className="text-red-600 text-xs">{error}</p>}
+          <button type="submit" disabled={loading}
+            className="w-full py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+            {loading ? 'Loguję...' : 'Zaloguj się'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
 
 export default function App() {
+  // If backend has no password set, hasAuthToken() doesn't matter — all requests pass
+  // If backend has APP_PASSWORD, we need a stored token
+  const [authed, setAuthed] = useState(hasAuthToken())
+  const [checking, setChecking] = useState(!hasAuthToken())
+
+  useEffect(() => {
+    // Check if auth is actually needed
+    if (!hasAuthToken()) {
+      api.get('/api/projects').then(() => {
+        // No password required — proceed without login
+        setAuthed(true)
+        setChecking(false)
+      }).catch(() => {
+        // Password required — show login
+        setChecking(false)
+      })
+    }
+
+    const onLogout = () => setAuthed(false)
+    window.addEventListener('pbn_logout', onLogout)
+    return () => window.removeEventListener('pbn_logout', onLogout)
+  }, [])
+
+  if (checking) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+      </div>
+    )
+  }
+
+  if (!authed) {
+    return <LoginPage onLogin={() => setAuthed(true)} />
+  }
+
   return (
     <BrowserRouter>
       <div className="flex h-screen overflow-hidden bg-gray-50">
