@@ -3,15 +3,13 @@ Gemini image generation service.
 Uses gemini-2.0-flash-exp (cheapest option with native image output).
 Returns base64 JPEG string.
 """
-import base64
 import logging
-import os
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from config import GEMINI_API_KEY
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "GEMINI_KEY_REMOVED")
+logger = logging.getLogger(__name__)
 GEMINI_IMAGE_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-2.0-flash-preview-image-generation:generateContent"
@@ -23,6 +21,9 @@ async def generate_image_gemini(prompt: str) -> str:
     Generate an image with Gemini 2.0 Flash.
     Returns base64-encoded JPEG string, or raises on failure.
     """
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY not set")
+
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},

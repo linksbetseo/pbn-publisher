@@ -515,8 +515,6 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
             title = article["title"]
             content = article["content"]
             excerpt = article.get("excerpt", "")
-            if article.get("fingerprint"):
-                domain_fingerprints.add(article["fingerprint"])
 
             category_id = kw_row.get("wp_category_id") or None
 
@@ -662,8 +660,6 @@ async def run_daily_all():
                     domain_fingerprints=domain_fingerprints,
                 )
                 excerpt = article.get("excerpt", "")
-                if article.get("fingerprint"):
-                    domain_fingerprints.add(article["fingerprint"])
 
                 image_b64 = None
                 try:

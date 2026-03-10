@@ -12,6 +12,7 @@ Multi-pass article generation following n8n workflow pattern:
 10. GPT: excerpt (→ WP excerpt/meta description)
 11. Assemble HTML + Schema FAQPage JSON-LD + internal links + anchor dedup
 """
+import asyncio
 import hashlib
 import logging
 import re
@@ -152,16 +153,25 @@ def _markdown_to_html(text: str) -> str:
 
 
 async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000) -> str:
-    response = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    return response.choices[0].message.content.strip()
+    for attempt in range(3):
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if attempt == 2:
+                raise
+            wait = 2 ** attempt
+            logger.warning(f"[GPT] attempt {attempt+1} failed: {e} — retrying in {wait}s")
+            await asyncio.sleep(wait)
+    return ""  # unreachable
 
 
 def _build_faq_schema(faq_html: str, topic: str) -> str:
@@ -241,7 +251,7 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
     for post in published_posts[:5]:
         if injected >= 3:
             break
-        url = post.get("wp_post_url", "")
+        url = post.get("url") or post.get("wp_post_url", "")
         title = post.get("title", "")
         if not url or not title or url in used_urls:
             continue

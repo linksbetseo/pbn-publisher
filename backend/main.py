@@ -99,12 +99,12 @@ async def import_csv_domains(db: aiosqlite.Connection):
 async def _weekly_cron():
     """Run weekly domain health snapshot every Monday at 03:00 UTC."""
     import asyncio as _asyncio
+    from datetime import timedelta
     while True:
         now = datetime.utcnow()
         # Next Monday 03:00 UTC
         days_ahead = (7 - now.weekday()) % 7 or 7
-        next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
-        next_run = next_run.replace(day=now.day + days_ahead)
+        next_run = (now + timedelta(days=days_ahead)).replace(hour=3, minute=0, second=0, microsecond=0)
         wait_sec = max(0, (next_run - now).total_seconds())
         await _asyncio.sleep(wait_sec)
         try:
