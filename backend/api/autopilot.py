@@ -1,0 +1,562 @@
+"""
+PBN Autopilot — automatyczne uzupełnianie treści na domenach PBN.
+
+Przepływ:
+1. Przypisz domenę PBN → seed keyword + ustawienia
+2. Generuj Topical Map (DataForSEO) → lista fraz (pillar + supporting)
+3. Scheduler publikuje X artykułów dziennie na każdej domenie
+   - Pobiera pending keyword z kolejki
+   - Generuje unikalny artykuł (OpenAI)
+   - Publikuje na WP danej domeny
+"""
+import asyncio
+import json
+import logging
+import os
+import random
+from datetime import date, datetime
+from typing import List, Optional
+
+import aiosqlite
+from fastapi import APIRouter, BackgroundTasks
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from config import DB_PATH
+from services.topical_map_service import generate_topical_map
+from services.openai_service import generate_article
+from services.wordpress_service import publish_post
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
+
+DFS_LOGIN = os.getenv("DATAFORSEO_LOGIN", "")
+DFS_PASSWORD = os.getenv("DATAFORSEO_PASSWORD", "")
+
+VARIATION_HINTS = [
+    "praktyczny poradnik krok po kroku",
+    "porównanie dostępnych opcji i rozwiązań",
+    "najczęstsze błędy i jak ich unikać",
+    "perspektywa eksperta branżowego",
+    "korzyści i zastosowania w praktyce",
+    "case study i przykłady z życia",
+    "trendy i nowości w branży",
+    "przewodnik dla początkujących",
+    "zaawansowane techniki i strategie",
+    "najważniejsze fakty i mity",
+    "jak wybrać najlepsze rozwiązanie",
+    "oszczędność czasu i pieniędzy",
+    "bezpieczeństwo i na co uważać",
+]
+
+
+# ── Models ──────────────────────────────────────────────────────────────────
+
+class ScheduleCreate(BaseModel):
+    my_domain_id: int
+    seed_keyword: str
+    posts_per_day: int = 1
+    language: str = "pl"
+    min_volume: int = 10
+    # Opcjonalne linki do klienta wbudowane w artykuły
+    client_domain: str = ""
+    anchor_text: str = ""
+
+
+class ScheduleUpdate(BaseModel):
+    posts_per_day: Optional[int] = None
+    active: Optional[int] = None
+    client_domain: Optional[str] = None
+    anchor_text: Optional[str] = None
+
+
+class RunNowRequest(BaseModel):
+    schedule_id: int
+    limit: Optional[int] = None  # nadpisuje posts_per_day
+
+
+# ── DB helpers ───────────────────────────────────────────────────────────────
+
+CREATE_TABLES = """
+CREATE TABLE IF NOT EXISTS domain_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    my_domain_id INTEGER NOT NULL REFERENCES my_domains(id) ON DELETE CASCADE,
+    seed_keyword TEXT NOT NULL,
+    posts_per_day INTEGER DEFAULT 1,
+    language TEXT DEFAULT 'pl',
+    min_volume INTEGER DEFAULT 10,
+    client_domain TEXT DEFAULT '',
+    anchor_text TEXT DEFAULT '',
+    active INTEGER DEFAULT 1,
+    map_generated INTEGER DEFAULT 0,
+    total_keywords INTEGER DEFAULT 0,
+    published_count INTEGER DEFAULT 0,
+    last_run_at TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS domain_keywords (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER NOT NULL REFERENCES domain_schedules(id) ON DELETE CASCADE,
+    my_domain_id INTEGER NOT NULL,
+    keyword TEXT NOT NULL,
+    keyword_type TEXT DEFAULT 'supporting',  -- 'pillar' | 'supporting'
+    pillar_label TEXT DEFAULT '',
+    search_volume INTEGER DEFAULT 0,
+    keyword_difficulty REAL DEFAULT 0,
+    status TEXT DEFAULT 'pending',  -- 'pending' | 'published' | 'failed'
+    wp_post_url TEXT DEFAULT '',
+    published_at TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+async def ensure_tables():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(CREATE_TABLES)
+        await db.commit()
+
+
+async def get_schedule(db, schedule_id: int) -> Optional[dict]:
+    db.row_factory = aiosqlite.Row
+    async with db.execute(
+        """SELECT s.*, md.domain, md.wp_login, md.wp_pass
+           FROM domain_schedules s
+           JOIN my_domains md ON md.id = s.my_domain_id
+           WHERE s.id = ?""",
+        (schedule_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+
+@router.on_event("startup")
+async def startup():
+    await ensure_tables()
+
+
+@router.get("/schedules")
+async def list_schedules():
+    """Lista wszystkich harmonogramów z domenami."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT s.*, md.domain, md.active as domain_active, md.wp_ok
+               FROM domain_schedules s
+               JOIN my_domains md ON md.id = s.my_domain_id
+               ORDER BY s.created_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/schedules")
+async def create_schedule(body: ScheduleCreate):
+    """Utwórz harmonogram dla domeny PBN."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Sprawdź czy domena istnieje
+        async with db.execute("SELECT id FROM my_domains WHERE id = ?", (body.my_domain_id,)) as cur:
+            if not await cur.fetchone():
+                from fastapi import HTTPException
+                raise HTTPException(404, "Domena nie istnieje")
+        # Sprawdź duplikat
+        async with db.execute(
+            "SELECT id FROM domain_schedules WHERE my_domain_id = ? AND seed_keyword = ?",
+            (body.my_domain_id, body.seed_keyword)
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing:
+            return {"id": existing[0], "message": "Harmonogram już istnieje"}
+
+        cursor = await db.execute(
+            """INSERT INTO domain_schedules
+               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, client_domain, anchor_text)
+               VALUES (?,?,?,?,?,?,?)""",
+            (body.my_domain_id, body.seed_keyword, body.posts_per_day,
+             body.language, body.min_volume, body.client_domain, body.anchor_text)
+        )
+        schedule_id = cursor.lastrowid
+        await db.commit()
+    return {"id": schedule_id, "message": "Harmonogram utworzony. Wygeneruj Topical Map."}
+
+
+@router.patch("/schedules/{schedule_id}")
+async def update_schedule(schedule_id: int, body: ScheduleUpdate):
+    """Aktualizuj ustawienia harmonogramu."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        if body.posts_per_day is not None:
+            await db.execute("UPDATE domain_schedules SET posts_per_day=? WHERE id=?", (body.posts_per_day, schedule_id))
+        if body.active is not None:
+            await db.execute("UPDATE domain_schedules SET active=? WHERE id=?", (body.active, schedule_id))
+        if body.client_domain is not None:
+            await db.execute("UPDATE domain_schedules SET client_domain=? WHERE id=?", (body.client_domain, schedule_id))
+        if body.anchor_text is not None:
+            await db.execute("UPDATE domain_schedules SET anchor_text=? WHERE id=?", (body.anchor_text, schedule_id))
+        await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: int):
+    """Usuń harmonogram i wszystkie słowa kluczowe."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM domain_schedules WHERE id=?", (schedule_id,))
+        await db.commit()
+    return {"deleted": schedule_id}
+
+
+@router.get("/schedules/{schedule_id}/keywords")
+async def list_keywords(schedule_id: int, status: Optional[str] = None):
+    """Lista słów kluczowych dla harmonogramu."""
+    await ensure_tables()
+    cond = "WHERE schedule_id = ?"
+    params = [schedule_id]
+    if status:
+        cond += " AND status = ?"
+        params.append(status)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM domain_keywords {cond} ORDER BY keyword_type DESC, search_volume DESC",
+            params
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/schedules/{schedule_id}/generate-map")
+async def generate_map_for_schedule(schedule_id: int):
+    """
+    Wygeneruj Topical Map dla harmonogramu i zapisz frazy do kolejki.
+    Jeśli mapa już istnieje — dodaje tylko nowe frazy.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        sched = await get_schedule(db, schedule_id)
+    if not sched:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Harmonogram nie istnieje")
+
+    if not DFS_LOGIN or not DFS_PASSWORD:
+        from fastapi import HTTPException
+        raise HTTPException(400, "Brak konfiguracji DataForSEO (DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD)")
+
+    # Generuj mapę
+    tmap = await generate_topical_map(
+        seed=sched["seed_keyword"],
+        location_code=2616 if sched["language"] == "pl" else 2840,
+        language_code=sched["language"],
+        min_volume=sched["min_volume"],
+        max_clusters=8,
+        dfs_login=DFS_LOGIN,
+        dfs_password=DFS_PASSWORD,
+    )
+
+    inserted = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Pobierz istniejące frazy żeby nie duplikować
+        async with db.execute(
+            "SELECT keyword FROM domain_keywords WHERE schedule_id = ?", (schedule_id,)
+        ) as cur:
+            existing_kws = {row[0] for row in await cur.fetchall()}
+
+        for pillar in tmap.get("pillars", []):
+            # Pillar keyword
+            pk = pillar["pillar_keyword"]
+            if pk and pk not in existing_kws:
+                await db.execute(
+                    """INSERT INTO domain_keywords
+                       (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, search_volume, keyword_difficulty)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (schedule_id, sched["my_domain_id"], pk, "pillar",
+                     pillar["label"], pillar.get("pillar_volume", 0), pillar.get("pillar_difficulty", 0))
+                )
+                existing_kws.add(pk)
+                inserted += 1
+
+            # Supporting keywords
+            for sk in pillar.get("supporting_keywords", []):
+                kw = sk["keyword"]
+                if kw and kw not in existing_kws:
+                    await db.execute(
+                        """INSERT INTO domain_keywords
+                           (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, search_volume, keyword_difficulty)
+                           VALUES (?,?,?,?,?,?,?)""",
+                        (schedule_id, sched["my_domain_id"], kw, "supporting",
+                         pillar["label"], sk.get("search_volume", 0), sk.get("keyword_difficulty", 0))
+                    )
+                    existing_kws.add(kw)
+                    inserted += 1
+
+        # Policz łącznie
+        async with db.execute(
+            "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id = ?", (schedule_id,)
+        ) as cur:
+            total = (await cur.fetchone())[0]
+
+        await db.execute(
+            "UPDATE domain_schedules SET map_generated=1, total_keywords=? WHERE id=?",
+            (total, schedule_id)
+        )
+        await db.commit()
+
+    return {
+        "inserted": inserted,
+        "total_keywords": total,
+        "pillars": len(tmap.get("pillars", [])),
+    }
+
+
+@router.post("/schedules/{schedule_id}/run")
+async def run_schedule_now(schedule_id: int, body: RunNowRequest):
+    """
+    Uruchom publikację teraz — generuje i publikuje X artykułów z kolejki.
+    Streamuje wyniki na bieżąco.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        sched = await get_schedule(db, schedule_id)
+    if not sched:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Harmonogram nie istnieje")
+
+    limit = body.limit if body.limit else sched["posts_per_day"]
+
+    async def stream():
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            # Pobierz pending keywords — najpierw pillar, potem supporting
+            async with db.execute(
+                """SELECT * FROM domain_keywords
+                   WHERE schedule_id = ? AND status = 'pending'
+                   ORDER BY keyword_type DESC, search_volume DESC
+                   LIMIT ?""",
+                (schedule_id, limit)
+            ) as cur:
+                keywords = [dict(r) for r in await cur.fetchall()]
+
+        if not keywords:
+            yield f"data: {json.dumps({'done': True, 'message': 'Brak pending keywords', 'published': 0})}\n\n"
+            return
+
+        published = 0
+        failed = 0
+
+        for kw_row in keywords:
+            keyword = kw_row["keyword"]
+            variation = random.choice(VARIATION_HINTS)
+
+            yield f"data: {json.dumps({'status': 'generating', 'keyword': keyword, 'domain': sched['domain']})}\n\n"
+
+            try:
+                # Generuj artykuł
+                article = await generate_article(
+                    topic=keyword,
+                    client_domain=sched["client_domain"] or sched["domain"],
+                    anchor_text=sched["anchor_text"] or keyword,
+                    language=sched["language"],
+                    variation_hint=variation,
+                )
+                title = article["title"]
+                content = article["content"]
+
+                yield f"data: {json.dumps({'status': 'publishing', 'keyword': keyword, 'title': title})}\n\n"
+
+                # Publikuj na WP
+                result = await publish_post(
+                    domain=sched["domain"],
+                    wp_login=sched["wp_login"],
+                    wp_pass=sched["wp_pass"],
+                    title=title,
+                    content=content,
+                )
+
+                if result.get("success"):
+                    wp_url = result.get("url", "")
+                    status = "published"
+                    published += 1
+                    # Zapisz do posts
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
+                               wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
+                            (None, sched["client_domain"] or sched["domain"],
+                             sched["my_domain_id"], title, content, wp_url, "published")
+                        )
+                        await db.execute(
+                            """UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=?
+                               WHERE id=?""",
+                            (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                        )
+                        await db.commit()
+
+                    yield f"data: {json.dumps({'status': 'published', 'keyword': keyword, 'url': wp_url, 'title': title})}\n\n"
+                else:
+                    failed += 1
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],)
+                        )
+                        await db.commit()
+                    yield f"data: {json.dumps({'status': 'failed', 'keyword': keyword, 'error': result.get('error', 'WP error')})}\n\n"
+
+            except Exception as e:
+                failed += 1
+                logger.error(f"Autopilot error for {keyword}: {e}")
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],)
+                    )
+                    await db.commit()
+                yield f"data: {json.dumps({'status': 'failed', 'keyword': keyword, 'error': str(e)})}\n\n"
+
+            await asyncio.sleep(0.1)
+
+        # Aktualizuj licznik opublikowanych i czas
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='published'",
+                (schedule_id,)
+            ) as cur:
+                total_pub = (await cur.fetchone())[0]
+            await db.execute(
+                "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
+                (total_pub, datetime.utcnow().isoformat(), schedule_id)
+            )
+            await db.commit()
+
+        yield f"data: {json.dumps({'done': True, 'published': published, 'failed': failed, 'total_published': total_pub})}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/run-daily")
+async def run_daily_all():
+    """
+    Uruchom dzienny autopilot dla WSZYSTKICH aktywnych harmonogramów.
+    Każdy harmonogram dostaje posts_per_day artykułów.
+    Zwraca podsumowanie (nie streamuje).
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT s.*, md.domain, md.wp_login, md.wp_pass
+               FROM domain_schedules s
+               JOIN my_domains md ON md.id = s.my_domain_id
+               WHERE s.active = 1 AND md.active = 1 AND s.map_generated = 1"""
+        ) as cur:
+            schedules = [dict(r) for r in await cur.fetchall()]
+
+    results = []
+    for sched in schedules:
+        published = 0
+        failed = 0
+        schedule_id = sched["id"]
+        limit = sched["posts_per_day"]
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT * FROM domain_keywords WHERE schedule_id=? AND status='pending'
+                   ORDER BY keyword_type DESC, search_volume DESC LIMIT ?""",
+                (schedule_id, limit)
+            ) as cur:
+                keywords = [dict(r) for r in await cur.fetchall()]
+
+        for kw_row in keywords:
+            keyword = kw_row["keyword"]
+            variation = random.choice(VARIATION_HINTS)
+            try:
+                article = await generate_article(
+                    topic=keyword,
+                    client_domain=sched["client_domain"] or sched["domain"],
+                    anchor_text=sched["anchor_text"] or keyword,
+                    language=sched["language"],
+                    variation_hint=variation,
+                )
+                result = await publish_post(
+                    domain=sched["domain"],
+                    wp_login=sched["wp_login"],
+                    wp_pass=sched["wp_pass"],
+                    title=article["title"],
+                    content=article["content"],
+                )
+                if result.get("success"):
+                    wp_url = result.get("url", "")
+                    published += 1
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
+                               wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
+                            (None, sched["client_domain"] or sched["domain"],
+                             sched["my_domain_id"], article["title"], article["content"], wp_url, "published")
+                        )
+                        await db.execute(
+                            "UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=? WHERE id=?",
+                            (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                        )
+                        await db.commit()
+                else:
+                    failed += 1
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                        await db.commit()
+            except Exception as e:
+                failed += 1
+                logger.error(f"Daily run error domain={sched['domain']} kw={keyword}: {e}")
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='published'", (schedule_id,)
+            ) as cur:
+                total_pub = (await cur.fetchone())[0]
+            await db.execute(
+                "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
+                (total_pub, datetime.utcnow().isoformat(), schedule_id)
+            )
+            await db.commit()
+
+        results.append({
+            "domain": sched["domain"],
+            "schedule_id": schedule_id,
+            "published": published,
+            "failed": failed,
+        })
+
+    return {"schedules_processed": len(results), "results": results}
+
+
+@router.get("/stats")
+async def autopilot_stats():
+    """Globalne statystyki autopilota."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM domain_schedules") as cur:
+            total_schedules = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM domain_schedules WHERE active=1") as cur:
+            active_schedules = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM domain_keywords") as cur:
+            total_keywords = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='pending'") as cur:
+            pending = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='published'") as cur:
+            published = (await cur.fetchone())[0]
+    return {
+        "total_schedules": total_schedules,
+        "active_schedules": active_schedules,
+        "total_keywords": total_keywords,
+        "pending_keywords": pending,
+        "published_keywords": published,
+    }

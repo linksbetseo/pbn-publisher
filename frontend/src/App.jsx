@@ -6,6 +6,7 @@ import Publisher from './pages/Publisher'
 import History from './pages/History'
 import TopicalMap from './pages/TopicalMap'
 import ContentWriter from './pages/ContentWriter'
+import Autopilot from './pages/Autopilot'
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="/history" element={<History />} />
             <Route path="/topical-map" element={<TopicalMap />} />
             <Route path="/content-writer" element={<ContentWriter />} />
+            <Route path="/autopilot" element={<Autopilot />} />
           </Routes>
         </main>
       </div>
