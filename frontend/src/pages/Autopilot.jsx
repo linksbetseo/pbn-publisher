@@ -112,16 +112,6 @@ export default function Autopilot() {
     setRunning(r => ({ ...r, [id]: true }))
     setRunLog(l => ({ ...l, [id]: [] }))
 
-    const limit = limitOverride || sched.posts_per_day
-    const resp = await fetch(`/api/autopilot/schedules/${id}/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': document.cookie.match(/auth=([^;]+)/)?.[1] || '' },
-      body: JSON.stringify({ schedule_id: id, limit }),
-    })
-
-    const reader = resp.body.getReader()
-    const decoder = new TextDecoder()
-
     const appendLog = (entry) => {
       setRunLog(l => ({ ...l, [id]: [...(l[id] || []), entry] }))
       setTimeout(() => {
@@ -130,23 +120,48 @@ export default function Autopilot() {
       }, 50)
     }
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const text = decoder.decode(value)
-      for (const line of text.split('\n')) {
-        if (line.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(line.slice(6))
-            appendLog(data)
-            if (data.done) {
-              setRunning(r => ({ ...r, [id]: false }))
-              await load()
-              if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
-            }
-          } catch {}
+    const limit = limitOverride || sched.posts_per_day
+    try {
+      const resp = await fetch(`/api/autopilot/schedules/${id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ schedule_id: id, limit }),
+      })
+
+      if (!resp.ok) {
+        appendLog({ status: 'failed', keyword: '—', error: `HTTP ${resp.status}: ${await resp.text()}` })
+        setRunning(r => ({ ...r, [id]: false }))
+        return
+      }
+
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() // zachowaj niepełną linię
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              appendLog(data)
+              if (data.done) {
+                await load()
+                if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
+              }
+            } catch {}
+          }
         }
       }
+    } catch (e) {
+      appendLog({ status: 'failed', keyword: '—', error: e.message || 'Błąd połączenia' })
+    } finally {
+      setRunning(r => ({ ...r, [id]: false }))
     }
   }
 
