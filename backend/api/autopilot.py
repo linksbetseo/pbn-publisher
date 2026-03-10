@@ -378,13 +378,35 @@ async def sync_categories(schedule_id: int):
             raise HTTPException(404, "Harmonogram nie istnieje")
 
         db.row_factory = aiosqlite.Row
+
+        # Backfill domain_categories z domain_keywords
+        # Obsługuje stare mapy (pillar_anchor pusty) i nowe (pillar_anchor wypełniony)
+        async with db.execute(
+            """SELECT DISTINCT
+                   COALESCE(NULLIF(pillar_anchor,''), pillar_label) as anchor,
+                   pillar_label
+               FROM domain_keywords
+               WHERE schedule_id=? AND pillar_label != ''""",
+            (schedule_id,)
+        ) as cur:
+            kw_clusters = await cur.fetchall()
+
+        for row in kw_clusters:
+            await db.execute(
+                """INSERT OR IGNORE INTO domain_categories
+                   (schedule_id, my_domain_id, pillar_anchor, pillar_label)
+                   VALUES (?,?,?,?)""",
+                (schedule_id, sched["my_domain_id"], row["anchor"], row["pillar_label"])
+            )
+        await db.commit()
+
         async with db.execute(
             "SELECT * FROM domain_categories WHERE schedule_id=?", (schedule_id,)
         ) as cur:
             categories = [dict(r) for r in await cur.fetchall()]
 
     if not categories:
-        return {"synced": 0, "message": "Brak klastrów — najpierw wygeneruj mapę"}
+        return {"synced": 0, "message": "Brak klastrów — najpierw wygeneruj mapę (↻ Mapa)"}
 
     results = []
     for cat in categories:
