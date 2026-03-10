@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from config import DB_PATH
 from services.topical_map_service import generate_topical_map
 from services.openai_service import generate_article, generate_image
+from services.freepik_service import generate_image_freepik
 from services.wordpress_service import publish_post, get_or_create_category, get_categories
 
 logger = logging.getLogger(__name__)
@@ -497,14 +498,20 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
 
             category_id = kw_row.get("wp_category_id") or None
 
-            # Generuj obrazek featured
+            # Generuj obrazek featured (Freepik FLUX.2 Klein, fallback DALL-E)
             image_b64 = None
             try:
-                image_b64 = await generate_image(
+                image_b64 = await generate_image_freepik(
                     f"Professional illustration for article about: {title}. Clean, modern, no text."
                 )
             except Exception as img_err:
-                logger.warning(f"Image generation failed for '{keyword}': {img_err}")
+                logger.warning(f"Freepik image failed for '{keyword}': {img_err} — trying DALL-E fallback")
+                try:
+                    image_b64 = await generate_image(
+                        f"Professional illustration for article about: {title}. Clean, modern, no text."
+                    )
+                except Exception as img_err2:
+                    logger.warning(f"Image generation failed for '{keyword}': {img_err2}")
 
             result = await publish_post(
                 domain=sched["domain"],
