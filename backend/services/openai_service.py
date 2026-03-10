@@ -37,16 +37,40 @@ def _is_blog_url(url: str) -> bool:
     return not _BLOG_SKIP.search(url)
 
 
+def _count_words(text: str) -> int:
+    return len(re.findall(r'\w+', text))
+
+
+def _keyword_density(text: str, keyword: str) -> float:
+    """Returns keyword density as percentage."""
+    words = _count_words(text)
+    if not words:
+        return 0.0
+    kw_words = keyword.lower().split()
+    text_lower = text.lower()
+    # Count non-overlapping occurrences of the full phrase
+    count = len(re.findall(re.escape(keyword.lower()), text_lower))
+    # Density = (keyword occurrences * keyword word count) / total words
+    return round((count * len(kw_words)) / words * 100, 2)
+
+
 async def _fetch_serp_content(
     topic: str,
     dfs_login: str,
     dfs_password: str,
     location_code: int = 2616,
     language_code: str = "pl",
-) -> str:
-    """Fetch top 3 blog URLs from SERP and parse their content. Returns combined text."""
+) -> dict:
+    """
+    Fetch top 3 blog URLs from SERP, parse content.
+    Returns dict with:
+      - text: combined scraped text
+      - avg_words: average word count of top3 articles
+      - avg_density: average keyword density in top3
+    """
+    empty = {"text": "", "avg_words": 0, "avg_density": 0.0}
     if not dfs_login or not dfs_password:
-        return ""
+        return empty
 
     try:
         from services.dataforseo_service import DataForSEOClient
@@ -57,21 +81,35 @@ async def _fetch_serp_content(
 
         if not blog_urls:
             logger.warning("[SERP] No blog URLs found in SERP results")
-            return ""
+            return empty
 
         logger.info(f"[SERP] Parsing {len(blog_urls)} URLs: {blog_urls}")
 
         parts = []
+        word_counts = []
+        densities = []
         for url in blog_urls:
             content = await dfs.page_content(url)
             if content:
-                parts.append(f"--- {url} ---\n{content[:3000]}")
+                wc = _count_words(content)
+                dens = _keyword_density(content, topic)
+                word_counts.append(wc)
+                densities.append(dens)
+                parts.append(f"--- {url} ({wc} słów, gęstość KW: {dens}%) ---\n{content[:3000]}")
 
-        return "\n\n".join(parts)
+        avg_words = int(sum(word_counts) / len(word_counts)) if word_counts else 0
+        avg_density = round(sum(densities) / len(densities), 2) if densities else 0.0
+
+        logger.info(f"[SERP] avg_words={avg_words}, avg_density={avg_density}%")
+        return {
+            "text": "\n\n".join(parts),
+            "avg_words": avg_words,
+            "avg_density": avg_density,
+        }
 
     except Exception as e:
         logger.warning(f"[SERP] Failed to fetch competitor content: {e}")
-        return ""
+        return empty
 
 
 def _markdown_to_html(text: str) -> str:
@@ -179,8 +217,17 @@ async def generate_article(
 
     # ── STEP 1: Fetch competitor content from SERP ──────────────────────────
     language_code = "pl" if lang_pl else "en"
-    serp_content = await _fetch_serp_content(topic, dfs_login, dfs_password, location_code, language_code)
-    serp_block = f"\n\n[SEO Scraped Info]\n{serp_content}" if serp_content else ""
+    serp_data = await _fetch_serp_content(topic, dfs_login, dfs_password, location_code, language_code)
+    serp_text = serp_data["text"]
+    avg_words = serp_data["avg_words"] or 1200   # fallback target
+    avg_density = serp_data["avg_density"] or 1.5
+    # Target word count: match top10 avg, minimum 800
+    target_words = max(800, avg_words)
+    # Target density: match top10, clamp to 0.5–3.0%
+    target_density = round(max(0.5, min(3.0, avg_density)), 1)
+    serp_block = f"\n\n[SEO Scraped Info — top 3 konkurentów]\n{serp_text}" if serp_text else ""
+
+    logger.info(f"[Article] Target: {target_words} słów, gęstość KW: {target_density}%")
 
     # ── STEP 2: Keyword cluster + search intent ──────────────────────────────
     if lang_pl:
@@ -208,6 +255,9 @@ async def generate_article(
     logger.info(f"[Article] Intent: {intent_analysis[:100]}")
 
     # ── STEP 3: Outline ───────────────────────────────────────────────────────
+    # Estimate number of sections to hit target word count (~200 words per section)
+    n_sections = max(4, min(8, round(target_words / 200)))
+
     if lang_pl:
         outline_system = (
             "Jesteś ekspertem SEO tworzącym struktury artykułów. "
@@ -217,8 +267,8 @@ async def generate_article(
         outline_user = (
             f"Stwórz outline artykułu SEO dla frazy: '{topic}'\n"
             f"Intencja i encje: {intent_analysis}\n"
-            f"Wymagania: 5-7 sekcji H2, każda oddzielona '<<<<', "
-            f"bez wstępu i zakończenia (te będą osobno).\n"
+            f"Wymagania: DOKŁADNIE {n_sections} sekcji H2 (docelowa długość artykułu: {target_words} słów), "
+            f"każda oddzielona '<<<<', bez wstępu i zakończenia (te będą osobno).\n"
             f"Tylko nagłówki H2, bez tekstu.{serp_block}"
         )
     else:
@@ -230,8 +280,8 @@ async def generate_article(
         outline_user = (
             f"Create an SEO article outline for keyword: '{topic}'\n"
             f"Intent and entities: {intent_analysis}\n"
-            f"Requirements: 5-7 H2 sections, each separated by '<<<<', "
-            f"without intro and conclusion (those will be separate).\n"
+            f"Requirements: EXACTLY {n_sections} H2 sections (target article length: {target_words} words), "
+            f"each separated by '<<<<', without intro and conclusion (those will be separate).\n"
             f"Only H2 headings, no body text.{serp_block}"
         )
 
@@ -269,25 +319,37 @@ async def generate_article(
     # ── STEP 5: Intro ─────────────────────────────────────────────────────────
     if lang_pl:
         intro_system = (
-            "Jesteś ekspertem SEO. Piszesz angażujące wstępy do artykułów. "
-            "Wstęp: 2-3 akapity HTML (<p> tagi)."
+            "Jesteś ekspertem SEO. Piszesz wstępy zoptymalizowane pod AI Overview i featured snippets. "
+            "Struktura wstępu: "
+            "1) PIERWSZY akapit = bezpośrednia, konkretna odpowiedź na pytanie/temat (max 2-3 zdania, format odpowiedni dla AI Overview). "
+            "2) Kolejne 2 akapity = rozwinięcie kontekstu i zapowiedź artykułu. "
+            "Używaj tagów HTML <p>."
         )
         intro_user = (
-            f"Napisz wstęp do artykułu '{title}' o temacie '{topic}'.\n"
+            f"Napisz wstęp do artykułu '{title}' o temacie: '{topic}'.\n"
             f"Intencja czytelnika: {intent_analysis}\n"
-            f"Wstęp powinien zahaczać o główne sekcje: {', '.join(sections[:3])}\n"
-            f"Zwróć tylko HTML wstępu (tagi <p>), bez nagłówków."
+            f"Główne sekcje: {', '.join(sections[:3])}\n"
+            f"WAŻNE: Pierwszy akapit musi zawierać BEZPOŚREDNIĄ odpowiedź na '{topic}' "
+            f"— krótko i konkretnie, jak w AI Overview Google.\n"
+            f"Użyj frazy '{topic}' naturalnie {max(1, round(target_words * target_density / 100 * 0.15))} razy we wstępie.\n"
+            f"Zwróć tylko HTML (<p> tagi), bez nagłówków."
         )
     else:
         intro_system = (
-            "You are an SEO expert. You write engaging article introductions. "
-            "Intro: 2-3 HTML paragraphs (<p> tags)."
+            "You are an SEO expert. You write introductions optimized for AI Overview and featured snippets. "
+            "Structure: "
+            "1) FIRST paragraph = direct, concise answer to the topic (max 2-3 sentences, AI Overview format). "
+            "2) Next 2 paragraphs = context and article preview. "
+            "Use HTML <p> tags."
         )
         intro_user = (
-            f"Write an introduction for article '{title}' about '{topic}'.\n"
+            f"Write an introduction for article '{title}' about: '{topic}'.\n"
             f"Reader intent: {intent_analysis}\n"
-            f"Intro should touch on main sections: {', '.join(sections[:3])}\n"
-            f"Return only HTML intro (<p> tags), no headings."
+            f"Main sections: {', '.join(sections[:3])}\n"
+            f"IMPORTANT: First paragraph must contain a DIRECT answer to '{topic}' "
+            f"— brief and concrete, like Google AI Overview format.\n"
+            f"Use '{topic}' naturally {max(1, round(target_words * target_density / 100 * 0.15))} times in the intro.\n"
+            f"Return only HTML (<p> tags), no headings."
         )
 
     intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=600)
@@ -296,16 +358,19 @@ async def generate_article(
     logger.info("[Article] Intro generated")
 
     # ── STEP 6: Write each section ───────────────────────────────────────────
+    words_per_section = max(150, target_words // max(1, len(sections)))
+    kw_per_section = max(1, round(words_per_section * target_density / 100))
+
     if lang_pl:
         section_system = (
             "Jesteś ekspertem SEO. Piszesz sekcje artykułu w HTML. "
-            "Każda sekcja: nagłówek H2 + 3-4 akapity + opcjonalnie lista. "
+            "Każda sekcja: nagłówek H2 + akapity + opcjonalnie lista punktowana. "
             "Zwracaj tylko HTML (h2, p, ul/li). Bez wstępu i zakończenia."
         )
     else:
         section_system = (
             "You are an SEO expert. You write article sections in HTML. "
-            "Each section: H2 heading + 3-4 paragraphs + optionally a list. "
+            "Each section: H2 heading + paragraphs + optionally a bullet list. "
             "Return only HTML (h2, p, ul/li). No intro or conclusion."
         )
 
@@ -313,17 +378,23 @@ async def generate_article(
     for i, section_heading in enumerate(sections):
         if lang_pl:
             section_user = (
-                f"Napisz sekcję artykułu o tytule '{title}' (temat: '{topic}').\n"
-                f"Nagłówek H2 tej sekcji: '{section_heading}'\n"
-                f"Kontekst sekcji ({i+1}/{len(sections)}): {intent_analysis}\n"
-                f"Zwróć HTML: <h2>{section_heading}</h2> + 3-4 akapity <p>."
+                f"Napisz sekcję artykułu '{title}' (główny keyword: '{topic}').\n"
+                f"Nagłówek H2: '{section_heading}'\n"
+                f"Kontekst ({i+1}/{len(sections)}): {intent_analysis}\n"
+                f"Wymagania:\n"
+                f"- Około {words_per_section} słów\n"
+                f"- Użyj frazy '{topic}' około {kw_per_section} raz naturalnie w tekście\n"
+                f"- Zwróć HTML: <h2>{section_heading}</h2> + akapity <p> (+ ewentualnie <ul>/<li>)"
             )
         else:
             section_user = (
-                f"Write a section for article '{title}' (topic: '{topic}').\n"
+                f"Write a section for article '{title}' (main keyword: '{topic}').\n"
                 f"H2 heading: '{section_heading}'\n"
-                f"Section context ({i+1}/{len(sections)}): {intent_analysis}\n"
-                f"Return HTML: <h2>{section_heading}</h2> + 3-4 <p> paragraphs."
+                f"Context ({i+1}/{len(sections)}): {intent_analysis}\n"
+                f"Requirements:\n"
+                f"- About {words_per_section} words\n"
+                f"- Use '{topic}' about {kw_per_section} times naturally\n"
+                f"- Return HTML: <h2>{section_heading}</h2> + <p> paragraphs (+ optional <ul>/<li>)"
             )
 
         section_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=800)
