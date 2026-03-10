@@ -113,6 +113,7 @@ async def publish_post(
     content: str,
     image_b64: Optional[str] = None,
     category_id: Optional[int] = None,
+    excerpt: Optional[str] = None,
 ) -> dict:
     auth = _auth_header(wp_login, wp_pass)
     headers = {
@@ -142,6 +143,8 @@ async def publish_post(
                     post_data["featured_media"] = media_id
                 if category_id:
                     post_data["categories"] = [category_id]
+                if excerpt:
+                    post_data["excerpt"] = excerpt
 
                 resp = await client.post(
                     f"{base_url}/wp-json/wp/v2/posts",

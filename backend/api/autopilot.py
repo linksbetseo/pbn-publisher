@@ -26,6 +26,7 @@ from config import DB_PATH
 from services.topical_map_service import generate_topical_map
 from services.openai_service import generate_article, generate_image
 from services.freepik_service import generate_image_freepik
+from services.gemini_image_service import generate_image_gemini
 from services.wordpress_service import publish_post, get_or_create_category, get_categories
 
 logger = logging.getLogger(__name__)
@@ -481,6 +482,18 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
     failed = 0
     results = []
 
+    # Fetch already-published posts on this domain for internal linking
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT title, wp_post_url FROM domain_keywords
+               WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
+            (schedule_id,)
+        ) as cur:
+            published_posts = [{"title": r["title"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+
+    domain_fingerprints: set = set()
+
     for kw_row in keywords:
         keyword = kw_row["keyword"]
         variation = random.choice(VARIATION_HINTS)
@@ -496,27 +509,39 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
                 dfs_login=DFS_LOGIN,
                 dfs_password=DFS_PASSWORD,
                 location_code=location_code,
+                published_posts=published_posts,
+                domain_fingerprints=domain_fingerprints,
             )
             title = article["title"]
             content = article["content"]
+            excerpt = article.get("excerpt", "")
+            if article.get("fingerprint"):
+                domain_fingerprints.add(article["fingerprint"])
 
             category_id = kw_row.get("wp_category_id") or None
 
-            # Generuj obrazek featured (Freepik FLUX.2 Klein, fallback DALL-E)
+            # Generuj obrazek featured (Gemini → Freepik → DALL-E)
             image_b64 = None
             image_provider = "none"
             try:
-                image_b64 = await generate_image_freepik(keyword)
-                image_provider = "freepik"
+                image_b64 = await generate_image_gemini(
+                    f"Professional photo illustrating article about: {title}. Realistic, clean, no text overlays."
+                )
+                image_provider = "gemini"
             except Exception as img_err:
-                logger.warning(f"Freepik image failed for '{keyword}': {img_err} — trying DALL-E fallback")
+                logger.warning(f"Gemini image failed for '{keyword}': {img_err} — trying Freepik")
                 try:
-                    image_b64 = await generate_image(
-                        f"Professional illustration for article about: {title}. Clean, modern, no text."
-                    )
-                    image_provider = "dalle"
+                    image_b64 = await generate_image_freepik(keyword)
+                    image_provider = "freepik"
                 except Exception as img_err2:
-                    logger.warning(f"Image generation failed for '{keyword}': {img_err2}")
+                    logger.warning(f"Freepik image failed for '{keyword}': {img_err2} — trying DALL-E")
+                    try:
+                        image_b64 = await generate_image(
+                            f"Professional illustration for article about: {title}. Clean, modern, no text."
+                        )
+                        image_provider = "dalle"
+                    except Exception as img_err3:
+                        logger.warning(f"All image providers failed for '{keyword}': {img_err3}")
 
             result = await publish_post(
                 domain=sched["domain"],
@@ -526,11 +551,13 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
                 content=content,
                 image_b64=image_b64,
                 category_id=category_id,
+                excerpt=excerpt,
             )
 
             if result.get("success"):
                 wp_url = result.get("url", "")
                 published += 1
+                published_posts.append({"title": title, "url": wp_url})
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute(
                         """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
@@ -608,6 +635,14 @@ async def run_daily_all():
                 (schedule_id, limit)
             ) as cur:
                 keywords = [dict(r) for r in await cur.fetchall()]
+            async with db.execute(
+                """SELECT title, wp_post_url FROM domain_keywords
+                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
+                (schedule_id,)
+            ) as cur:
+                published_posts = [{"title": r["title"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+
+        domain_fingerprints: set = set()
 
         for kw_row in keywords:
             keyword = kw_row["keyword"]
@@ -623,20 +658,30 @@ async def run_daily_all():
                     dfs_login=DFS_LOGIN,
                     dfs_password=DFS_PASSWORD,
                     location_code=location_code,
+                    published_posts=published_posts,
+                    domain_fingerprints=domain_fingerprints,
                 )
+                excerpt = article.get("excerpt", "")
+                if article.get("fingerprint"):
+                    domain_fingerprints.add(article["fingerprint"])
+
                 image_b64 = None
                 try:
-                    image_b64 = await generate_image_freepik(
-                        f"Professional illustration for article about: {article['title']}. Clean, modern, no text."
+                    image_b64 = await generate_image_gemini(
+                        f"Professional photo illustrating article about: {article['title']}. Realistic, clean, no text overlays."
                     )
                 except Exception as img_err:
-                    logger.warning(f"Freepik image failed for '{keyword}': {img_err} — trying DALL-E fallback")
+                    logger.warning(f"Gemini image failed for '{keyword}': {img_err} — trying Freepik")
                     try:
-                        image_b64 = await generate_image(
-                            f"Professional illustration for article about: {article['title']}. Clean, modern, no text."
-                        )
+                        image_b64 = await generate_image_freepik(keyword)
                     except Exception as img_err2:
-                        logger.warning(f"Image generation failed for '{keyword}': {img_err2}")
+                        logger.warning(f"Freepik image failed for '{keyword}': {img_err2} — trying DALL-E")
+                        try:
+                            image_b64 = await generate_image(
+                                f"Professional illustration for article about: {article['title']}. Clean, modern, no text."
+                            )
+                        except Exception as img_err3:
+                            logger.warning(f"All image providers failed for '{keyword}': {img_err3}")
 
                 result = await publish_post(
                     domain=sched["domain"],
@@ -646,10 +691,12 @@ async def run_daily_all():
                     content=article["content"],
                     image_b64=image_b64,
                     category_id=kw_row.get("wp_category_id") or None,
+                    excerpt=excerpt,
                 )
                 if result.get("success"):
                     wp_url = result.get("url", "")
                     published += 1
+                    published_posts.append({"title": article["title"], "url": wp_url})
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
                             """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
