@@ -520,10 +520,12 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
             # Generuj obrazek featured (Gemini → Freepik → DALL-E)
             image_b64 = None
             image_provider = "none"
+            img_prompt = (
+                f"High-quality professional photo for blog article: '{title}'. "
+                f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
+            )
             try:
-                image_b64 = await generate_image_gemini(
-                    f"Professional photo illustrating article about: {title}. Realistic, clean, no text overlays."
-                )
+                image_b64 = await generate_image_gemini(img_prompt)
                 image_provider = "gemini"
             except Exception as img_err:
                 logger.warning(f"Gemini image failed for '{keyword}': {img_err} — trying Freepik")
@@ -549,6 +551,7 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
                 image_b64=image_b64,
                 category_id=category_id,
                 excerpt=excerpt,
+                keyword=keyword,
             )
 
             if result.get("success"):
@@ -661,10 +664,12 @@ async def run_daily_all():
                 excerpt = article.get("excerpt", "")
 
                 image_b64 = None
+                img_prompt_daily = (
+                    f"High-quality professional photo for blog article: '{article['title']}'. "
+                    f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
+                )
                 try:
-                    image_b64 = await generate_image_gemini(
-                        f"Professional photo illustrating article about: {article['title']}. Realistic, clean, no text overlays."
-                    )
+                    image_b64 = await generate_image_gemini(img_prompt_daily)
                 except Exception as img_err:
                     logger.warning(f"Gemini image failed for '{keyword}': {img_err} — trying Freepik")
                     try:
@@ -687,6 +692,7 @@ async def run_daily_all():
                     image_b64=image_b64,
                     category_id=kw_row.get("wp_category_id") or None,
                     excerpt=excerpt,
+                    keyword=keyword,
                 )
                 if result.get("success"):
                     wp_url = result.get("url", "")

@@ -71,7 +71,7 @@ class DataForSEOClient:
                     for item in result.get("items", []):
                         content = item.get("page_content", "") or ""
                         if content:
-                            return content[:5000]
+                            return content[:8000]
         except Exception as e:
             logger.warning(f"Failed to fetch content for {url}: {e}")
         return ""

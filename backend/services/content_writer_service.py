@@ -136,8 +136,9 @@ Na podstawie powyższej analizy:
 
     if language == "pl":
         system_prompt = (
-            "Jesteś ekspertem SEO i copywriterem. Tworzysz artykuły zoptymalizowane pod AI Overview Google, "
-            "z H1 zawierającym bezpośrednią odpowiedź na zapytanie użytkownika. "
+            "Jesteś ekspertem SEO i copywriterem z doświadczeniem E-E-A-T. "
+            "Tworzysz artykuły zoptymalizowane pod AI Overview Google, "
+            "z H1 zawierającym bezpośrednią odpowiedź i <strong> dla kluczowych terminów. "
             "Zwracaj treść w formacie HTML (tylko body, bez <html>/<body> tagów)."
         )
         user_prompt = f"""Napisz kompletny artykuł SEO na frazę: '{keyword}'.{variation}
@@ -146,13 +147,16 @@ Na podstawie powyższej analizy:
 TON GŁOSU: {tone_instruction}
 
 WYMAGANIA TECHNICZNE SEO:
-1. H1 = BEZPOŚREDNIA ODPOWIEDŹ na zapytanie '{keyword}' (1-2 zdania, zoptymalizowane pod AI Overview/Featured Snippet)
-2. Wstęp rozwijający H1 (150-200 słów)
-3. 6-8 sekcji H2, każda z 2-3 podsekcjami H3
-4. FAQ na końcu (minimum 5 pytań z pełnymi odpowiedziami, format schema-ready)
-5. Podsumowanie (100-150 słów)
-6. Łączna długość: 1500-2500 słów
-7. Użyj frazę '{keyword}' naturalnie (nie upychaj) — cel: 1-2% keyword density
+1. H1 = BEZPOŚREDNIA ODPOWIEDŹ + definicja '{keyword}' (1-2 zdania, format AI Overview/Featured Snippet)
+   Przykład: "<h1><strong>{keyword}</strong> — co to jest i jak działa?</h1>"
+2. Wstęp: pierwszy akapit = definicja z <strong>{keyword}</strong> (AI Overview style)
+3. 6-8 sekcji H2, każda z 1-2 podsekcjami H3
+4. Używaj <strong> dla kluczowych terminów, liczb i ważnych faktów
+5. Mix formatów: <p>, <ul>/<li>, <ol>/<li> — nie same akapity
+6. FAQ na końcu: min 8 pytań (co to, jak, ile, czy, kiedy), format <h3>Pytanie?</h3><p>Odpowiedź.</p>
+7. Podsumowanie z <ul> kluczowych wniosków
+8. Łączna długość: 1800-2500 słów
+9. '{keyword}' naturalnie 1-2% density
 
 LINKOWANIE:
 - Umieść DOKŁADNIE RAZ link do klienta: {main_anchor}
@@ -163,13 +167,14 @@ LINKOWANIE:
 
 Zwróć JSON z polami:
 - "title": tytuł SEO (50-60 znaków, zawiera '{keyword}')
-- "meta_description": meta opis (150-160 znaków, CTA)
+- "meta_description": meta opis (150-160 znaków, CTA na końcu)
 - "content": pełny HTML artykułu
 Tylko JSON, bez markdown."""
     else:
         system_prompt = (
-            "You are an SEO expert and copywriter. Create articles optimized for Google AI Overview, "
-            "with H1 containing a direct answer to the user's query. "
+            "You are an SEO expert and copywriter with E-E-A-T expertise. "
+            "Create articles optimized for Google AI Overview, "
+            "with H1 containing a direct answer and <strong> for key terms. "
             "Return content in HTML format (body only, no <html>/<body> tags)."
         )
         user_prompt = f"""Write a complete SEO article for keyword: '{keyword}'.{variation}
@@ -178,13 +183,15 @@ Tylko JSON, bez markdown."""
 TONE OF VOICE: {tone_instruction}
 
 SEO REQUIREMENTS:
-1. H1 = DIRECT ANSWER to '{keyword}' (1-2 sentences, optimized for AI Overview/Featured Snippet)
-2. Intro expanding on H1 (150-200 words)
-3. 6-8 H2 sections, each with 2-3 H3 subsections
-4. FAQ at the end (min 5 Q&As, schema-ready format)
-5. Conclusion (100-150 words)
-6. Total length: 1500-2500 words
-7. Use '{keyword}' naturally — target 1-2% keyword density
+1. H1 = DIRECT ANSWER + definition of '{keyword}' (1-2 sentences, AI Overview/Featured Snippet format)
+2. Intro: first paragraph = definition with <strong>{keyword}</strong> (AI Overview style)
+3. 6-8 H2 sections, each with 1-2 H3 subsections
+4. Use <strong> for key terms, numbers, and important facts
+5. Mix formats: <p>, <ul>/<li>, <ol>/<li> — not just paragraphs
+6. FAQ at the end: min 8 questions (what is, how, how much, does, when), <h3>Question?</h3><p>Answer.</p>
+7. Summary with <ul> of key takeaways
+8. Total length: 1800-2500 words
+9. '{keyword}' naturally at 1-2% density
 
 LINKS:
 - Place EXACTLY ONCE: {main_anchor}
@@ -195,7 +202,7 @@ LINKS:
 
 Return JSON with:
 - "title": SEO title (50-60 chars, contains '{keyword}')
-- "meta_description": meta description (150-160 chars, with CTA)
+- "meta_description": meta description (150-160 chars, with CTA at the end)
 - "content": full HTML article
 JSON only, no markdown."""
 

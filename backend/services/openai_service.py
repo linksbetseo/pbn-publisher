@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _BLOG_SKIP = re.compile(
     r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|tiktok\.com"
     r"|wikipedia\.org|reddit\.com|pinterest\.com|allegro\.pl|amazon\.|ebay\."
-    r"|olx\.pl|ceneo\.pl|sklepik|sklep|shop|store|kup|buy|cart|koszyk)",
+    r"|olx\.pl|ceneo\.pl|linkedin\.com|quora\.com)",
     re.IGNORECASE,
 )
 
@@ -152,11 +152,11 @@ def _markdown_to_html(text: str) -> str:
     return "\n".join(result)
 
 
-async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000) -> str:
+async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = "gpt-4o-mini") -> str:
     for attempt in range(3):
         try:
             response = await client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=model,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -193,19 +193,32 @@ def _build_faq_schema(faq_html: str, topic: str) -> str:
     return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
 
 
-def _build_article_schema(title: str, topic: str, excerpt: str) -> str:
-    """Build Article JSON-LD schema."""
+def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int = 0) -> str:
+    """Build Article JSON-LD schema with E-E-A-T signals."""
     import json
     from datetime import datetime
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     schema = {
         "@context": "https://schema.org",
         "@type": "Article",
         "headline": title,
         "description": excerpt,
         "keywords": topic,
-        "datePublished": datetime.utcnow().strftime("%Y-%m-%d"),
+        "datePublished": now,
+        "dateModified": now,
         "inLanguage": "pl",
+        "author": {
+            "@type": "Organization",
+            "name": "Redakcja",
+        },
+        "publisher": {
+            "@type": "Organization",
+            "name": "Redakcja",
+        },
+        "mainEntityOfPage": {"@type": "WebPage"},
     }
+    if word_count:
+        schema["wordCount"] = word_count
     return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
 
 
@@ -402,94 +415,131 @@ async def generate_article(
     intro_kw_count = max(1, round(target_words * target_density / 100 * 0.15))
     if lang_pl:
         intro_system = (
-            "Jesteś ekspertem SEO. Piszesz wstępy zoptymalizowane pod AI Overview i featured snippets.\n"
-            "STRUKTURA: 1) Pierwszy akapit = BEZPOŚREDNIA odpowiedź na temat (2-3 zdania, format AI Overview). "
-            "2) Drugi akapit = kontekst i tło. 3) Trzeci akapit = zapowiedź artykułu. Tagi <p>."
+            "Jesteś ekspertem SEO z doświadczeniem E-E-A-T. Piszesz wstępy zoptymalizowane pod AI Overview i featured snippets.\n"
+            "STRUKTURA OBOWIĄZKOWA:\n"
+            "1) Pierwszy akapit = DEFINICJA + BEZPOŚREDNIA odpowiedź (2-3 zdania). "
+            "Zacznij od '<strong>[Keyword]</strong> to...' lub '[Keyword] polega na...'. Format AI Overview.\n"
+            "2) Drugi akapit = dlaczego to ważne, kontekst praktyczny.\n"
+            "3) Trzeci akapit = co czytelnik znajdzie w artykule (zapowiedź sekcji).\n"
+            "Używaj tagów <p> i <strong> dla kluczowych terminów."
         )
         intro_user = (
             f"Napisz wstęp do artykułu '{title}' (keyword: '{topic}').\n"
-            f"Intencja: {intent_analysis}\n"
-            f"Sekcje: {', '.join(sections[:3])}\n"
-            f"PIERWSZY AKAPIT = bezpośrednia odpowiedź na '{topic}' — konkretnie, jak AI Overview.\n"
-            f"Użyj '{topic}' {intro_kw_count}x we wstępie.{lsi_block}\n"
-            f"Tylko HTML <p>, bez nagłówków."
+            f"Intencja wyszukiwania: {intent_analysis}\n"
+            f"Sekcje artykułu: {', '.join(sections[:4])}\n"
+            f"PIERWSZY AKAPIT musi zaczynać się od definicji '{topic}' — konkretna, prosta odpowiedź.\n"
+            f"Użyj '{topic}' {intro_kw_count}x naturalnie.{lsi_block}\n"
+            f"Tylko HTML <p> i <strong>, bez nagłówków. OK do użycia <ul>/<li> jeśli pasuje."
         )
     else:
         intro_system = (
-            "You are an SEO expert writing intros optimized for AI Overview and featured snippets.\n"
-            "STRUCTURE: 1) First paragraph = DIRECT answer (2-3 sentences, AI Overview format). "
-            "2) Second = context. 3) Third = article preview. Use <p> tags."
+            "You are an SEO expert with E-E-A-T signals. Write intros optimized for AI Overview and featured snippets.\n"
+            "MANDATORY STRUCTURE:\n"
+            "1) First paragraph = DEFINITION + DIRECT answer (2-3 sentences). "
+            "Start with '<strong>[Keyword]</strong> is...' format. AI Overview style.\n"
+            "2) Second = why it matters, practical context.\n"
+            "3) Third = what reader will find (section preview).\n"
+            "Use <p> and <strong> for key terms."
         )
         intro_user = (
             f"Write intro for '{title}' (keyword: '{topic}').\n"
-            f"Intent: {intent_analysis}\n"
-            f"Sections: {', '.join(sections[:3])}\n"
-            f"FIRST PARAGRAPH = direct answer to '{topic}' — brief, AI Overview style.\n"
-            f"Use '{topic}' {intro_kw_count}x in intro.{lsi_block}\n"
-            f"Only HTML <p>, no headings."
+            f"Search intent: {intent_analysis}\n"
+            f"Sections: {', '.join(sections[:4])}\n"
+            f"FIRST PARAGRAPH must start with a definition of '{topic}'.\n"
+            f"Use '{topic}' {intro_kw_count}x naturally.{lsi_block}\n"
+            f"Only HTML <p> and <strong>, no headings. OK to use <ul>/<li> if appropriate."
         )
-    intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=600)
+    intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=700)
     if not intro_html.strip().startswith("<"):
         intro_html = _markdown_to_html(intro_html)
     logger.info("[Article] Intro done")
 
-    # ── STEP 6: Sections ─────────────────────────────────────────────────────
-    words_per_section = max(150, target_words // max(1, len(sections)))
+    # ── STEP 6: Sections (parallel) ───────────────────────────────────────────
+    words_per_section = max(180, target_words // max(1, len(sections)))
     kw_per_section = max(1, round(words_per_section * target_density / 100))
+    # Pick 3-4 LSI terms per section (rotate through the list)
+    lsi_per_section = lsi_terms[:15] if lsi_terms else []
 
     if lang_pl:
         section_system = (
-            "Jesteś ekspertem SEO. Piszesz sekcje artykułu w HTML. "
-            "Zwracaj tylko HTML (h2, p, ul/li). Bez wstępu i zakończenia."
+            "Jesteś ekspertem SEO i merytorycznym autorem. Piszesz sekcje artykułu w HTML.\n"
+            "WYMAGANIA:\n"
+            "- Zacznij od <h2>, dodaj 1-2 <h3> pod-sekcje\n"
+            "- Używaj <p>, <ul>/<li> lub <ol>/<li> tam gdzie pasuje\n"
+            "- Dodaj <strong> dla najważniejszych terminów i faktów\n"
+            "- Pisz konkretnie — dane, liczby, przykłady, porady praktyczne\n"
+            "- Bez powtarzania wstępu ani zakończenia artykułu"
         )
     else:
         section_system = (
-            "You are an SEO expert writing article sections in HTML. "
-            "Return only HTML (h2, p, ul/li). No intro or conclusion."
+            "You are an SEO expert and subject matter author. Write article sections in HTML.\n"
+            "REQUIREMENTS:\n"
+            "- Start with <h2>, add 1-2 <h3> subsections\n"
+            "- Use <p>, <ul>/<li> or <ol>/<li> where appropriate\n"
+            "- Add <strong> for key terms and important facts\n"
+            "- Be specific — data, numbers, examples, practical tips\n"
+            "- Don't repeat intro or conclusion"
         )
 
-    sections_html = []
-    for i, heading in enumerate(sections):
+    async def _generate_section(i: int, heading: str) -> str:
+        # Rotate LSI terms so each section gets different ones
+        section_lsi = lsi_per_section[i * 3 % max(1, len(lsi_per_section)):(i * 3 % max(1, len(lsi_per_section))) + 5] if lsi_per_section else []
+        lsi_section_block = f"\nSłowa LSI do wplecenia: {', '.join(section_lsi)}" if section_lsi else ""
         if lang_pl:
             section_user = (
-                f"Napisz sekcję artykułu '{title}' (keyword: '{topic}').\n"
+                f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
                 f"H2: '{heading}'\n"
-                f"Kontekst ({i+1}/{len(sections)}): {intent_analysis}\n"
-                f"- ~{words_per_section} słów\n"
-                f"- Użyj '{topic}' ~{kw_per_section}x naturalnie{lsi_block}\n"
-                f"HTML: <h2>{heading}</h2> + <p> akapity (+ opcjonalnie <ul>/<li>)"
+                f"Intencja: {intent_analysis}\n"
+                f"Cel: ~{words_per_section} słów, użyj '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
+                f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
+                f"Pisz ekspercko: konkretne fakty, liczby, przykłady. Unikaj ogólników."
             )
         else:
             section_user = (
                 f"Write section for '{title}' (keyword: '{topic}').\n"
                 f"H2: '{heading}'\n"
-                f"Context ({i+1}/{len(sections)}): {intent_analysis}\n"
-                f"- ~{words_per_section} words\n"
-                f"- Use '{topic}' ~{kw_per_section}x naturally{lsi_block}\n"
-                f"HTML: <h2>{heading}</h2> + <p> paragraphs (+ optional <ul>/<li>)"
+                f"Intent: {intent_analysis}\n"
+                f"Target: ~{words_per_section} words, use '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
+                f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
+                f"Write expertly: specific facts, numbers, examples. Avoid vague generalities."
             )
-        sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=900)
+        sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=1100)
         if not sec_html.strip().startswith("<"):
             sec_html = _markdown_to_html(sec_html)
-        sections_html.append(sec_html)
         logger.info(f"[Article] Section {i+1}/{len(sections)}: {heading[:40]}")
+        return sec_html
+
+    # Generate all sections in parallel
+    sections_html = list(await asyncio.gather(*[
+        _generate_section(i, heading) for i, heading in enumerate(sections)
+    ]))
 
     # ── STEP 7: Conclusion ────────────────────────────────────────────────────
     if lang_pl:
         conclusion_user = (
-            f"Napisz zakończenie artykułu '{title}' (temat: '{topic}').\n"
-            f"Podsumuj: {', '.join(sections[:4])}\n"
-            f"HTML: <h2>Podsumowanie</h2> + 2-3 <p>."
+            f"Napisz zakończenie artykułu '{title}' (keyword: '{topic}').\n"
+            f"Omówione tematy: {', '.join(sections[:5])}\n"
+            f"STRUKTURA:\n"
+            f"<h2>Podsumowanie</h2>\n"
+            f"- Akapit 1: główne wnioski (bullet points w <ul> lub tekst)\n"
+            f"- Akapit 2: praktyczne zastosowanie / co teraz zrobić\n"
+            f"- Akapit 3 (opcjonalny): CTA lub pytanie do czytelnika\n"
+            f"Użyj '{topic}' 1-2x. Konkretne wnioski, nie ogólniki."
         )
     else:
         conclusion_user = (
-            f"Write conclusion for '{title}' (topic: '{topic}').\n"
-            f"Summarize: {', '.join(sections[:4])}\n"
-            f"HTML: <h2>Summary</h2> + 2-3 <p>."
+            f"Write conclusion for '{title}' (keyword: '{topic}').\n"
+            f"Topics covered: {', '.join(sections[:5])}\n"
+            f"STRUCTURE:\n"
+            f"<h2>Summary</h2>\n"
+            f"- Para 1: key takeaways (bullets in <ul> or prose)\n"
+            f"- Para 2: practical next steps\n"
+            f"- Para 3 (optional): CTA or question for readers\n"
+            f"Use '{topic}' 1-2x. Specific conclusions, not generalities."
         )
     conclusion_html = await _gpt(
         "Jesteś ekspertem SEO." if lang_pl else "You are an SEO expert.",
-        conclusion_user, temperature=0.7, max_tokens=500
+        conclusion_user, temperature=0.7, max_tokens=600
     )
     if not conclusion_html.strip().startswith("<"):
         conclusion_html = _markdown_to_html(conclusion_html)
@@ -497,35 +547,54 @@ async def generate_article(
     # ── STEP 8: FAQ ───────────────────────────────────────────────────────────
     if lang_pl:
         faq_user = (
-            f"Stwórz FAQ dla artykułu o '{topic}'.\n"
-            f"7 pytań i odpowiedzi na temat: {', '.join(sections[:4])}\n"
-            f"Pytania powinny być dokładnie tym co ludzie wpisują w Google.\n"
-            f"HTML: <h2>FAQ — najczęstsze pytania</h2> + pary <h3>Pytanie?</h3><p>Odpowiedź.</p>"
+            f"Stwórz sekcję FAQ dla artykułu o '{topic}'.\n"
+            f"WYMAGANIA:\n"
+            f"- 8 pytań i odpowiedzi\n"
+            f"- Pytania = dokładnie to co ludzie wpisują w Google (long-tail, pytania 'co to', 'jak', 'ile', 'czy')\n"
+            f"- Odpowiedzi: 2-4 zdania, konkretne, bez lania wody\n"
+            f"- Pierwsze pytanie = definicja/wyjaśnienie '{topic}'\n"
+            f"- Mix: pytania informacyjne + praktyczne + porównawcze\n"
+            f"HTML: <h2>Najczęściej zadawane pytania (FAQ)</h2>\n"
+            f"Format każdej pary: <h3>Pytanie?</h3><p>Odpowiedź.</p>"
         )
     else:
         faq_user = (
-            f"Create FAQ for article about '{topic}'.\n"
-            f"7 questions and answers about: {', '.join(sections[:4])}\n"
-            f"Questions should match actual Google searches.\n"
-            f"HTML: <h2>FAQ</h2> + pairs <h3>Question?</h3><p>Answer.</p>"
+            f"Create FAQ section for article about '{topic}'.\n"
+            f"REQUIREMENTS:\n"
+            f"- 8 questions and answers\n"
+            f"- Questions = what people actually search on Google (long-tail, 'what is', 'how to', 'how much', 'does')\n"
+            f"- Answers: 2-4 sentences, specific, no filler\n"
+            f"- First question = definition/explanation of '{topic}'\n"
+            f"- Mix: informational + practical + comparative questions\n"
+            f"HTML: <h2>Frequently Asked Questions (FAQ)</h2>\n"
+            f"Each pair: <h3>Question?</h3><p>Answer.</p>"
         )
     faq_html = await _gpt(
-        "Jesteś ekspertem SEO. Tworzysz FAQ dla featured snippets i AI Overview." if lang_pl
-        else "You are an SEO expert creating FAQ for featured snippets and AI Overview.",
-        faq_user, temperature=0.6, max_tokens=1000
+        "Jesteś ekspertem SEO. Tworzysz FAQ zoptymalizowane pod featured snippets, AI Overview i PAA (People Also Ask)." if lang_pl
+        else "You are an SEO expert creating FAQ optimized for featured snippets, AI Overview, and PAA (People Also Ask).",
+        faq_user, temperature=0.6, max_tokens=1400
     )
     if not faq_html.strip().startswith("<"):
         faq_html = _markdown_to_html(faq_html)
 
     # ── STEP 9: Excerpt ───────────────────────────────────────────────────────
     if lang_pl:
-        excerpt_user = f"Meta description dla artykułu '{title}' o '{topic}'. Max 155 znaków, bez HTML, zawiera keyword."
+        excerpt_user = (
+            f"Napisz meta description dla artykułu '{title}' o '{topic}'.\n"
+            f"WYMAGANIA: max 155 znaków, bez HTML, zawiera '{topic}', kończy się CTA (np. 'Sprawdź', 'Dowiedz się', 'Przeczytaj').\n"
+            f"Tylko tekst meta description, nic więcej."
+        )
     else:
-        excerpt_user = f"Meta description for article '{title}' about '{topic}'. Max 155 chars, no HTML, includes keyword."
+        excerpt_user = (
+            f"Write meta description for '{title}' about '{topic}'.\n"
+            f"REQUIREMENTS: max 155 chars, no HTML, includes '{topic}', ends with CTA (e.g. 'Learn more', 'Find out', 'Read now').\n"
+            f"Only the meta description text, nothing else."
+        )
     excerpt = await _gpt(
         "Jesteś SEO copywriterem." if lang_pl else "You are an SEO copywriter.",
         excerpt_user, temperature=0.5, max_tokens=80
     )
+    excerpt = excerpt.strip('"\'').strip()
     logger.info("[Article] Excerpt done")
 
     # ── STEP 10: Assemble ─────────────────────────────────────────────────────
@@ -559,7 +628,7 @@ async def generate_article(
 
     # Schema markup: FAQPage + Article
     faq_schema = _build_faq_schema(faq_html, topic)
-    article_schema = _build_article_schema(title, topic, excerpt)
+    article_schema = _build_article_schema(title, topic, excerpt, word_count=_count_words(content))
     if faq_schema:
         content += f"\n\n{faq_schema}"
     if article_schema:

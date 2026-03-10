@@ -1,6 +1,6 @@
 import base64
-import io
 import re
+import unicodedata
 from typing import Optional
 import httpx
 
@@ -81,12 +81,21 @@ async def get_categories(domain: str, wp_login: str, wp_pass: str) -> list[dict]
     return result
 
 
+def _keyword_to_slug(keyword: str) -> str:
+    """Convert keyword to SEO-friendly WP slug."""
+    nfkd = unicodedata.normalize("NFKD", keyword.lower())
+    ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_str).strip("-")
+    return slug[:80]
+
+
 async def _upload_image(
     client: httpx.AsyncClient,
     base_url: str,
     auth: str,
     image_b64: str,
     filename: str = "featured.jpg",
+    alt_text: str = "",
 ) -> Optional[int]:
     image_data = base64.b64decode(image_b64)
     headers = {
@@ -101,7 +110,19 @@ async def _upload_image(
         timeout=60,
     )
     if resp.status_code in (200, 201):
-        return resp.json().get("id")
+        media_id = resp.json().get("id")
+        # Set alt text for SEO
+        if media_id and alt_text:
+            try:
+                await client.post(
+                    f"{base_url}/wp-json/wp/v2/media/{media_id}",
+                    json={"alt_text": alt_text},
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        return media_id
     return None
 
 
@@ -114,12 +135,19 @@ async def publish_post(
     image_b64: Optional[str] = None,
     category_id: Optional[int] = None,
     excerpt: Optional[str] = None,
+    keyword: Optional[str] = None,
+    tags: Optional[list] = None,
 ) -> dict:
     auth = _auth_header(wp_login, wp_pass)
     headers = {
         "Authorization": auth,
         "Content-Type": "application/json",
     }
+
+    # SEO slug from keyword
+    slug = _keyword_to_slug(keyword) if keyword else _keyword_to_slug(title)
+    alt_text = keyword or title
+    image_filename = f"{slug[:50]}.jpg" if slug else "featured.jpg"
 
     urls_to_try = _base_url(domain)
 
@@ -130,7 +158,11 @@ async def publish_post(
                 media_id = None
                 if image_b64:
                     try:
-                        media_id = await _upload_image(client, base_url, auth, image_b64)
+                        media_id = await _upload_image(
+                            client, base_url, auth, image_b64,
+                            filename=image_filename,
+                            alt_text=alt_text,
+                        )
                     except Exception as img_err:
                         print(f"Image upload failed for {base_url}: {img_err}")
 
@@ -138,6 +170,7 @@ async def publish_post(
                     "title": title,
                     "content": content,
                     "status": "publish",
+                    "slug": slug,
                 }
                 if media_id:
                     post_data["featured_media"] = media_id
@@ -145,6 +178,11 @@ async def publish_post(
                     post_data["categories"] = [category_id]
                 if excerpt:
                     post_data["excerpt"] = excerpt
+                if tags:
+                    # Get or create tag IDs
+                    tag_ids = await _get_or_create_tags(client, base_url, auth, tags)
+                    if tag_ids:
+                        post_data["tags"] = tag_ids
 
                 resp = await client.post(
                     f"{base_url}/wp-json/wp/v2/posts",
@@ -170,3 +208,37 @@ async def publish_post(
                 continue
 
     return {"success": False, "url": "", "post_id": None, "error": last_error}
+
+
+async def _get_or_create_tags(
+    client: httpx.AsyncClient,
+    base_url: str,
+    auth: str,
+    tag_names: list[str],
+) -> list[int]:
+    """Get or create WP tags, return list of IDs."""
+    ids = []
+    headers = {"Authorization": auth, "Content-Type": "application/json"}
+    for name in tag_names[:5]:
+        slug = _keyword_to_slug(name)
+        try:
+            resp = await client.get(
+                f"{base_url}/wp-json/wp/v2/tags",
+                params={"slug": slug, "per_page": 1},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json():
+                ids.append(resp.json()[0]["id"])
+                continue
+            resp2 = await client.post(
+                f"{base_url}/wp-json/wp/v2/tags",
+                json={"name": name, "slug": slug},
+                headers=headers,
+                timeout=10,
+            )
+            if resp2.status_code in (200, 201):
+                ids.append(resp2.json().get("id"))
+        except Exception:
+            pass
+    return [i for i in ids if i]

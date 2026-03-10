@@ -102,10 +102,13 @@ async def generate_content(body: GenerateRequest):
     )
     image_b64 = None
     image_provider = "none"
+    img_prompt = (
+        f"High-quality professional photo for an article titled '{article['title']}'. "
+        f"Topic: {body.topic}. Realistic scene, natural lighting, no text overlays, no watermarks, "
+        f"16:9 aspect, clean modern aesthetic."
+    )
     try:
-        image_b64 = await generate_image_gemini(
-            f"Professional photo illustrating article about: {article['title']}. Realistic, clean, no text."
-        )
+        image_b64 = await generate_image_gemini(img_prompt)
         image_provider = "gemini"
     except Exception:
         try:
@@ -113,7 +116,7 @@ async def generate_content(body: GenerateRequest):
             image_provider = "freepik"
         except Exception:
             try:
-                image_b64 = await generate_image(f"SEO article illustration for: {body.topic}")
+                image_b64 = await generate_image(f"Professional photo for blog post about: {body.topic}. Clean, no text.")
                 image_provider = "dalle"
             except Exception as e:
                 logger.warning(f"All image providers failed: {e}")
@@ -199,6 +202,7 @@ async def publish_posts(body: PublishRequest):
                 content=content,
                 image_b64=body.image_b64,
                 excerpt=excerpt,
+                keyword=body.topic or None,
             )
             status = "published" if result.get("success") else "failed"
             wp_url = result.get("url", "")
