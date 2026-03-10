@@ -19,13 +19,17 @@ api.interceptors.request.use(config => {
   return config
 })
 
-// On 401 — only logout if we HAD a token (bad credentials, not missing token)
+// On 401 — only logout if we HAD a token AND it's not a background/run request
 api.interceptors.response.use(
   res => res,
   err => {
     if (err.response?.status === 401 && !err.config?._isLoginCheck) {
       const hadToken = !!localStorage.getItem('pbn_auth_token')
-      if (hadToken) {
+      const url = err.config?.url || ''
+      // Never logout from long-running or background endpoints
+      const isBackgroundOp = url.includes('/run') || url.includes('/generate') ||
+        url.includes('/bulk') || url.includes('/topical-map') || url.includes('/content-writer')
+      if (hadToken && !isBackgroundOp) {
         localStorage.removeItem('pbn_auth_token')
         window.dispatchEvent(new Event('pbn_logout'))
       }

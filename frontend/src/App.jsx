@@ -70,25 +70,27 @@ function LoginPage({ onLogin }) {
 }
 
 export default function App() {
-  // If backend has no password set, hasAuthToken() doesn't matter — all requests pass
-  // If backend has APP_PASSWORD, we need a stored token
   const [authed, setAuthed] = useState(hasAuthToken())
+  // Only show spinner on first load when no token exists (need to check if password required)
   const [checking, setChecking] = useState(!hasAuthToken())
 
   useEffect(() => {
-    // Check if auth is actually needed
+    // Only check if auth is needed when there's no token
     if (!hasAuthToken()) {
       api.get('/api/projects').then(() => {
-        // No password required — proceed without login
         setAuthed(true)
         setChecking(false)
       }).catch(() => {
-        // Password required — show login
         setChecking(false)
       })
+    } else {
+      // Already have token — stop checking immediately, no extra request needed
+      setChecking(false)
     }
 
-    const onLogout = () => setAuthed(false)
+    const onLogout = () => {
+      setAuthed(false)
+    }
     window.addEventListener('pbn_logout', onLogout)
     return () => window.removeEventListener('pbn_logout', onLogout)
   }, [])
