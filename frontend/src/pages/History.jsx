@@ -15,6 +15,8 @@ export default function History() {
   const [clientFilter, setClientFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [copied, setCopied] = useState(false)
+  const [indexing, setIndexing] = useState(false)
+  const [indexResult, setIndexResult] = useState(null)
 
   const load = async () => {
     setLoading(true)
@@ -40,6 +42,34 @@ export default function History() {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
+  }
+
+  const submitToIndexer = async () => {
+    const urls = posts.filter(p => p.wp_post_url).map(p => p.wp_post_url)
+    if (urls.length === 0) return
+    setIndexing(true)
+    setIndexResult(null)
+    try {
+      const resp = await fetch(
+        'https://rocketindexer.com/api/index.php?token=544c8414cbd899cabf4816fd0800438c583b42377fff7faca8958ebbc54a88aa&endpoint=submit',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls }),
+        }
+      )
+      const data = await resp.json()
+      if (data.success) {
+        setIndexResult({ ok: true, msg: `Wysłano ${data.data?.submitted ?? urls.length} URL-i. Pozostałe kredyty: ${data.data?.credits_remaining ?? '?'}` })
+      } else {
+        setIndexResult({ ok: false, msg: data.message || 'Błąd API' })
+      }
+    } catch (e) {
+      setIndexResult({ ok: false, msg: 'Błąd połączenia z indexerem' })
+    } finally {
+      setIndexing(false)
+      setTimeout(() => setIndexResult(null), 5000)
+    }
   }
 
   const formatDate = (str) => {
@@ -106,6 +136,22 @@ export default function History() {
         >
           {copied ? 'Skopiowano!' : `Kopiuj URL-e (${posts.filter(p => p.wp_post_url).length})`}
         </button>
+        <button
+          onClick={submitToIndexer}
+          disabled={indexing || posts.filter(p => p.wp_post_url).length === 0}
+          className="px-4 py-2 bg-orange-500 text-white rounded-lg text-sm hover:bg-orange-600 disabled:opacity-40 flex items-center gap-2"
+        >
+          {indexing ? (
+            <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Wysyłanie...</>
+          ) : (
+            `Prześlij do indexera (${posts.filter(p => p.wp_post_url).length})`
+          )}
+        </button>
+        {indexResult && (
+          <span className={`px-3 py-2 rounded-lg text-sm font-medium ${indexResult.ok ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+            {indexResult.msg}
+          </span>
+        )}
       </div>
 
       {/* Table */}
