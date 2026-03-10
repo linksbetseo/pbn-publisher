@@ -417,7 +417,7 @@ export default function Autopilot() {
                         {entry.done
                           ? `✓ Gotowe: ${entry.published} opublikowanych, ${entry.failed} błędów`
                           : entry.status === 'published'
-                          ? `✓ ${entry.keyword} → ${entry.url}`
+                          ? `✓ ${entry.keyword} → ${entry.url} [img: ${entry.image || '?'}]`
                           : entry.status === 'failed'
                           ? `✗ ${entry.keyword}: ${entry.error}`
                           : entry.status === 'generating'

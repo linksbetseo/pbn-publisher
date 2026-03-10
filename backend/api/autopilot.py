@@ -500,16 +500,19 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
 
             # Generuj obrazek featured (Freepik FLUX.2 Klein, fallback DALL-E)
             image_b64 = None
+            image_provider = "none"
             try:
                 image_b64 = await generate_image_freepik(
                     f"Professional illustration for article about: {title}. Clean, modern, no text."
                 )
+                image_provider = "freepik"
             except Exception as img_err:
                 logger.warning(f"Freepik image failed for '{keyword}': {img_err} — trying DALL-E fallback")
                 try:
                     image_b64 = await generate_image(
                         f"Professional illustration for article about: {title}. Clean, modern, no text."
                     )
+                    image_provider = "dalle"
                 except Exception as img_err2:
                     logger.warning(f"Image generation failed for '{keyword}': {img_err2}")
 
@@ -539,7 +542,7 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
                         (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
                     )
                     await db.commit()
-                results.append({"status": "published", "keyword": keyword, "url": wp_url, "title": title})
+                results.append({"status": "published", "keyword": keyword, "url": wp_url, "title": title, "image": image_provider})
             else:
                 failed += 1
                 async with aiosqlite.connect(DB_PATH) as db:
