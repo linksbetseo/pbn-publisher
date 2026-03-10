@@ -26,7 +26,7 @@ from services.topical_map_service import generate_topical_map
 from services.openai_service import generate_article, generate_image
 from services.freepik_service import generate_image_freepik
 from services.gemini_image_service import generate_image_gemini
-from services.wordpress_service import publish_post, get_or_create_category, get_categories
+from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
@@ -477,6 +477,12 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
     if not keywords:
         return {"done": True, "message": "Brak pending keywords", "published": 0, "failed": 0, "results": []}
 
+    # Pre-check WP credentials before burning tokens on generation
+    wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"])
+    if not wp_ok:
+        logger.warning(f"[Autopilot] WP credentials invalid for {sched['domain']} — aborting")
+        return {"done": False, "error": f"WP credentials invalid for {sched['domain']}", "published": 0, "failed": 0, "results": []}
+
     published = 0
     failed = 0
     results = []
@@ -626,6 +632,13 @@ async def run_daily_all():
         failed = 0
         schedule_id = sched["id"]
         limit = sched["posts_per_day"]
+
+        # Pre-check WP credentials
+        wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"])
+        if not wp_ok:
+            logger.warning(f"[Daily] WP credentials invalid for {sched['domain']} — skipping")
+            results.append({"domain": sched["domain"], "schedule_id": schedule_id, "published": 0, "failed": 0, "skipped": True, "reason": "WP credentials invalid"})
+            continue
 
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row

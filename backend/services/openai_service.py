@@ -22,8 +22,14 @@ from openai import AsyncOpenAI
 
 from config import OPENAI_API_KEY
 
+import time
+
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 logger = logging.getLogger(__name__)
+
+# In-memory SERP cache: key=(topic,location,lang) → (timestamp, data)
+_SERP_CACHE: dict = {}
+_SERP_CACHE_TTL = 86400  # 24 hours
 
 _BLOG_SKIP = re.compile(
     r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|tiktok\.com"
@@ -82,25 +88,37 @@ async def _fetch_serp_content(
     language_code: str = "pl",
 ) -> dict:
     """
-    Fetch top 3 blog URLs from SERP, parse content.
-    Returns: text, avg_words, avg_density, lsi_terms
+    Fetch top 3 blog URLs from SERP, parse content + PAA questions.
+    Returns: text, avg_words, avg_density, lsi_terms, paa_questions
+    Cached 24h per (topic, location, language).
     """
-    empty = {"text": "", "avg_words": 0, "avg_density": 0.0, "lsi_terms": []}
+    empty = {"text": "", "avg_words": 0, "avg_density": 0.0, "lsi_terms": [], "paa_questions": []}
     if not dfs_login or not dfs_password:
         return empty
+
+    cache_key = (topic.lower().strip(), location_code, language_code)
+    now = time.time()
+    if cache_key in _SERP_CACHE:
+        ts, cached = _SERP_CACHE[cache_key]
+        if now - ts < _SERP_CACHE_TTL:
+            logger.info(f"[SERP] Cache hit for '{topic}'")
+            return cached
 
     try:
         from services.dataforseo_service import DataForSEOClient
         dfs = DataForSEOClient(dfs_login, dfs_password)
 
-        serp = await dfs.serp_top10(topic, location_code, language_code)
+        serp_raw = await dfs.serp_top10_full(topic, location_code, language_code)
+        serp = serp_raw.get("organic", [])
+        paa_questions = serp_raw.get("paa", [])
+
         blog_urls = [r["url"] for r in serp if r.get("url") and _is_blog_url(r["url"])][:3]
 
         if not blog_urls:
             logger.warning("[SERP] No blog URLs found")
             return empty
 
-        logger.info(f"[SERP] Parsing {len(blog_urls)} URLs: {blog_urls}")
+        logger.info(f"[SERP] Parsing {len(blog_urls)} URLs, PAA={len(paa_questions)}")
 
         parts = []
         word_counts = []
@@ -120,13 +138,16 @@ async def _fetch_serp_content(
         avg_density = round(sum(densities) / len(densities), 2) if densities else 0.0
         lsi_terms = _extract_lsi(all_text, topic, top_n=20)
 
-        logger.info(f"[SERP] avg_words={avg_words}, avg_density={avg_density}%, LSI={lsi_terms[:8]}")
-        return {
+        logger.info(f"[SERP] avg_words={avg_words}, avg_density={avg_density}%, LSI={lsi_terms[:8]}, PAA={paa_questions[:3]}")
+        result = {
             "text": "\n\n".join(parts),
             "avg_words": avg_words,
             "avg_density": avg_density,
             "lsi_terms": lsi_terms,
+            "paa_questions": paa_questions[:8],
         }
+        _SERP_CACHE[cache_key] = (now, result)
+        return result
 
     except Exception as e:
         logger.warning(f"[SERP] Failed: {e}")
@@ -134,6 +155,20 @@ async def _fetch_serp_content(
 
 
 def _markdown_to_html(text: str) -> str:
+    # Convert markdown tables to HTML
+    def _convert_table(m: re.Match) -> str:
+        rows = [r.strip() for r in m.group(0).strip().split("\n") if r.strip()]
+        html = "<table>\n"
+        for i, row in enumerate(rows):
+            if re.match(r"^[\s|:-]+$", row):
+                continue  # skip separator row
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            tag = "th" if i == 0 else "td"
+            html += "<tr>" + "".join(f"<{tag}>{c}</{tag}>" for c in cells) + "</tr>\n"
+        html += "</table>"
+        return html
+
+    text = re.sub(r"(\|.+\|\n)+", _convert_table, text)
     text = re.sub(r"^### (.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
     text = re.sub(r"^## (.+)$", r"<h2>\1</h2>", text, flags=re.MULTILINE)
     text = re.sub(r"^# (.+)$", r"<h1>\1</h1>", text, flags=re.MULTILINE)
@@ -282,7 +317,7 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
                 best_score = overlap
                 best_para = para
 
-        if best_para and best_score > 0:
+        if best_para and best_score >= 2:
             # Use first 4-5 words of title as anchor text
             anchor_words = title.split()[:5]
             anchor_text = " ".join(anchor_words)
@@ -336,6 +371,7 @@ async def generate_article(
     avg_words = serp_data["avg_words"] or 1200
     avg_density = serp_data["avg_density"] or 1.5
     lsi_terms = serp_data["lsi_terms"]
+    paa_questions = serp_data.get("paa_questions", [])
 
     target_words = max(800, avg_words)
     target_density = round(max(0.5, min(3.0, avg_density)), 1)
@@ -395,14 +431,28 @@ async def generate_article(
     if lang_pl:
         title_user = (
             f"Wymyśl unikalny tytuł SEO dla frazy: '{topic}'\n"
-            f"Sekcje: {', '.join(sections[:3])}\n"
-            f"Tytuł inny niż fraza, może być pytaniem lub poradnikiem. Tylko tytuł, bez cudzysłowów."
+            f"Sekcje artykułu: {', '.join(sections[:3])}\n"
+            f"ZASADY: 50-60 znaków, zawiera '{topic}', przyciąga uwagę.\n"
+            f"Użyj jednego z formatów:\n"
+            f"- '[Keyword] — kompletny przewodnik [rok]'\n"
+            f"- 'Jak [działanie związane z keyword]? [X] kroków'\n"
+            f"- 'Co to jest [keyword] i jak [korzyść]?'\n"
+            f"- '[X] najważniejszych faktów o [keyword]'\n"
+            f"- '[Keyword]: wszystko co musisz wiedzieć'\n"
+            f"Tylko tytuł, bez cudzysłowów, bez markdown."
         )
     else:
         title_user = (
             f"Create unique SEO title for: '{topic}'\n"
-            f"Sections: {', '.join(sections[:3])}\n"
-            f"Different from keyword, can be a question or guide. Only title, no quotes."
+            f"Article sections: {', '.join(sections[:3])}\n"
+            f"RULES: 50-60 characters, contains '{topic}', attention-grabbing.\n"
+            f"Use one of these formats:\n"
+            f"- '[Keyword] — Complete Guide [year]'\n"
+            f"- 'How to [action related to keyword]? [X] Steps'\n"
+            f"- 'What is [keyword] and how does it [benefit]?'\n"
+            f"- '[X] Key Facts About [keyword]'\n"
+            f"- '[Keyword]: Everything You Need to Know'\n"
+            f"Only the title, no quotes, no markdown."
         )
     title = await _gpt(
         "Jesteś copywriterem SEO." if lang_pl else "You are an SEO copywriter.",
@@ -545,15 +595,21 @@ async def generate_article(
         conclusion_html = _markdown_to_html(conclusion_html)
 
     # ── STEP 8: FAQ ───────────────────────────────────────────────────────────
+    paa_block = ""
+    if paa_questions:
+        paa_block = "\nPytania z Google PAA (użyj tych jako baza):\n" + "\n".join(f"- {q}" for q in paa_questions[:6])
+    paa_block_en = ""
+    if paa_questions:
+        paa_block_en = "\nReal Google PAA questions (use as base):\n" + "\n".join(f"- {q}" for q in paa_questions[:6])
+
     if lang_pl:
         faq_user = (
             f"Stwórz sekcję FAQ dla artykułu o '{topic}'.\n"
             f"WYMAGANIA:\n"
             f"- 8 pytań i odpowiedzi\n"
-            f"- Pytania = dokładnie to co ludzie wpisują w Google (long-tail, pytania 'co to', 'jak', 'ile', 'czy')\n"
-            f"- Odpowiedzi: 2-4 zdania, konkretne, bez lania wody\n"
             f"- Pierwsze pytanie = definicja/wyjaśnienie '{topic}'\n"
-            f"- Mix: pytania informacyjne + praktyczne + porównawcze\n"
+            f"- Odpowiedzi: 2-4 zdania, konkretne, bez lania wody\n"
+            f"- Mix: pytania informacyjne + praktyczne + porównawcze{paa_block}\n"
             f"HTML: <h2>Najczęściej zadawane pytania (FAQ)</h2>\n"
             f"Format każdej pary: <h3>Pytanie?</h3><p>Odpowiedź.</p>"
         )
@@ -562,10 +618,9 @@ async def generate_article(
             f"Create FAQ section for article about '{topic}'.\n"
             f"REQUIREMENTS:\n"
             f"- 8 questions and answers\n"
-            f"- Questions = what people actually search on Google (long-tail, 'what is', 'how to', 'how much', 'does')\n"
-            f"- Answers: 2-4 sentences, specific, no filler\n"
             f"- First question = definition/explanation of '{topic}'\n"
-            f"- Mix: informational + practical + comparative questions\n"
+            f"- Answers: 2-4 sentences, specific, no filler\n"
+            f"- Mix: informational + practical + comparative questions{paa_block_en}\n"
             f"HTML: <h2>Frequently Asked Questions (FAQ)</h2>\n"
             f"Each pair: <h3>Question?</h3><p>Answer.</p>"
         )

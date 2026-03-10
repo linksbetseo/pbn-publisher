@@ -183,6 +183,14 @@ async def publish_post(
                     tag_ids = await _get_or_create_tags(client, base_url, auth, tags)
                     if tag_ids:
                         post_data["tags"] = tag_ids
+                # Yoast SEO meta (works if Yoast plugin is installed)
+                if excerpt:
+                    post_data["meta"] = {
+                        "_yoast_wpseo_metadesc": excerpt,
+                        "_yoast_wpseo_title": title,
+                        "rank_math_description": excerpt,
+                        "rank_math_title": title,
+                    }
 
                 resp = await client.post(
                     f"{base_url}/wp-json/wp/v2/posts",
@@ -242,3 +250,20 @@ async def _get_or_create_tags(
         except Exception:
             pass
     return [i for i in ids if i]
+
+
+async def check_wp_credentials(domain: str, wp_login: str, wp_pass: str) -> bool:
+    """Quick WP REST API credentials check. Returns True if valid."""
+    auth = _auth_header(wp_login, wp_pass)
+    async with httpx.AsyncClient(verify=False, timeout=10) as client:
+        for base in _base_url(domain):
+            try:
+                resp = await client.get(
+                    f"{base}/wp-json/wp/v2/users/me",
+                    headers={"Authorization": auth},
+                )
+                if resp.status_code == 200:
+                    return True
+            except Exception:
+                continue
+    return False

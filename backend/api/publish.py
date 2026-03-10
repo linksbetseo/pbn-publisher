@@ -64,6 +64,7 @@ class GenerateRequest(BaseModel):
     anchor_text3: str = ""
     anchor_url3: str = ""
     custom_prompt: str = ""
+    variation_hint: str = ""
 
 
 class RegenerateImageRequest(BaseModel):
@@ -97,6 +98,7 @@ async def generate_content(body: GenerateRequest):
         anchor_text2=body.anchor_text2, anchor_url2=body.anchor_url2,
         anchor_text3=body.anchor_text3, anchor_url3=body.anchor_url3,
         custom_prompt=body.custom_prompt,
+        variation_hint=body.variation_hint,
         dfs_login=DFS_LOGIN,
         dfs_password=DFS_PASSWORD,
     )

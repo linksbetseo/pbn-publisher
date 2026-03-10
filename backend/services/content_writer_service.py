@@ -228,6 +228,10 @@ JSON only, no markdown."""
     raw = response.choices[0].message.content
     data = json.loads(raw)
     content = data.get("content", "")
+    title_out = data.get("title", keyword)
+    # Ensure H1 exists — many WP themes don't add it automatically
+    if content and not re.search(r"<h1", content, re.IGNORECASE):
+        content = f"<h1>{title_out}</h1>\n\n" + content
 
     # Deduplicate links
     seen_hrefs = set()

@@ -104,6 +104,37 @@ class DataForSEOClient:
                         })
         return keywords
 
+    async def serp_top10_full(self, keyword: str, location_code: int = 2616, language_code: str = "pl") -> dict:
+        """Fetch SERP with both organic results and PAA (People Also Ask) questions."""
+        data = await self.request(
+            "serp/google/organic/live/advanced",
+            [{
+                "keyword": keyword,
+                "location_code": location_code,
+                "language_code": language_code,
+                "device": "desktop",
+                "depth": 10,
+            }]
+        )
+        organic = []
+        paa = []
+        for task in data.get("tasks", []):
+            for result in task.get("result", []):
+                for item in result.get("items", []):
+                    if item.get("type") == "organic":
+                        organic.append({
+                            "rank": item.get("rank_absolute"),
+                            "url": item.get("url"),
+                            "title": item.get("title"),
+                            "description": item.get("description", ""),
+                        })
+                    elif item.get("type") == "people_also_ask":
+                        for paa_item in item.get("items", []):
+                            q = paa_item.get("title") or paa_item.get("question", "")
+                            if q:
+                                paa.append(q)
+        return {"organic": organic[:10], "paa": list(dict.fromkeys(paa))[:8]}
+
     async def keyword_ideas(self, seed: str, location_code: int = 2616, language_code: str = "pl", limit: int = 200) -> list[dict]:
         """Get keyword ideas from DataForSEO."""
         data = await self.request(
