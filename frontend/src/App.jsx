@@ -7,6 +7,7 @@ import History from './pages/History'
 import TopicalMap from './pages/TopicalMap'
 import ContentWriter from './pages/ContentWriter'
 import Autopilot from './pages/Autopilot'
+import DomainHealth from './pages/DomainHealth'
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
             <Route path="/topical-map" element={<TopicalMap />} />
             <Route path="/content-writer" element={<ContentWriter />} />
             <Route path="/autopilot" element={<Autopilot />} />
+            <Route path="/domain-health" element={<DomainHealth />} />
           </Routes>
         </main>
       </div>
