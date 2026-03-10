@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { history as historyApi, clients as clientsApi } from '../api/client'
 
 const STATUS_COLORS = {
@@ -9,6 +9,8 @@ const STATUS_COLORS = {
 
 export default function History() {
   const [posts, setPosts] = useState([])
+  const [total, setTotal] = useState(0)
+  const [offset, setOffset] = useState(0)
   const [clients, setClients] = useState([])
   const [stats, setStats] = useState({})
   const [loading, setLoading] = useState(true)
@@ -17,10 +19,11 @@ export default function History() {
   const [copied, setCopied] = useState(false)
   const [indexing, setIndexing] = useState(false)
   const [indexResult, setIndexResult] = useState(null)
+  const LIMIT = 100
 
-  const load = async () => {
+  const load = useCallback(async (newOffset = 0) => {
     setLoading(true)
-    const params = {}
+    const params = { limit: LIMIT, offset: newOffset }
     if (clientFilter) params.client_id = clientFilter
     if (statusFilter) params.status = statusFilter
     const [postsRes, statsRes, clientsRes] = await Promise.all([
@@ -28,13 +31,21 @@ export default function History() {
       historyApi.stats(),
       clientsApi.list(),
     ])
-    setPosts(postsRes.data)
+    setPosts(postsRes.data.posts || [])
+    setTotal(postsRes.data.total || 0)
+    setOffset(newOffset)
     setStats(statsRes.data)
     setClients(clientsRes.data)
     setLoading(false)
-  }
+  }, [clientFilter, statusFilter])
 
-  useEffect(() => { load() }, [clientFilter, statusFilter])
+  useEffect(() => { load(0) }, [clientFilter, statusFilter])
+
+  const deletePost = async (id) => {
+    if (!confirm('Usunąć ten wpis z historii?')) return
+    await historyApi.delete(id)
+    await load(offset)
+  }
 
   const copyAllUrls = () => {
     const urls = posts.filter(p => p.wp_post_url).map(p => p.wp_post_url).join('\n')
@@ -124,7 +135,7 @@ export default function History() {
           <option value="pending">Oczekujące</option>
         </select>
         <button
-          onClick={load}
+          onClick={() => load(offset)}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
         >
           Odśwież
@@ -176,6 +187,7 @@ export default function History() {
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Tytuł</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Status</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Link</th>
+                  <th className="px-4 py-3"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -207,10 +219,38 @@ export default function History() {
                         <span className="text-gray-300 text-xs">—</span>
                       )}
                     </td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => deletePost(p.id)}
+                        className="text-red-400 hover:text-red-600 text-xs"
+                        title="Usuń"
+                      >
+                        ✕
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {total > LIMIT && (
+          <div className="flex items-center justify-end gap-3 px-4 py-3 border-t border-gray-100 text-sm text-gray-600">
+            <button
+              disabled={offset === 0}
+              onClick={() => load(offset - LIMIT)}
+              className="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40"
+            >
+              ← Poprzednia
+            </button>
+            <span>{offset + 1}–{Math.min(offset + LIMIT, total)} / {total}</span>
+            <button
+              disabled={offset + LIMIT >= total}
+              onClick={() => load(offset + LIMIT)}
+              className="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40"
+            >
+              Następna →
+            </button>
           </div>
         )}
       </div>

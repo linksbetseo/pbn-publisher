@@ -39,19 +39,20 @@ export const publish = {
 export const history = {
   list: (params = {}) => api.get('/api/history', { params }),
   stats: () => api.get('/api/history/stats'),
+  delete: (id) => api.delete(`/api/history/${id}`),
 }
 
 export const dashboard = {
   stats: async () => {
-    const [domainsRes, historyStatsRes, historyRes, clientsRes] = await Promise.all([
+    const today = new Date().toISOString().slice(0, 10)
+    const [domainsRes, historyStatsRes, todayRes, clientsRes, autopilotRes] = await Promise.all([
       api.get('/api/domains'),
       api.get('/api/history/stats'),
-      api.get('/api/history'),
+      api.get('/api/history', { params: { limit: 500, offset: 0, status: 'published' } }),
       api.get('/api/clients'),
+      api.get('/api/autopilot/stats').catch(() => ({ data: {} })),
     ])
-    const allPosts = historyRes.data
-    const today = new Date().toISOString().slice(0, 10)
-    const todayPosts = allPosts.filter(p =>
+    const todayPosts = (todayRes.data.posts || []).filter(p =>
       p.created_at && p.created_at.startsWith(today)
     ).length
     return {
@@ -59,6 +60,8 @@ export const dashboard = {
       total_clients: clientsRes.data.length,
       total_published: historyStatsRes.data.published || 0,
       posts_today: todayPosts,
+      pending_keywords: autopilotRes.data.pending_keywords || 0,
+      active_schedules: autopilotRes.data.active_schedules || 0,
     }
   }
 }

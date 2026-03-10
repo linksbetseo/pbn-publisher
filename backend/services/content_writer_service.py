@@ -3,8 +3,10 @@ SEO Content Writer Service.
 Generates full articles based on SERP top10 analysis.
 Optimized for AI Overview (answer in H1), internal linking, tone of voice.
 """
+import asyncio
 import json
 import logging
+import re
 from openai import AsyncOpenAI
 from config import OPENAI_API_KEY
 from services.dataforseo_service import DataForSEOClient
@@ -197,23 +199,30 @@ Return JSON with:
 - "content": full HTML article
 JSON only, no markdown."""
 
-    response = await client_ai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.7,
-        max_tokens=6000,
-        response_format={"type": "json_object"},
-    )
+    for attempt in range(3):
+        try:
+            response = await client_ai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=6000,
+                response_format={"type": "json_object"},
+            )
+            break
+        except Exception as e:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(2 ** attempt)
+            logger.warning(f"[ContentWriter] GPT attempt {attempt+1} failed: {e}")
 
     raw = response.choices[0].message.content
     data = json.loads(raw)
     content = data.get("content", "")
 
     # Deduplicate links
-    import re
     seen_hrefs = set()
     def dedup_link(m):
         href = re.search(r'href=["\']([^"\']+)["\']', m.group(0))

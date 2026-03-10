@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 WHOISXML_KEY = os.getenv("WHOISXML_API_KEY", "")
 
+# Simple in-memory cache: domain_id -> (timestamp, result)
+_health_cache: dict = {}
+_CACHE_TTL = 300  # 5 minutes
+
 CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS domain_health_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,6 +168,15 @@ def _health_score(traffic: int, keywords: int) -> str:
 
 
 async def _domain_health(row: dict) -> dict:
+    domain_id = row["id"]
+    now = datetime.utcnow().timestamp()
+
+    # Return cached result if fresh
+    if domain_id in _health_cache:
+        cached_ts, cached_result = _health_cache[domain_id]
+        if now - cached_ts < _CACHE_TTL:
+            return cached_result
+
     domain = row["domain"]
     metrics, whois, wp_ok = await asyncio.gather(
         _dfs_domain_metrics(domain),
@@ -179,8 +192,8 @@ async def _domain_health(row: dict) -> dict:
     keywords = metrics.get("keywords", 0) or 0
     days = whois.get("days_to_expiry")
 
-    return {
-        "id": row["id"],
+    result = {
+        "id": domain_id,
         "domain": domain,
         "server": row.get("server", ""),
         "active": row.get("active", 1),
@@ -192,6 +205,8 @@ async def _domain_health(row: dict) -> dict:
         "expiry_status": "critical" if days is not None and days < 14 else "warning" if days is not None and days < 60 else "ok" if days is not None else "unknown",
         "health_score": _health_score(traffic, keywords),
     }
+    _health_cache[domain_id] = (now, result)
+    return result
 
 
 # ── Cron: weekly snapshot ─────────────────────────────────────────────────────

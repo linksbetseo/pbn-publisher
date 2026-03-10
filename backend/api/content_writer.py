@@ -1,17 +1,17 @@
 """
 Content Writer API — SEO article generation with SERP top10 analysis.
 """
-import os
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
 
+from config import DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
 from services.content_writer_service import generate_seo_article
 
 router = APIRouter(prefix="/api/content-writer", tags=["content-writer"])
 
-DFS_LOGIN = os.getenv("DATAFORSEO_LOGIN", "")
-DFS_PASSWORD = os.getenv("DATAFORSEO_PASSWORD", "")
+DFS_LOGIN = DATAFORSEO_LOGIN
+DFS_PASSWORD = DATAFORSEO_PASSWORD
 
 
 class ContentWriterRequest(BaseModel):

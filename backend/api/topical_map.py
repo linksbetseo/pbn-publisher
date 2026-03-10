@@ -1,17 +1,17 @@
 """
 Topical Map API — generate pillar + supporting page structure.
 """
-import os
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
 
+from config import DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
 from services.topical_map_service import generate_topical_map
 
 router = APIRouter(prefix="/api/topical-map", tags=["topical-map"])
 
-DFS_LOGIN = os.getenv("DATAFORSEO_LOGIN", "")
-DFS_PASSWORD = os.getenv("DATAFORSEO_PASSWORD", "")
+DFS_LOGIN = DATAFORSEO_LOGIN
+DFS_PASSWORD = DATAFORSEO_PASSWORD
 
 
 class TopicalMapRequest(BaseModel):

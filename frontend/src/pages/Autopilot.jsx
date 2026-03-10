@@ -47,7 +47,7 @@ export default function Autopilot() {
       api.get('/api/autopilot/stats'),
     ])
     setSchedules(schRes.data)
-    setDomains(domRes.data.filter(d => d.active && d.wp_ok))
+    setDomains(domRes.data.filter(d => d.active && d.wp_ok !== 0))
     setStats(stRes.data)
     setLoading(false)
   }
@@ -154,6 +154,15 @@ export default function Autopilot() {
   const toggleActive = async (sched) => {
     await api.patch(`/api/autopilot/schedules/${sched.id}`, { active: sched.active ? 0 : 1 })
     await load()
+  }
+
+  const retryKeyword = async (kwId, schedId) => {
+    try {
+      await api.post(`/api/autopilot/keywords/${kwId}/retry`)
+      await loadKeywords(schedId, kwFilter[schedId] || '')
+    } catch (e) {
+      alert('Błąd retry: ' + (e.response?.data?.detail || e.message))
+    }
   }
 
   const deleteSchedule = async (id) => {
@@ -467,6 +476,7 @@ export default function Autopilot() {
                             <th className="pb-1 pr-3 font-medium">KD</th>
                             <th className="pb-1 pr-3 font-medium">Status</th>
                             <th className="pb-1 font-medium">Link</th>
+                            <th className="pb-1 font-medium"></th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-50">
@@ -494,6 +504,14 @@ export default function Autopilot() {
                                 {kw.wp_post_url ? (
                                   <a href={kw.wp_post_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">link</a>
                                 ) : '—'}
+                              </td>
+                              <td className="py-1.5">
+                                {kw.status === 'failed' && (
+                                  <button
+                                    onClick={() => retryKeyword(kw.id, sched.id)}
+                                    className="text-xs px-2 py-0.5 bg-orange-100 text-orange-700 rounded hover:bg-orange-200"
+                                  >↺ retry</button>
+                                )}
                               </td>
                             </tr>
                           ))}

@@ -19,7 +19,6 @@ from typing import List, Optional
 
 import aiosqlite
 from fastapi import APIRouter, BackgroundTasks
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import DB_PATH
@@ -757,3 +756,20 @@ async def autopilot_stats():
         "pending_keywords": pending,
         "published_keywords": published,
     }
+
+
+@router.post("/keywords/{keyword_id}/retry")
+async def retry_keyword(keyword_id: int):
+    """Reset a failed keyword back to pending."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, status FROM domain_keywords WHERE id = ?", (keyword_id,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Keyword not found")
+        await db.execute(
+            "UPDATE domain_keywords SET status='pending', wp_post_url=NULL WHERE id = ?",
+            (keyword_id,)
+        )
+        await db.commit()
+    return {"updated": keyword_id, "status": "pending"}
