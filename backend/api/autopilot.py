@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from config import DB_PATH
 from services.topical_map_service import generate_topical_map
-from services.openai_service import generate_article
+from services.openai_service import generate_article, generate_image
 from services.wordpress_service import publish_post, get_or_create_category, get_categories
 
 logger = logging.getLogger(__name__)
@@ -497,12 +497,22 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
 
             category_id = kw_row.get("wp_category_id") or None
 
+            # Generuj obrazek featured
+            image_b64 = None
+            try:
+                image_b64 = await generate_image(
+                    f"Professional illustration for article about: {title}. Clean, modern, no text."
+                )
+            except Exception as img_err:
+                logger.warning(f"Image generation failed for '{keyword}': {img_err}")
+
             result = await publish_post(
                 domain=sched["domain"],
                 wp_login=sched["wp_login"],
                 wp_pass=sched["wp_pass"],
                 title=title,
                 content=content,
+                image_b64=image_b64,
                 category_id=category_id,
             )
 
@@ -598,12 +608,21 @@ async def run_daily_all():
                     language=sched["language"],
                     variation_hint=variation,
                 )
+                image_b64 = None
+                try:
+                    image_b64 = await generate_image(
+                        f"Professional illustration for article about: {article['title']}. Clean, modern, no text."
+                    )
+                except Exception as img_err:
+                    logger.warning(f"Image generation failed for '{keyword}': {img_err}")
+
                 result = await publish_post(
                     domain=sched["domain"],
                     wp_login=sched["wp_login"],
                     wp_pass=sched["wp_pass"],
                     title=article["title"],
                     content=article["content"],
+                    image_b64=image_b64,
                     category_id=kw_row.get("wp_category_id") or None,
                 )
                 if result.get("success"):
