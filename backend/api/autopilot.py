@@ -486,12 +486,16 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
         variation = random.choice(VARIATION_HINTS)
 
         try:
+            location_code = 2616 if sched["language"] == "pl" else 2840
             article = await generate_article(
                 topic=keyword,
                 client_domain=sched["client_domain"] or sched["domain"],
                 anchor_text=sched["anchor_text"] or keyword,
                 language=sched["language"],
                 variation_hint=variation,
+                dfs_login=DFS_LOGIN,
+                dfs_password=DFS_PASSWORD,
+                location_code=location_code,
             )
             title = article["title"]
             content = article["content"]
@@ -502,9 +506,7 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest):
             image_b64 = None
             image_provider = "none"
             try:
-                image_b64 = await generate_image_freepik(
-                    f"Professional illustration for article about: {title}. Clean, modern, no text."
-                )
+                image_b64 = await generate_image_freepik(keyword)
                 image_provider = "freepik"
             except Exception as img_err:
                 logger.warning(f"Freepik image failed for '{keyword}': {img_err} — trying DALL-E fallback")
@@ -611,20 +613,30 @@ async def run_daily_all():
             keyword = kw_row["keyword"]
             variation = random.choice(VARIATION_HINTS)
             try:
+                location_code = 2616 if sched["language"] == "pl" else 2840
                 article = await generate_article(
                     topic=keyword,
                     client_domain=sched["client_domain"] or sched["domain"],
                     anchor_text=sched["anchor_text"] or keyword,
                     language=sched["language"],
                     variation_hint=variation,
+                    dfs_login=DFS_LOGIN,
+                    dfs_password=DFS_PASSWORD,
+                    location_code=location_code,
                 )
                 image_b64 = None
                 try:
-                    image_b64 = await generate_image(
+                    image_b64 = await generate_image_freepik(
                         f"Professional illustration for article about: {article['title']}. Clean, modern, no text."
                     )
                 except Exception as img_err:
-                    logger.warning(f"Image generation failed for '{keyword}': {img_err}")
+                    logger.warning(f"Freepik image failed for '{keyword}': {img_err} — trying DALL-E fallback")
+                    try:
+                        image_b64 = await generate_image(
+                            f"Professional illustration for article about: {article['title']}. Clean, modern, no text."
+                        )
+                    except Exception as img_err2:
+                        logger.warning(f"Image generation failed for '{keyword}': {img_err2}")
 
                 result = await publish_post(
                     domain=sched["domain"],

@@ -1,25 +1,173 @@
-import base64
+"""
+Multi-pass article generation following n8n workflow pattern:
+1. DataForSEO SERP top 10 → select 3 blog URLs
+2. DataForSEO content parsing per URL → extract headings + text
+3. GPT: keyword cluster + search intent
+4. GPT: outline (sections separated by <<<<)
+5. GPT: title
+6. GPT: intro
+7. GPT: each section separately
+8. GPT: conclusion
+9. GPT: FAQ
+10. GPT: excerpt
+11. Assemble HTML → publish
+"""
+import json
+import logging
 import re
+from typing import Optional
+
+import httpx
 from openai import AsyncOpenAI
+
 from config import OPENAI_API_KEY
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+logger = logging.getLogger(__name__)
+
+_BLOG_SKIP = re.compile(
+    r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|tiktok\.com"
+    r"|wikipedia\.org|reddit\.com|pinterest\.com|allegro\.pl|amazon\.|ebay\."
+    r"|olx\.pl|ceneo\.pl|sklepik|sklep|shop|store|kup|buy|cart|koszyk)",
+    re.IGNORECASE,
+)
+
+
+def _is_blog_url(url: str) -> bool:
+    return not _BLOG_SKIP.search(url)
+
+
+async def _fetch_serp_content(
+    topic: str,
+    dfs_login: str,
+    dfs_password: str,
+    location_code: int = 2616,
+    language_code: str = "pl",
+) -> str:
+    """Fetch top 3 blog URLs from SERP and parse their content. Returns combined text."""
+    if not dfs_login or not dfs_password:
+        return ""
+
+    try:
+        from services.dataforseo_service import DataForSEOClient
+        dfs = DataForSEOClient(dfs_login, dfs_password)
+
+        serp = await dfs.serp_top10(topic, location_code, language_code)
+        blog_urls = [r["url"] for r in serp if r.get("url") and _is_blog_url(r["url"])][:3]
+
+        if not blog_urls:
+            logger.warning("[SERP] No blog URLs found in SERP results")
+            return ""
+
+        logger.info(f"[SERP] Parsing {len(blog_urls)} URLs: {blog_urls}")
+
+        parts = []
+        for url in blog_urls:
+            content = await dfs.page_content(url)
+            if content:
+                parts.append(f"--- {url} ---\n{content[:3000]}")
+
+        return "\n\n".join(parts)
+
+    except Exception as e:
+        logger.warning(f"[SERP] Failed to fetch competitor content: {e}")
+        return ""
+
+
+def _markdown_to_html(text: str) -> str:
+    """Convert basic markdown to HTML."""
+    # Headers
+    text = re.sub(r"^### (.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
+    text = re.sub(r"^## (.+)$", r"<h2>\1</h2>", text, flags=re.MULTILINE)
+    text = re.sub(r"^# (.+)$", r"<h1>\1</h1>", text, flags=re.MULTILINE)
+    # Bold
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    # Italic
+    text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
+    # Unordered lists
+    text = re.sub(r"(?m)^[-*] (.+)$", r"<li>\1</li>", text)
+    text = re.sub(r"(<li>.*?</li>)+", lambda m: f"<ul>{m.group(0)}</ul>", text, flags=re.DOTALL)
+    # Ordered lists
+    text = re.sub(r"(?m)^\d+\. (.+)$", r"<li>\1</li>", text)
+    # Paragraphs: wrap non-tagged lines
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("<"):
+            result.append(line)
+        else:
+            result.append(f"<p>{line}</p>")
+    return "\n".join(result)
+
+
+async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000) -> str:
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _inject_anchors(html: str, anchors_info: str) -> str:
+    """Inject anchor links naturally into the HTML content."""
+    if not anchors_info:
+        return html
+    # Find anchor tags in anchors_info and inject the first one into a <p> tag
+    links = re.findall(r'<a\s[^>]*>.*?</a>', anchors_info, re.DOTALL | re.IGNORECASE)
+    seen_hrefs: set = set()
+    paragraphs = re.findall(r'<p>.*?</p>', html, re.DOTALL)
+    para_count = len(paragraphs)
+
+    for i, link in enumerate(links):
+        href_match = re.search(r'href=["\']([^"\']+)["\']', link)
+        if not href_match:
+            continue
+        href = href_match.group(1).rstrip("/")
+        if href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+
+        # Find a paragraph roughly 1/3 into the article per link, skip already-linked ones
+        target_idx = max(0, min(para_count - 1, (para_count // (len(links) + 1)) * (i + 1)))
+        para = paragraphs[target_idx] if target_idx < para_count else None
+        if para and link not in html:
+            # Append link inside the paragraph
+            new_para = para[:-4] + f" {link}</p>"
+            html = html.replace(para, new_para, 1)
+
+    return html
 
 
 async def generate_article(
-    topic: str, client_domain: str, anchor_text: str, language: str = "pl",
-    anchor_text2: str = "", anchor_url2: str = "",
-    anchor_text3: str = "", anchor_url3: str = "",
+    topic: str,
+    client_domain: str,
+    anchor_text: str,
+    language: str = "pl",
+    anchor_text2: str = "",
+    anchor_url2: str = "",
+    anchor_text3: str = "",
+    anchor_url3: str = "",
     custom_prompt: str = "",
     variation_hint: str = "",
+    dfs_login: str = "",
+    dfs_password: str = "",
+    location_code: int = 2616,
 ) -> dict:
-    def clean_url(url):
+    def clean_url(url: str) -> str:
         url = url.strip()
-        if not url.startswith('http://') and not url.startswith('https://'):
-            url = 'https://' + url
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
         return url
 
-    # Build anchor instructions
+    # Build anchor HTML
     anchors_info = f'<a href="{clean_url(client_domain)}">{anchor_text}</a>'
     if anchor_text2 and anchor_url2:
         anchors_info += f', <a href="{clean_url(anchor_url2)}">{anchor_text2}</a>'
@@ -27,83 +175,249 @@ async def generate_article(
         anchors_info += f', <a href="{clean_url(anchor_url3)}">{anchor_text3}</a>'
 
     variation = f" Kąt tematyczny: {variation_hint}." if variation_hint else ""
+    lang_pl = language == "pl"
 
-    if language == "pl":
-        system_prompt = (
-            "Jesteś ekspertem SEO. Piszesz unikalne artykuły zoptymalizowane pod wyszukiwarki. "
-            "Każdy artykuł musi być unikalny — inny tytuł, inna struktura, inne przykłady, inne podejście do tematu. "
-            "Zwracaj treść w formacie HTML (tylko body, bez <html>/<body> tagów). "
-            "Artykuł powinien mieć 800-1200 słów, nagłówki H2/H3, akapity. "
-            "Dodaj naturalnie linki kotwiczne do strony klienta w treści artykułu."
-        )
-        if custom_prompt:
-            system_prompt += f" Dodatkowe instrukcje: {custom_prompt}"
-        user_prompt = (
-            f"Napisz unikalny artykuł SEO na temat: '{topic}'.{variation} "
-            f"WAŻNE: Wymyśl WŁASNY, ORYGINALNY tytuł artykułu — NIE używaj tematu '{topic}' jako tytułu. "
-            f"Tytuł ma być zbliżony tematycznie ale sformułowany inaczej, np. jako pytanie, poradnik lub ciekawostka. "
-            f"Użyj innej struktury i podejścia niż standardowe artykuły o tym temacie. "
-            f"Umieść w treści KAŻDY z poniższych linków DOKŁADNIE RAZ (nie więcej, nie mniej): {anchors_info}. "
-            f"Każdy link może pojawić się w artykule tylko jeden raz. "
-            f"Zwróć JSON z polami 'title' (wymyślony tytuł) i 'content' (HTML artykułu). "
-            f"Tylko JSON, bez markdown."
+    # ── STEP 1: Fetch competitor content from SERP ──────────────────────────
+    language_code = "pl" if lang_pl else "en"
+    serp_content = await _fetch_serp_content(topic, dfs_login, dfs_password, location_code, language_code)
+    serp_block = f"\n\n[SEO Scraped Info]\n{serp_content}" if serp_content else ""
+
+    # ── STEP 2: Keyword cluster + search intent ──────────────────────────────
+    if lang_pl:
+        intent_system = "Jesteś ekspertem SEO. Analizujesz słowa kluczowe i intencje wyszukiwania."
+        intent_user = (
+            f"Dla frazy: '{topic}'{variation}\n"
+            f"Podaj krótko (max 3 zdania):\n"
+            f"1. Główna intencja wyszukiwania (informacyjna/transakcyjna/nawigacyjna)\n"
+            f"2. Cluster tematyczny (co chce wiedzieć użytkownik)\n"
+            f"3. Kluczowe encje i tematy pokrewne do uwzględnienia w artykule"
+            f"{serp_block}"
         )
     else:
-        system_prompt = (
-            "You are an SEO expert. You write unique, search engine optimized articles. "
-            "Each article must be unique — different title, different structure, different examples, different angle. "
-            "Return content in HTML format (body only, no <html>/<body> tags). "
-            "Article should be 800-1200 words, with H2/H3 headings and paragraphs. "
-            "Include anchor links to the client site naturally in the article. Do not skip any provided link."
-        )
-        if custom_prompt:
-            system_prompt += f" Additional instructions: {custom_prompt}"
-        user_prompt = (
-            f"Write a unique SEO article about: '{topic}'.{variation} "
-            f"IMPORTANT: Create your OWN original title — do NOT use '{topic}' as the title. "
-            f"The title should be related but phrased differently, e.g. as a question, guide or insight. "
-            f"Use a different structure and angle than typical articles on this topic. "
-            f"Include EACH of the following links EXACTLY ONCE in the text (no more, no less): {anchors_info}. "
-            f"Each link must appear only one time in the article. "
-            f"Return JSON with 'title' (your invented title) and 'content' (HTML article). "
-            f"JSON only, no markdown."
+        intent_system = "You are an SEO expert. You analyze keywords and search intent."
+        intent_user = (
+            f"For keyword: '{topic}'{variation}\n"
+            f"Briefly describe (max 3 sentences):\n"
+            f"1. Search intent (informational/transactional/navigational)\n"
+            f"2. Topic cluster (what the user wants to know)\n"
+            f"3. Key entities and related topics to include in the article"
+            f"{serp_block}"
         )
 
-    response = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.7,
-        max_tokens=3000,
-        response_format={"type": "json_object"},
-    )
+    intent_analysis = await _gpt(intent_system, intent_user, temperature=0.3, max_tokens=400)
+    logger.info(f"[Article] Intent: {intent_analysis[:100]}")
 
-    raw = response.choices[0].message.content
-    import json
-    data = json.loads(raw)
-    content = data.get("content", "")
+    # ── STEP 3: Outline ───────────────────────────────────────────────────────
+    if lang_pl:
+        outline_system = (
+            "Jesteś ekspertem SEO tworzącym struktury artykułów. "
+            "Generuj outline jako listę nagłówków H2, każdy na osobnej linii, oddzielony '<<<<'. "
+            "Tylko nagłówki, bez tekstu, bez numeracji."
+        )
+        outline_user = (
+            f"Stwórz outline artykułu SEO dla frazy: '{topic}'\n"
+            f"Intencja i encje: {intent_analysis}\n"
+            f"Wymagania: 5-7 sekcji H2, każda oddzielona '<<<<', "
+            f"bez wstępu i zakończenia (te będą osobno).\n"
+            f"Tylko nagłówki H2, bez tekstu.{serp_block}"
+        )
+    else:
+        outline_system = (
+            "You are an SEO expert creating article structures. "
+            "Generate an outline as a list of H2 headings, each on a separate line, separated by '<<<<'. "
+            "Only headings, no body text, no numbering."
+        )
+        outline_user = (
+            f"Create an SEO article outline for keyword: '{topic}'\n"
+            f"Intent and entities: {intent_analysis}\n"
+            f"Requirements: 5-7 H2 sections, each separated by '<<<<', "
+            f"without intro and conclusion (those will be separate).\n"
+            f"Only H2 headings, no body text.{serp_block}"
+        )
 
-    # Deduplicate links — keep only first occurrence of each href domain
-    import re
-    seen_hrefs = set()
-    def remove_duplicate_link(m):
+    outline_raw = await _gpt(outline_system, outline_user, temperature=0.5, max_tokens=500)
+    sections = [s.strip() for s in outline_raw.split("<<<<") if s.strip()]
+    logger.info(f"[Article] Outline sections: {sections}")
+
+    if not sections:
+        sections = [topic]
+
+    # ── STEP 4: Title ─────────────────────────────────────────────────────────
+    if lang_pl:
+        title_system = "Jesteś copywriterem SEO. Generujesz chwytliwe tytuły artykułów."
+        title_user = (
+            f"Wymyśl jeden unikalny tytuł artykułu SEO dla frazy: '{topic}'\n"
+            f"Intencja: {intent_analysis}\n"
+            f"Sekcje artykułu: {', '.join(sections[:3])}\n"
+            f"Tytuł ma być inny niż fraza, może być pytaniem lub poradnikiem. "
+            f"Zwróć tylko tytuł, bez cudzysłowów."
+        )
+    else:
+        title_system = "You are an SEO copywriter. You generate compelling article titles."
+        title_user = (
+            f"Create one unique SEO article title for keyword: '{topic}'\n"
+            f"Intent: {intent_analysis}\n"
+            f"Article sections: {', '.join(sections[:3])}\n"
+            f"The title should be different from the keyword, can be a question or guide. "
+            f"Return only the title, no quotes."
+        )
+
+    title = await _gpt(title_system, title_user, temperature=0.8, max_tokens=100)
+    title = title.strip('"\'').strip()
+    logger.info(f"[Article] Title: {title}")
+
+    # ── STEP 5: Intro ─────────────────────────────────────────────────────────
+    if lang_pl:
+        intro_system = (
+            "Jesteś ekspertem SEO. Piszesz angażujące wstępy do artykułów. "
+            "Wstęp: 2-3 akapity HTML (<p> tagi)."
+        )
+        intro_user = (
+            f"Napisz wstęp do artykułu '{title}' o temacie '{topic}'.\n"
+            f"Intencja czytelnika: {intent_analysis}\n"
+            f"Wstęp powinien zahaczać o główne sekcje: {', '.join(sections[:3])}\n"
+            f"Zwróć tylko HTML wstępu (tagi <p>), bez nagłówków."
+        )
+    else:
+        intro_system = (
+            "You are an SEO expert. You write engaging article introductions. "
+            "Intro: 2-3 HTML paragraphs (<p> tags)."
+        )
+        intro_user = (
+            f"Write an introduction for article '{title}' about '{topic}'.\n"
+            f"Reader intent: {intent_analysis}\n"
+            f"Intro should touch on main sections: {', '.join(sections[:3])}\n"
+            f"Return only HTML intro (<p> tags), no headings."
+        )
+
+    intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=600)
+    if not intro_html.strip().startswith("<"):
+        intro_html = _markdown_to_html(intro_html)
+    logger.info("[Article] Intro generated")
+
+    # ── STEP 6: Write each section ───────────────────────────────────────────
+    if lang_pl:
+        section_system = (
+            "Jesteś ekspertem SEO. Piszesz sekcje artykułu w HTML. "
+            "Każda sekcja: nagłówek H2 + 3-4 akapity + opcjonalnie lista. "
+            "Zwracaj tylko HTML (h2, p, ul/li). Bez wstępu i zakończenia."
+        )
+    else:
+        section_system = (
+            "You are an SEO expert. You write article sections in HTML. "
+            "Each section: H2 heading + 3-4 paragraphs + optionally a list. "
+            "Return only HTML (h2, p, ul/li). No intro or conclusion."
+        )
+
+    sections_html = []
+    for i, section_heading in enumerate(sections):
+        if lang_pl:
+            section_user = (
+                f"Napisz sekcję artykułu o tytule '{title}' (temat: '{topic}').\n"
+                f"Nagłówek H2 tej sekcji: '{section_heading}'\n"
+                f"Kontekst sekcji ({i+1}/{len(sections)}): {intent_analysis}\n"
+                f"Zwróć HTML: <h2>{section_heading}</h2> + 3-4 akapity <p>."
+            )
+        else:
+            section_user = (
+                f"Write a section for article '{title}' (topic: '{topic}').\n"
+                f"H2 heading: '{section_heading}'\n"
+                f"Section context ({i+1}/{len(sections)}): {intent_analysis}\n"
+                f"Return HTML: <h2>{section_heading}</h2> + 3-4 <p> paragraphs."
+            )
+
+        section_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=800)
+        if not section_html.strip().startswith("<"):
+            section_html = _markdown_to_html(section_html)
+        sections_html.append(section_html)
+        logger.info(f"[Article] Section {i+1}/{len(sections)} done: {section_heading[:40]}")
+
+    # ── STEP 7: Conclusion ───────────────────────────────────────────────────
+    if lang_pl:
+        conclusion_system = "Jesteś ekspertem SEO. Piszesz zakończenia artykułów w HTML."
+        conclusion_user = (
+            f"Napisz zakończenie artykułu '{title}' (temat: '{topic}').\n"
+            f"Podsumuj główne punkty: {', '.join(sections[:4])}\n"
+            f"Zwróć HTML: <h2>Podsumowanie</h2> + 2-3 akapity <p>."
+        )
+    else:
+        conclusion_system = "You are an SEO expert. You write article conclusions in HTML."
+        conclusion_user = (
+            f"Write a conclusion for article '{title}' (topic: '{topic}').\n"
+            f"Summarize main points: {', '.join(sections[:4])}\n"
+            f"Return HTML: <h2>Summary</h2> + 2-3 <p> paragraphs."
+        )
+
+    conclusion_html = await _gpt(conclusion_system, conclusion_user, temperature=0.7, max_tokens=500)
+    if not conclusion_html.strip().startswith("<"):
+        conclusion_html = _markdown_to_html(conclusion_html)
+    logger.info("[Article] Conclusion generated")
+
+    # ── STEP 8: FAQ ───────────────────────────────────────────────────────────
+    if lang_pl:
+        faq_system = "Jesteś ekspertem SEO. Tworzysz sekcje FAQ w HTML dla featured snippets."
+        faq_user = (
+            f"Stwórz sekcję FAQ dla artykułu o '{topic}'.\n"
+            f"5 pytań i odpowiedzi związanych z tematem: {', '.join(sections[:3])}\n"
+            f"Zwróć HTML: <h2>FAQ</h2> + pary <h3>Pytanie</h3><p>Odpowiedź</p>."
+        )
+    else:
+        faq_system = "You are an SEO expert. You create FAQ sections in HTML for featured snippets."
+        faq_user = (
+            f"Create an FAQ section for an article about '{topic}'.\n"
+            f"5 questions and answers related to: {', '.join(sections[:3])}\n"
+            f"Return HTML: <h2>FAQ</h2> + pairs of <h3>Question</h3><p>Answer</p>."
+        )
+
+    faq_html = await _gpt(faq_system, faq_user, temperature=0.6, max_tokens=800)
+    if not faq_html.strip().startswith("<"):
+        faq_html = _markdown_to_html(faq_html)
+    logger.info("[Article] FAQ generated")
+
+    # ── STEP 9: Excerpt ───────────────────────────────────────────────────────
+    if lang_pl:
+        excerpt_user = (
+            f"Napisz krótki opis (excerpt) artykułu '{title}' o '{topic}' "
+            f"(max 2 zdania, bez HTML, do meta description)."
+        )
+    else:
+        excerpt_user = (
+            f"Write a short excerpt for article '{title}' about '{topic}' "
+            f"(max 2 sentences, no HTML, for meta description)."
+        )
+
+    excerpt = await _gpt("You are an SEO copywriter.", excerpt_user, temperature=0.5, max_tokens=100)
+    logger.info("[Article] Excerpt generated")
+
+    # ── STEP 10: Assemble HTML ────────────────────────────────────────────────
+    content_parts = [intro_html] + sections_html + [conclusion_html, faq_html]
+    content = "\n\n".join(content_parts)
+
+    # Inject anchor links
+    content = _inject_anchors(content, anchors_info)
+
+    # Deduplicate anchor links
+    seen_hrefs: set = set()
+
+    def remove_duplicate_link(m: re.Match) -> str:
         href = re.search(r'href=["\']([^"\']+)["\']', m.group(0))
         if not href:
             return m.group(0)
-        url = href.group(1).rstrip('/')
+        url = href.group(1).rstrip("/")
         if url in seen_hrefs:
-            text = re.sub(r'<[^>]+>', '', m.group(0))
+            text = re.sub(r"<[^>]+>", "", m.group(0))
             return text
         seen_hrefs.add(url)
         return m.group(0)
 
     content = re.sub(r'<a\s[^>]*?>.*?</a>', remove_duplicate_link, content, flags=re.DOTALL | re.IGNORECASE)
 
+    logger.info(f"[Article] Done. Title: {title}, sections: {len(sections)}, chars: {len(content)}")
+
     return {
-        "title": data.get("title", topic),
+        "title": title,
         "content": content,
+        "excerpt": excerpt,
     }
 
 
