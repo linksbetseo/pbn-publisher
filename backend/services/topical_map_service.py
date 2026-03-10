@@ -1,16 +1,31 @@
 """
 Topical Map Generator for PBN Publisher.
 Builds pillar + supporting page structure from a seed keyword.
+
+Clustering strategy:
+- Usuwa seed words z każdej frazy → zostają "differentiators"
+- Grupuje po differentiator tokens (co wyróżnia frazę od seeda)
+- Seed "prawo pracy" + fraza "prawo pracy urlop" → differentiator = "urlop"
+- Frazy z tym samym differentiator trafiają do jednego klastra (pillar page)
 """
 import logging
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from typing import Optional
 
 from services.dataforseo_service import DataForSEOClient
 
 logger = logging.getLogger(__name__)
+
+# Polskie stop words do ignorowania przy klastracji
+STOP_WORDS = {
+    "i", "w", "z", "na", "do", "po", "o", "a", "się", "nie", "jak", "co",
+    "czy", "że", "to", "jest", "są", "dla", "przez", "przy", "za", "od",
+    "ile", "kiedy", "kto", "gdzie", "gdy", "bez", "lub", "oraz", "ale",
+    "który", "która", "które", "tego", "tej", "ten", "ta", "te", "być",
+    "mieć", "móc", "by", "też", "już", "jeszcze", "tylko", "właśnie",
+    "np", "tzw", "itp", "wg",
+}
 
 
 def _ascii_fold(text: str) -> str:
@@ -33,59 +48,115 @@ def _dedupe(keywords: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
-def _cluster(keywords: list[dict], max_clusters: int = 8) -> list[dict]:
-    """Group keywords into topic clusters by token frequency."""
-    # Count bigrams and unigrams
-    token_kws = defaultdict(list)
-    for kw in keywords:
-        tokens = kw["keyword"].split()
-        for i, t in enumerate(tokens):
-            if len(t) > 2:
-                token_kws[t].append(kw)
-            if i < len(tokens) - 1:
-                bigram = f"{tokens[i]} {tokens[i+1]}"
-                token_kws[bigram].append(kw)
+def _seed_tokens(seed: str) -> set:
+    """Zwraca zestaw tokenów seeda (z ascii-fold) do odejmowania."""
+    folded = _ascii_fold(seed)
+    return set(t for t in folded.split() if t not in STOP_WORDS and len(t) > 1)
 
-    # Score: frequency * avg_volume
-    scores = {}
-    for token, kws in token_kws.items():
+
+def _differentiators(keyword: str, seed_toks: set) -> list[str]:
+    """
+    Wyciąga tokeny które RÓŻNIĄ frazę od seeda.
+    Np. seed='prawo pracy', keyword='prawo pracy urlop' → ['urlop']
+    """
+    kw_folded = _ascii_fold(keyword)
+    tokens = [t for t in kw_folded.split() if t not in STOP_WORDS and len(t) > 2]
+    diff = [t for t in tokens if t not in seed_toks]
+    return diff
+
+
+def _cluster(keywords: list[dict], seed: str, max_clusters: int = 8) -> list[dict]:
+    """
+    Grupuje frazy po differentiator tokens.
+    Każdy klaster = jeden pillar page (osobny temat w ramach seeda).
+    """
+    seed_toks = _seed_tokens(seed)
+
+    # Zbierz wszystkie differentiator tokens i ich frazy
+    token_to_kws: dict[str, list] = defaultdict(list)
+    kw_to_diffs: dict[str, list] = {}
+
+    for kw in keywords:
+        diffs = _differentiators(kw["keyword"], seed_toks)
+        kw_to_diffs[kw["keyword"]] = diffs
+        for d in diffs:
+            token_to_kws[d].append(kw)
+
+    # Score każdego differentiator tokena: ile fraz ma go + ich łączny wolumen
+    token_scores: dict[str, float] = {}
+    for token, kws in token_to_kws.items():
         if len(kws) < 2:
             continue
-        avg_vol = sum(k.get("search_volume", 0) for k in kws) / len(kws)
-        is_bigram = " " in token
-        weight = 2.0 if is_bigram else 1.0
-        scores[token] = len(kws) * weight * (1 + avg_vol / 1000)
+        total_vol = sum(k.get("search_volume", 0) for k in kws)
+        token_scores[token] = len(kws) * 2 + total_vol / 500
 
-    top_anchors = sorted(scores, key=lambda x: scores[x], reverse=True)[:max_clusters]
+    # Wybierz top anchors — pillar page anchors
+    top_tokens = sorted(token_scores, key=lambda x: token_scores[x], reverse=True)
 
-    # Assign keywords to best anchor
-    clusters = {a: [] for a in top_anchors}
-    assigned = set()
+    # Buduj klastry zachłannie, unikając nakładania się
+    clusters: dict[str, list] = {}
+    assigned: set[str] = set()
+    selected_anchors: list[str] = []
 
+    for token in top_tokens:
+        if len(selected_anchors) >= max_clusters:
+            break
+        # Pomiń tokeny zbyt podobne do już wybranych (prefix match)
+        too_similar = any(
+            token.startswith(a[:4]) or a.startswith(token[:4])
+            for a in selected_anchors
+            if len(token) > 3 and len(a) > 3
+        )
+        if too_similar:
+            continue
+        selected_anchors.append(token)
+        clusters[token] = []
+
+    # Przypisz każdą frazę do najlepiej pasującego klastra
     for kw in sorted(keywords, key=lambda x: x.get("search_volume", 0), reverse=True):
         kw_text = kw["keyword"]
-        best = None
-        best_score = 0
-        for anchor in top_anchors:
-            if anchor in kw_text:
-                score = len(anchor.split()) * 10 + scores.get(anchor, 0)
+        if kw_text in assigned:
+            continue
+        diffs = kw_to_diffs.get(kw_text, [])
+
+        best_anchor = None
+        best_score = -1
+
+        for anchor in selected_anchors:
+            if anchor in diffs:
+                # Anchor jest differenziatorem tej frazy → dopasowanie
+                score = token_scores.get(anchor, 0)
                 if score > best_score:
                     best_score = score
-                    best = anchor
-        if best and kw_text not in assigned:
-            clusters[best].append(kw)
+                    best_anchor = anchor
+
+        if best_anchor:
+            clusters[best_anchor].append(kw)
             assigned.add(kw_text)
 
-    # Remove empty
+    # Frazy bez dopasowania → "Inne" lub do największego klastra
+    unassigned = [kw for kw in keywords if kw["keyword"] not in assigned]
+    if unassigned and selected_anchors:
+        # Dorzuć do klastra z największą liczbą fraz
+        biggest = max(selected_anchors, key=lambda a: len(clusters[a]))
+        for kw in unassigned:
+            clusters[biggest].append(kw)
+
+    # Buduj wynik
     result = []
     for anchor, kws in clusters.items():
         if not kws:
             continue
         total_vol = sum(k.get("search_volume", 0) for k in kws)
-        avg_diff = sum(k.get("keyword_difficulty", 0) for k in kws) / len(kws) if kws else 0
+        avg_diff = sum(k.get("keyword_difficulty", 0) for k in kws) / len(kws)
+
+        # Label: anchor zcapitalizowany, max 3 słowa
+        label_words = anchor.split()[:3]
+        label = " ".join(w.capitalize() for w in label_words)
+
         result.append({
             "anchor": anchor,
-            "label": " ".join(w.capitalize() for w in anchor.split()),
+            "label": f"{' '.join(w.capitalize() for w in seed.split())} — {label}",
             "keywords": kws,
             "total_volume": total_vol,
             "avg_difficulty": round(avg_diff, 1),
@@ -98,49 +169,55 @@ async def generate_topical_map(
     seed: str,
     location_code: int = 2616,
     language_code: str = "pl",
-    min_volume: int = 50,
+    min_volume: int = 10,
     max_clusters: int = 8,
     dfs_login: str = "",
     dfs_password: str = "",
 ) -> dict:
     """
     Generate topical map: pillar pages + supporting pages.
-
-    Returns:
-        {
-          seed, pillars: [{anchor, label, pillar_keyword, supporting_keywords, total_volume, avg_difficulty}],
-          nodes, links  (for Force Graph frontend)
-        }
+    Każdy pillar = osobny aspekt/temat seeda.
     """
     client = DataForSEOClient(dfs_login, dfs_password)
 
     # Fetch keywords
     raw = []
     try:
-        suggestions = await client.keyword_suggestions(seed, location_code, language_code, 300)
+        suggestions = await client.keyword_suggestions(seed, location_code, language_code, 500)
         raw.extend(suggestions)
+        logger.info(f"[TopicalMap] suggestions: {len(suggestions)}")
     except Exception as e:
         logger.warning(f"keyword_suggestions failed: {e}")
 
     try:
-        ideas = await client.keyword_ideas(seed, location_code, language_code, 200)
+        ideas = await client.keyword_ideas(seed, location_code, language_code, 300)
         raw.extend(ideas)
+        logger.info(f"[TopicalMap] ideas: {len(ideas)}")
     except Exception as e:
         logger.warning(f"keyword_ideas failed: {e}")
 
     if not raw:
         raise ValueError(f"Brak wyników DataForSEO dla frazy: {seed}")
 
-    # Dedupe + volume filter
+    # Dedupe
     keywords = _dedupe(raw)
-    keywords = [k for k in keywords if k.get("search_volume", 0) >= min_volume]
+    logger.info(f"[TopicalMap] after dedupe: {len(keywords)}")
 
-    if not keywords:
-        # Relax volume filter
-        keywords = _dedupe(raw)
+    # Volume filter
+    filtered = [k for k in keywords if k.get("search_volume", 0) >= min_volume]
+    if not filtered:
+        filtered = keywords  # fallback bez filtra
+    keywords = filtered
+    logger.info(f"[TopicalMap] after volume filter (>={min_volume}): {len(keywords)}")
 
     # Cluster
-    clusters = _cluster(keywords, max_clusters)
+    clusters = _cluster(keywords, seed, max_clusters)
+    logger.info(f"[TopicalMap] clusters: {len(clusters)}")
+
+    # Fallback: jeśli wyszedł tylko 1 klaster, spróbuj z większą liczbą
+    if len(clusters) <= 1 and max_clusters < 15:
+        clusters = _cluster(keywords, seed, 15)
+        logger.info(f"[TopicalMap] retry with max_clusters=15: {len(clusters)}")
 
     # Build pillar structure
     pillars = []
@@ -161,13 +238,13 @@ async def generate_topical_map(
                     "search_volume": k.get("search_volume", 0),
                     "keyword_difficulty": k.get("keyword_difficulty", 0),
                 }
-                for k in supporting[:15]
+                for k in supporting[:20]
             ],
             "total_volume": cluster["total_volume"],
             "avg_difficulty": cluster["avg_difficulty"],
         })
 
-    # Build Force Graph nodes + links
+    # Force Graph
     nodes = [{"id": "seed", "label": seed, "type": "seed", "size": 24, "color": "#1a2332"}]
     links = []
 
