@@ -72,7 +72,7 @@ async def generate_image_freepik(prompt: str, use_pro: bool = False) -> str:
     logger.info(f"[Freepik] image_url={image_url}")
 
     # Download the image
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         resp = await client.get(image_url)
         resp.raise_for_status()
         return base64.b64encode(resp.content).decode()
