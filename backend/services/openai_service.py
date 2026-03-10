@@ -21,6 +21,7 @@ from typing import Optional
 from openai import AsyncOpenAI
 
 from config import OPENAI_API_KEY
+from services.content_enrichments import enrich_article
 
 import time
 
@@ -665,6 +666,9 @@ async def generate_article(
     # Inject internal links to already-published posts on this domain
     if published_posts:
         content = _inject_internal_links(content, published_posts, topic)
+
+    # Enrich with random unique elements (2-3 per article)
+    content = await enrich_article(content, topic, sections, lang_pl=(language == "pl"), openai_client=client)
 
     # Deduplicate anchor links
     seen_hrefs: set = set()
