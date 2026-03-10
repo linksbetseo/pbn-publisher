@@ -1,6 +1,7 @@
 import csv
 import os
 import secrets
+from datetime import datetime
 import aiosqlite
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
@@ -95,6 +96,25 @@ async def import_csv_domains(db: aiosqlite.Connection):
         print(f"CSV import error: {e}")
 
 
+async def _weekly_cron():
+    """Run weekly domain health snapshot every Monday at 03:00 UTC."""
+    import asyncio as _asyncio
+    while True:
+        now = datetime.utcnow()
+        # Next Monday 03:00 UTC
+        days_ahead = (7 - now.weekday()) % 7 or 7
+        next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        next_run = next_run.replace(day=now.day + days_ahead)
+        wait_sec = max(0, (next_run - now).total_seconds())
+        await _asyncio.sleep(wait_sec)
+        try:
+            from api.health import run_weekly_snapshot
+            count = await run_weekly_snapshot()
+            print(f"[WeeklyCron] Health snapshot done: {count} domains")
+        except Exception as e:
+            print(f"[WeeklyCron] Error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -106,7 +126,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass  # column already exists
         await import_csv_domains(db)
+    # Start weekly cron
+    import asyncio as _asyncio
+    cron_task = _asyncio.create_task(_weekly_cron())
     yield
+    cron_task.cancel()
 
 
 app = FastAPI(title="PBN Publisher API", version="1.0.0", lifespan=lifespan)
