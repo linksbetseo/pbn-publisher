@@ -97,6 +97,24 @@ async def used_domains(client_id: Optional[int] = Query(None)):
     return [r[0] for r in rows if r[0] is not None]
 
 
+@router.delete("/bulk-delete")
+async def bulk_delete_domains(domains: List[str]):
+    """Delete multiple domains by name."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        placeholders = ",".join(["?" for _ in domains])
+        await db.execute(f"DELETE FROM my_domains WHERE domain IN ({placeholders})", domains)
+        await db.commit()
+    return {"deleted": len(domains)}
+
+
+@router.delete("/{domain_id}")
+async def delete_domain(domain_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM my_domains WHERE id = ?", (domain_id,))
+        await db.commit()
+    return {"deleted": domain_id}
+
+
 @router.patch("/{domain_id}")
 async def toggle_domain(domain_id: int, body: DomainToggle):
     async with aiosqlite.connect(DB_PATH) as db:
