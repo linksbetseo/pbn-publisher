@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from config import DB_PATH, CSV_PATH
-from api import projects, clients, domains, publish, history
+from api import projects, clients, domains, publish, history, topical_map, content_writer
 
 APP_USER = os.getenv("APP_USER", "admin")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
@@ -150,6 +150,8 @@ app.include_router(clients.router)
 app.include_router(domains.router)
 app.include_router(publish.router)
 app.include_router(history.router)
+app.include_router(topical_map.router)
+app.include_router(content_writer.router)
 
 
 @app.get("/health")

@@ -64,3 +64,11 @@ export const dashboard = {
 }
 
 export default api
+
+export const topicalMap = {
+  generate: (data) => api.post('/api/topical-map', data),
+}
+
+export const contentWriter = {
+  generate: (data) => api.post('/api/content-writer/generate', data),
+}

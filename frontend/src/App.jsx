@@ -4,6 +4,8 @@ import Dashboard from './pages/Dashboard'
 import Projects from './pages/Projects'
 import Publisher from './pages/Publisher'
 import History from './pages/History'
+import TopicalMap from './pages/TopicalMap'
+import ContentWriter from './pages/ContentWriter'
 
 export default function App() {
   return (
@@ -17,6 +19,8 @@ export default function App() {
             <Route path="/projects" element={<Projects />} />
             <Route path="/publisher" element={<Publisher />} />
             <Route path="/history" element={<History />} />
+            <Route path="/topical-map" element={<TopicalMap />} />
+            <Route path="/content-writer" element={<ContentWriter />} />
           </Routes>
         </main>
       </div>
