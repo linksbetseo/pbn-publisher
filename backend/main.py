@@ -160,11 +160,11 @@ async def basic_auth_middleware(request: Request, call_next):
         try:
             decoded = base64.b64decode(auth[6:]).decode("utf-8")
             user, pwd = decoded.split(":", 1)
-            print(f"[AUTH] user={repr(user)} APP_USER={repr(APP_USER)} pwd_len={len(pwd)} app_pwd_len={len(APP_PASSWORD)} match_user={user==APP_USER} match_pwd={pwd==APP_PASSWORD}", flush=True)
+        except Exception:
+            pass
+        else:
             if secrets.compare_digest(user, APP_USER) and secrets.compare_digest(pwd, APP_PASSWORD):
                 return await call_next(request)
-        except Exception as e:
-            print(f"[AUTH] exception: {e}", flush=True)
     # Return 401 WITHOUT WWW-Authenticate to avoid browser popup
     # Frontend handles redirect to login page
     return Response(

@@ -135,6 +135,7 @@ async def ensure_tables():
         for col, typedef in [
             ("wp_category_id", "INTEGER DEFAULT NULL"),
             ("pillar_anchor", "TEXT DEFAULT ''"),
+            ("title", "TEXT DEFAULT ''"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE domain_keywords ADD COLUMN {col} {typedef}")
