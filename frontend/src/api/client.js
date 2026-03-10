@@ -6,7 +6,7 @@ const BASE_URL = import.meta.env.VITE_API_URL || (
 
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 120000,
+  timeout: 600000, // 10 min — article generation takes time
 })
 
 // Inject saved Basic Auth token on every request
@@ -19,13 +19,16 @@ api.interceptors.request.use(config => {
   return config
 })
 
-// On 401 — clear token and reload to show login
+// On 401 — only logout if we HAD a token (bad credentials, not missing token)
 api.interceptors.response.use(
   res => res,
   err => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem('pbn_auth_token')
-      window.dispatchEvent(new Event('pbn_logout'))
+    if (err.response?.status === 401 && !err.config?._isLoginCheck) {
+      const hadToken = !!localStorage.getItem('pbn_auth_token')
+      if (hadToken) {
+        localStorage.removeItem('pbn_auth_token')
+        window.dispatchEvent(new Event('pbn_logout'))
+      }
     }
     return Promise.reject(err)
   }
@@ -42,6 +45,16 @@ export function clearAuthCredentials() {
 
 export function hasAuthToken() {
   return !!localStorage.getItem('pbn_auth_token')
+}
+
+// Login check — won't trigger logout interceptor
+export function checkCredentials(user, password) {
+  const token = btoa(`${user}:${password}`)
+  return axios.get(`${BASE_URL}/api/projects`, {
+    headers: { Authorization: `Basic ${token}` },
+    timeout: 10000,
+    _isLoginCheck: true,
+  })
 }
 
 export const projects = {

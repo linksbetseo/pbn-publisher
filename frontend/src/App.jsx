@@ -9,7 +9,7 @@ import TopicalMap from './pages/TopicalMap'
 import ContentWriter from './pages/ContentWriter'
 import Autopilot from './pages/Autopilot'
 import DomainHealth from './pages/DomainHealth'
-import { hasAuthToken, setAuthCredentials, clearAuthCredentials } from './api/client'
+import { hasAuthToken, setAuthCredentials, clearAuthCredentials, checkCredentials } from './api/client'
 import api from './api/client'
 
 function LoginPage({ onLogin }) {
@@ -22,12 +22,11 @@ function LoginPage({ onLogin }) {
     e.preventDefault()
     setLoading(true)
     setError('')
-    setAuthCredentials(user, pass)
     try {
-      await api.get('/api/projects')
+      await checkCredentials(user, pass)
+      setAuthCredentials(user, pass)
       onLogin()
     } catch {
-      clearAuthCredentials()
       setError('Nieprawidłowy login lub hasło')
     } finally {
       setLoading(false)
