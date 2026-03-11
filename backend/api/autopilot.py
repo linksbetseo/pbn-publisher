@@ -564,7 +564,8 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT title, keyword, wp_post_url FROM domain_keywords
-                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
+                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''
+                   ORDER BY published_at DESC LIMIT 50""",
                 (schedule_id,)
             ) as cur:
                 published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
@@ -617,20 +618,25 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                         except Exception as _ie:
                             logger.warning(f"[Image] {_img_provider} failed for '{keyword}': {_ie}")
 
-                    result = await publish_post(
-                        domain=sched["domain"],
-                        wp_login=sched["wp_login"],
-                        wp_pass=sched["wp_pass"],
-                        title=title,
-                        content=content,
-                        image_b64=image_b64,
-                        category_id=category_id,
-                        excerpt=excerpt,
-                        keyword=keyword,
-                        tags=lsi_tags,
-                        http_user=sched.get("http_user", ""),
-                        http_pass=sched.get("http_pass", ""),
-                    )
+                    async def _do_publish():
+                        r = await publish_post(
+                            domain=sched["domain"],
+                            wp_login=sched["wp_login"],
+                            wp_pass=sched["wp_pass"],
+                            title=title,
+                            content=content,
+                            image_b64=image_b64,
+                            category_id=category_id,
+                            excerpt=excerpt,
+                            keyword=keyword,
+                            tags=lsi_tags,
+                            http_user=sched.get("http_user", ""),
+                            http_pass=sched.get("http_pass", ""),
+                        )
+                        if not r.get("success"):
+                            raise RuntimeError(r.get("error", "WP publish failed"))
+                        return r
+                    result = await _with_retry(_do_publish, max_attempts=2, base_delay=5.0)
 
                 if result.get("success"):
                     wp_url = result.get("url", "")
@@ -764,7 +770,8 @@ async def run_daily_all():
                 keywords = [dict(r) for r in await cur.fetchall()]
             async with db.execute(
                 """SELECT title, keyword, wp_post_url FROM domain_keywords
-                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
+                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''
+                   ORDER BY published_at DESC LIMIT 50""",
                 (schedule_id,)
             ) as cur:
                 published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
@@ -808,20 +815,26 @@ async def run_daily_all():
                         except Exception as _ie:
                             logger.warning(f"[Image] {_ip} failed for '{keyword}': {_ie}")
 
-                    result = await publish_post(
-                        domain=sched["domain"],
-                        wp_login=sched["wp_login"],
-                        wp_pass=sched["wp_pass"],
-                        title=article["title"],
-                        content=article["content"],
-                        image_b64=image_b64,
-                        category_id=kw_row.get("wp_category_id") or None,
-                        excerpt=excerpt,
-                        keyword=keyword,
-                        tags=lsi_tags,
-                        http_user=sched.get("http_user", ""),
-                        http_pass=sched.get("http_pass", ""),
-                    )
+                    _art = article  # capture for lambda
+                    async def _do_publish_daily():
+                        r = await publish_post(
+                            domain=sched["domain"],
+                            wp_login=sched["wp_login"],
+                            wp_pass=sched["wp_pass"],
+                            title=_art["title"],
+                            content=_art["content"],
+                            image_b64=image_b64,
+                            category_id=kw_row.get("wp_category_id") or None,
+                            excerpt=excerpt,
+                            keyword=keyword,
+                            tags=lsi_tags,
+                            http_user=sched.get("http_user", ""),
+                            http_pass=sched.get("http_pass", ""),
+                        )
+                        if not r.get("success"):
+                            raise RuntimeError(r.get("error", "WP publish failed"))
+                        return r
+                    result = await _with_retry(_do_publish_daily, max_attempts=2, base_delay=5.0)
 
                 if result.get("success"):
                     wp_url = result.get("url", "")
@@ -1114,7 +1127,8 @@ async def bulk_run_schedules(body: BulkActionRequest):
                 keywords = [dict(r) for r in await cur.fetchall()]
             async with db.execute(
                 """SELECT title, keyword, wp_post_url FROM domain_keywords
-                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
+                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''
+                   ORDER BY published_at DESC LIMIT 50""",
                 (schedule_id,)
             ) as cur:
                 published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]

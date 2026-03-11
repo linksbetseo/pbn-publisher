@@ -64,7 +64,10 @@ async def _serp_cache_set(key: str, data: dict) -> None:
 _BLOG_SKIP = re.compile(
     r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|tiktok\.com"
     r"|wikipedia\.org|reddit\.com|pinterest\.com|allegro\.pl|amazon\.|ebay\."
-    r"|olx\.pl|ceneo\.pl|linkedin\.com|quora\.com)",
+    r"|olx\.pl|ceneo\.pl|linkedin\.com|quora\.com|wykop\.pl|money\.pl"
+    r"|bankier\.pl|wp\.pl|onet\.pl|interia\.pl|gazeta\.pl|tvn24\.pl"
+    r"|polsatnews\.pl|rmf24\.pl|trojmiasto\.pl|gratka\.pl|otodom\.pl"
+    r"|otomoto\.pl|morele\.net|x-kom\.pl|mediaexpert\.pl)",
     re.IGNORECASE,
 )
 
@@ -105,9 +108,15 @@ def _extract_lsi(text: str, keyword: str, top_n: int = 20) -> list[str]:
 
 
 def _content_fingerprint(content: str) -> str:
-    """Simple fingerprint of first 200 words for dedup check."""
-    words = re.findall(r'\w+', content.lower())[:200]
-    return hashlib.md5(" ".join(words).encode()).hexdigest()
+    """Fingerprint from start + middle of article for better dedup detection."""
+    words = re.findall(r'\w+', content.lower())
+    total = len(words)
+    # Take 100 words from start + 100 words from middle
+    start = words[:100]
+    mid_start = total // 3
+    middle = words[mid_start:mid_start + 100]
+    combined = start + middle
+    return hashlib.md5(" ".join(combined).encode()).hexdigest()
 
 
 async def _fetch_serp_content(
@@ -292,7 +301,7 @@ def _build_faq_schema(faq_html: str, topic: str) -> str:
     return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
 
 
-def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int = 0, domain: str = "") -> str:
+def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int = 0, domain: str = "", language: str = "pl") -> str:
     """Build Article JSON-LD schema with E-E-A-T signals."""
     import json
     from datetime import datetime
@@ -310,7 +319,7 @@ def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int 
         "keywords": topic,
         "datePublished": now,
         "dateModified": now,
-        "inLanguage": "pl",
+        "inLanguage": language,
         "author": {
             "@type": "Organization",
             "name": publisher_name,
@@ -329,13 +338,13 @@ def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int 
     return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
 
 
-def _inject_anchors(html: str, anchors_info: str) -> str:
+def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
     """
     Inject client links into article paragraphs contextually.
     - First link: injected in paragraph 3-5 (after intro, inside content)
     - Additional links: spread across later paragraphs
     - Never injected in first 2 or last 2 paragraphs
-    - Surrounding context varies to avoid footprint
+    - Surrounding context varies to avoid footprint, language-aware
     """
     if not anchors_info:
         return html
@@ -344,14 +353,25 @@ def _inject_anchors(html: str, anchors_info: str) -> str:
     paragraphs = re.findall(r'<p>.*?</p>', html, re.DOTALL)
     para_count = len(paragraphs)
 
-    # Vary the surrounding context — anti-footprint
-    _LINK_CONTEXTS = [
-        lambda lnk: f" Więcej na ten temat znajdziesz na stronie {lnk}.",
-        lambda lnk: f" Szczegółowe informacje dostępne są pod adresem {lnk}.",
-        lambda lnk: f" Warto odwiedzić serwis {lnk}, gdzie znajdziesz więcej materiałów.",
-        lambda lnk: f" Dodatkowe zasoby: {lnk}.",
-        lambda lnk: f" Polecamy również stronę {lnk}.",
-    ]
+    # Vary the surrounding context — anti-footprint, language-aware
+    if language == "pl":
+        _LINK_CONTEXTS = [
+            lambda lnk: f" Więcej na ten temat znajdziesz na stronie {lnk}.",
+            lambda lnk: f" Szczegółowe informacje dostępne są pod adresem {lnk}.",
+            lambda lnk: f" Warto odwiedzić serwis {lnk}, gdzie znajdziesz więcej materiałów.",
+            lambda lnk: f" Dodatkowe zasoby: {lnk}.",
+            lambda lnk: f" Polecamy również stronę {lnk}.",
+            lambda lnk: f" Temat szczegółowo omawia {lnk}.",
+        ]
+    else:
+        _LINK_CONTEXTS = [
+            lambda lnk: f" Find more information at {lnk}.",
+            lambda lnk: f" Detailed resources are available at {lnk}.",
+            lambda lnk: f" We recommend visiting {lnk} for additional materials.",
+            lambda lnk: f" Additional resources: {lnk}.",
+            lambda lnk: f" Also check out {lnk}.",
+            lambda lnk: f" This topic is covered in depth at {lnk}.",
+        ]
     import random as _r
 
     for i, link in enumerate(links):
@@ -442,9 +462,13 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
                 best_para = para
 
         if best_para and best_score >= 1:
-            # Use title as anchor (4-6 words), with title attribute
-            anchor_words = title.split()[:6]
-            anchor_text = " ".join(anchor_words)
+            # Use keyword if available, else truncated title — with title attribute
+            kw = post.get("keyword", "")
+            if kw and len(kw.split()) <= 6:
+                anchor_text = kw
+            else:
+                anchor_words = title.split()[:5]
+                anchor_text = " ".join(anchor_words)
             link = f'<a href="{url}" title="{title}">{anchor_text}</a>'
             ctx = _r.choice(_INT_CONTEXTS)
             new_para = best_para[:-4] + ctx(link, title) + "</p>"
@@ -514,15 +538,21 @@ async def generate_article(
         return url
 
     # Rotate anchor text for natural link profile
-    rotated_anchor = _rotate_anchor(anchor_text, client_domain, language)
-    anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
+    # Guard: skip if no client_domain (avoid https:// broken link)
+    anchors_info = ""
+    if client_domain and client_domain.strip():
+        rotated_anchor = _rotate_anchor(anchor_text, client_domain, language)
+        anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
     if anchor_text2 and anchor_url2:
         anchors_info += f', <a href="{clean_url(anchor_url2)}">{anchor_text2}</a>'
     if anchor_text3 and anchor_url3:
         anchors_info += f', <a href="{clean_url(anchor_url3)}">{anchor_text3}</a>'
 
     import random as _random
+    from datetime import datetime as _dt
+    _current_year = _dt.utcnow().year
     variation = f" Kąt tematyczny: {variation_hint}." if variation_hint else ""
+    custom_block = f"\nDodatkowe wymagania: {custom_prompt}" if custom_prompt else ""
     lang_pl = language == "pl"
 
     # ── Layout variant (30% faq_top, 20% tldr, 25% short_answer, 25% standard) ──
@@ -601,12 +631,12 @@ async def generate_article(
             f"Sekcje artykułu: {', '.join(sections[:3])}\n"
             f"ZASADY: 50-60 znaków, zawiera '{topic}', przyciąga uwagę.\n"
             f"Użyj jednego z formatów:\n"
-            f"- '[Keyword] — kompletny przewodnik [rok]'\n"
+            f"- '[Keyword] — kompletny przewodnik {_current_year}'\n"
             f"- 'Jak [działanie związane z keyword]? [X] kroków'\n"
             f"- 'Co to jest [keyword] i jak [korzyść]?'\n"
             f"- '[X] najważniejszych faktów o [keyword]'\n"
             f"- '[Keyword]: wszystko co musisz wiedzieć'\n"
-            f"Tylko tytuł, bez cudzysłowów, bez markdown."
+            f"Tylko tytuł, bez cudzysłowów, bez markdown.{custom_block}"
         )
     else:
         title_user = (
@@ -614,12 +644,12 @@ async def generate_article(
             f"Article sections: {', '.join(sections[:3])}\n"
             f"RULES: 50-60 characters, contains '{topic}', attention-grabbing.\n"
             f"Use one of these formats:\n"
-            f"- '[Keyword] — Complete Guide [year]'\n"
+            f"- '[Keyword] — Complete Guide {_current_year}'\n"
             f"- 'How to [action related to keyword]? [X] Steps'\n"
             f"- 'What is [keyword] and how does it [benefit]?'\n"
             f"- '[X] Key Facts About [keyword]'\n"
             f"- '[Keyword]: Everything You Need to Know'\n"
-            f"Only the title, no quotes, no markdown."
+            f"Only the title, no quotes, no markdown.{custom_block}"
         )
     title = await _gpt(
         "Jesteś copywriterem SEO." if lang_pl else "You are an SEO copywriter.",
@@ -646,7 +676,7 @@ async def generate_article(
             f"Sekcje artykułu: {', '.join(sections[:4])}\n"
             f"PIERWSZY AKAPIT musi zaczynać się od definicji '{topic}' — konkretna, prosta odpowiedź.\n"
             f"Użyj '{topic}' {intro_kw_count}x naturalnie.{lsi_block}\n"
-            f"Tylko HTML <p> i <strong>, bez nagłówków. OK do użycia <ul>/<li> jeśli pasuje."
+            f"Tylko HTML <p> i <strong>, bez nagłówków. OK do użycia <ul>/<li> jeśli pasuje.{custom_block}"
         )
     else:
         intro_system = (
@@ -664,7 +694,7 @@ async def generate_article(
             f"Sections: {', '.join(sections[:4])}\n"
             f"FIRST PARAGRAPH must start with a definition of '{topic}'.\n"
             f"Use '{topic}' {intro_kw_count}x naturally.{lsi_block}\n"
-            f"Only HTML <p> and <strong>, no headings. OK to use <ul>/<li> if appropriate."
+            f"Only HTML <p> and <strong>, no headings. OK to use <ul>/<li> if appropriate.{custom_block}"
         )
     intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=700)
     if not intro_html.strip().startswith("<"):
@@ -699,36 +729,40 @@ async def generate_article(
             "- Don't repeat intro or conclusion"
         )
 
-    async def _generate_section(i: int, heading: str) -> str:
-        # Rotate LSI terms so each section gets different ones
-        section_lsi = lsi_per_section[i * 3 % max(1, len(lsi_per_section)):(i * 3 % max(1, len(lsi_per_section))) + 5] if lsi_per_section else []
-        lsi_section_block = f"\nSłowa LSI do wplecenia: {', '.join(section_lsi)}" if section_lsi else ""
-        if lang_pl:
-            section_user = (
-                f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
-                f"H2: '{heading}'\n"
-                f"Intencja: {intent_analysis}\n"
-                f"Cel: ~{words_per_section} słów, użyj '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
-                f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
-                f"Pisz ekspercko: konkretne fakty, liczby, przykłady. Unikaj ogólników."
-            )
-        else:
-            section_user = (
-                f"Write section for '{title}' (keyword: '{topic}').\n"
-                f"H2: '{heading}'\n"
-                f"Intent: {intent_analysis}\n"
-                f"Target: ~{words_per_section} words, use '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
-                f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
-                f"Write expertly: specific facts, numbers, examples. Avoid vague generalities."
-            )
-        sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=1100)
-        if not sec_html.strip().startswith("<"):
-            sec_html = _markdown_to_html(sec_html)
-        sec_html = _strip_markdown_remnants(sec_html)
-        logger.info(f"[Article] Section {i+1}/{len(sections)}: {heading[:40]}")
-        return sec_html
+    # Semaphore: max 4 concurrent GPT calls for sections (avoid rate limit)
+    _sem = asyncio.Semaphore(4)
 
-    # Generate all sections in parallel
+    async def _generate_section(i: int, heading: str) -> str:
+        async with _sem:
+            # Rotate LSI terms so each section gets different ones
+            section_lsi = lsi_per_section[i * 3 % max(1, len(lsi_per_section)):(i * 3 % max(1, len(lsi_per_section))) + 5] if lsi_per_section else []
+            lsi_section_block = f"\nSłowa LSI do wplecenia: {', '.join(section_lsi)}" if section_lsi else ""
+            if lang_pl:
+                section_user = (
+                    f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
+                    f"H2: '{heading}'\n"
+                    f"Intencja: {intent_analysis}\n"
+                    f"Cel: ~{words_per_section} słów, użyj '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
+                    f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
+                    f"Pisz ekspercko: konkretne fakty, liczby, przykłady. Unikaj ogólników.{custom_block}"
+                )
+            else:
+                section_user = (
+                    f"Write section for '{title}' (keyword: '{topic}').\n"
+                    f"H2: '{heading}'\n"
+                    f"Intent: {intent_analysis}\n"
+                    f"Target: ~{words_per_section} words, use '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
+                    f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
+                    f"Write expertly: specific facts, numbers, examples. Avoid vague generalities.{custom_block}"
+                )
+            sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=1100)
+            if not sec_html.strip().startswith("<"):
+                sec_html = _markdown_to_html(sec_html)
+            sec_html = _strip_markdown_remnants(sec_html)
+            logger.info(f"[Article] Section {i+1}/{len(sections)}: {heading[:40]}")
+            return sec_html
+
+    # Generate all sections in parallel (max 4 concurrent)
     sections_html = list(await asyncio.gather(*[
         _generate_section(i, heading) for i, heading in enumerate(sections)
     ]))
@@ -859,7 +893,7 @@ async def generate_article(
     content = "\n\n".join(p for p in content_parts if p)
 
     # Inject external anchor links
-    content = _inject_anchors(content, anchors_info)
+    content = _inject_anchors(content, anchors_info, language=language)
 
     # Inject internal links to already-published posts on this domain
     if published_posts:
@@ -885,7 +919,7 @@ async def generate_article(
 
     # Schema markup: FAQPage + Article
     faq_schema = _build_faq_schema(faq_html, topic)
-    article_schema = _build_article_schema(title, topic, excerpt, word_count=_count_words(content), domain=client_domain)
+    article_schema = _build_article_schema(title, topic, excerpt, word_count=_count_words(content), domain=client_domain, language=language)
     if faq_schema:
         content += f"\n\n{faq_schema}"
     if article_schema:

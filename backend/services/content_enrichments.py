@@ -296,6 +296,37 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
             tips = [t.strip("- •*").strip() for t in resp.choices[0].message.content.strip().split("\n") if t.strip()][:2]
             return {"tips": tips}
 
+        elif element == "stats_block":
+            if lang_pl:
+                prompt = (
+                    f"Podaj 4 konkretne dane statystyczne lub fakty liczbowe dotyczące tematu: '{topic}'. "
+                    f"Każdy fakt: liczba/procent + krótki opis (max 10 słów). "
+                    f"Format JSON: {{\"stats\": [[\"wartość\", \"opis\"], ...]}}. Tylko JSON."
+                )
+            else:
+                prompt = (
+                    f"Give 4 specific statistics or numerical facts about: '{topic}'. "
+                    f"Each fact: a number/percentage + short description (max 10 words). "
+                    f"JSON format: {{\"stats\": [[\"value\", \"description\"], ...]}}. JSON only."
+                )
+            resp = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4, max_tokens=200,
+                response_format={"type": "json_object"},
+            )
+            import json
+            raw = json.loads(resp.choices[0].message.content)
+            stats_raw = raw.get("stats", [])
+            # Normalize: ensure list of [val, desc] tuples
+            stats = []
+            for s in stats_raw[:4]:
+                if isinstance(s, list) and len(s) >= 2:
+                    stats.append((str(s[0]), str(s[1])))
+                elif isinstance(s, dict):
+                    stats.append((str(s.get("value", s.get("wartość", ""))), str(s.get("description", s.get("opis", "")))))
+            return {"stats": stats}
+
         elif element == "source_citations":
             # Real source citations are passed from SERP data, not GPT-generated
             # This element is handled specially in enrich_article() — skip GPT call
@@ -375,7 +406,7 @@ def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
         return ""
     heading = "Źródła i dodatkowe informacje" if lang_pl else "Sources & Further Reading"
     items = "".join(
-        f'<li><a href="{url}" rel="nofollow noopener" target="_blank">{url}</a></li>\n'
+        f'<li><a href="{url}" rel="noopener noreferrer" target="_blank">{url}</a></li>\n'
         for url in urls[:3]
     )
     return (
