@@ -120,6 +120,7 @@ async def _daily_autopilot_cron():
     """Run autopilot for all active schedules every day at 08:00 UTC."""
     import asyncio as _asyncio
     from datetime import timedelta
+    from api.autopilot import run_daily_all
     while True:
         now = datetime.utcnow()
         next_run = now.replace(hour=8, minute=0, second=0, microsecond=0)
@@ -128,9 +129,7 @@ async def _daily_autopilot_cron():
         wait_sec = (next_run - now).total_seconds()
         await _asyncio.sleep(wait_sec)
         try:
-            import httpx as _httpx
-            async with _httpx.AsyncClient(timeout=30) as hc:
-                await hc.post("http://localhost:8080/api/autopilot/run-daily")
+            await run_daily_all()
             print(f"[DailyCron] Autopilot triggered at {datetime.utcnow().isoformat()}")
         except Exception as e:
             print(f"[DailyCron] Error: {e}")
