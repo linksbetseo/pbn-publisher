@@ -122,12 +122,12 @@ async def _upload_image(
     )
     if resp.status_code in (200, 201):
         media_id = resp.json().get("id")
-        # Set alt text for SEO
+        # Set alt text, title, caption for SEO
         if media_id and alt_text:
             try:
                 await client.post(
                     f"{base_url}/wp-json/wp/v2/media/{media_id}",
-                    json={"alt_text": alt_text},
+                    json={"alt_text": alt_text, "title": alt_text, "caption": alt_text},
                     headers={"Authorization": auth, "Content-Type": "application/json"},
                     timeout=10,
                 )
@@ -224,10 +224,23 @@ async def publish_post(
                         "rank_math_title": title,
                         "_aioseop_description": excerpt[:160],
                         "_aioseop_title": title,
+                        # Open Graph
+                        "_yoast_wpseo_opengraph-title": title,
+                        "_yoast_wpseo_opengraph-description": excerpt[:200],
+                        "rank_math_facebook_title": title,
+                        "rank_math_facebook_description": excerpt[:200],
+                        # Twitter Card
+                        "_yoast_wpseo_twitter-title": title,
+                        "_yoast_wpseo_twitter-description": excerpt[:200],
                     })
                 if keyword:
                     meta["_yoast_wpseo_focuskw"] = keyword
                     meta["rank_math_focus_keyword"] = keyword
+                # Canonical URL
+                if post_data.get("slug") and base_url:
+                    canonical = f"{base_url}/{post_data['slug']}/"
+                    meta["_yoast_wpseo_canonical"] = canonical
+                    meta["rank_math_canonical_url"] = canonical
                 if meta:
                     post_data["meta"] = meta
 

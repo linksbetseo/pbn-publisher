@@ -94,6 +94,14 @@ def _add_toc_anchors(content: str, sections: list[str]) -> str:
         anchor = re.sub(r"[^a-z0-9]+", "-", section.lower().strip())[:50]
         escaped = re.escape(section)
         content = re.sub(rf'<h2>({escaped})</h2>', rf'<h2 id="{anchor}">\1</h2>', content)
+    # Also add ids to all h3 that don't have one yet
+    def _add_h3_id(m: re.Match) -> str:
+        if 'id=' in m.group(0):
+            return m.group(0)
+        text = re.sub(r'<[^>]+>', '', m.group(1))
+        anchor = re.sub(r"[^a-z0-9]+", "-", text.lower().strip())[:50]
+        return f'<h3 id="{anchor}">{m.group(1)}</h3>'
+    content = re.sub(r'<h3>(.*?)</h3>', _add_h3_id, content, flags=re.DOTALL)
     return content
 
 
@@ -197,7 +205,7 @@ def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
         return ""
     heading = "Źródła i dodatkowe informacje" if lang_pl else "Sources & Further Reading"
     items = "".join(
-        f'<li><a href="{url}" rel="noopener noreferrer" target="_blank">{url}</a></li>\n'
+        f'<li><a href="{url}" rel="nofollow noopener noreferrer" target="_blank">{url}</a></li>\n'
         for url in urls[:3]
     )
     return (
@@ -213,12 +221,13 @@ def _build_warning_box(text: str, lang_pl: bool) -> str:
     return f'<div {_STYLE_WARNING}>\n<strong>{label}:</strong> {text}\n</div>\n'
 
 
-def _build_step_by_step(steps: list[str], title: str) -> str:
+def _build_step_by_step(steps: list[str], title: str, lang_pl: bool = True) -> str:
+    step_label = "Krok" if lang_pl else "Step"
     items = ""
     for i, step in enumerate(steps, 1):
         items += (
             f'<li style="margin:10px 0;padding-left:8px;">'
-            f'<strong style="color:#1a73e8;">Krok {i}:</strong> {step}</li>\n'
+            f'<strong style="color:#1a73e8;">{step_label} {i}:</strong> {step}</li>\n'
         )
     return (
         f'<div {_STYLE_CHECKLIST}>\n'
@@ -676,7 +685,8 @@ async def enrich_article(
     if "step_by_step" in chosen:
         data = gpt_results.get("step_by_step", {})
         if data.get("steps"):
-            box = _build_step_by_step(data["steps"], data.get("title", "Krok po kroku"))
+            default_title = "Krok po kroku" if lang_pl else "Step by Step"
+            box = _build_step_by_step(data["steps"], data.get("title", default_title), lang_pl=lang_pl)
             content = _insert_after_section(content, 0, box)
 
     # ── Stats Block — po 1. sekcji ────────────────────────────────────────────

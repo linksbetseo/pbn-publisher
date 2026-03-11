@@ -483,7 +483,7 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
     return html
 
 
-def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -> str:
+def _inject_internal_links(html: str, published_posts: list[dict], topic: str, language: str = "pl") -> str:
     """
     Inject internal links to already-published posts on the same domain.
     - 1 link per ~400 words (min 2, max 5)
@@ -513,6 +513,15 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
         lambda lnk: f" Warto zapoznać się z: {lnk}.",
         lambda lnk: f" Dowiedz się więcej: {lnk}.",
     ]
+    _INT_CONTEXTS_EN = [
+        lambda lnk: f" Learn more in our article: {lnk}.",
+        lambda lnk: f" Read also: {lnk}.",
+        lambda lnk: f" Related article: {lnk}.",
+        lambda lnk: f" We cover this in detail here: {lnk}.",
+        lambda lnk: f" Worth reading: {lnk}.",
+        lambda lnk: f" Find out more: {lnk}.",
+    ]
+    _int_contexts = _INT_CONTEXTS_PL if language == "pl" else _INT_CONTEXTS_EN
 
     injected = 0
     used_urls: set = set()
@@ -570,7 +579,7 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
         kw = post.get("keyword", "")
         anchor_text = kw if (kw and len(kw.split()) <= 6) else " ".join(title.split()[:5])
         link = f'<a href="{url}" title="{title}">{anchor_text}</a>'
-        ctx = _r.choice(_INT_CONTEXTS_PL)
+        ctx = _r.choice(_int_contexts)
         new_para = best_para[:-4] + ctx(link) + "</p>"
         html = html.replace(best_para, new_para, 1)
         used_urls.add(url)
@@ -773,7 +782,8 @@ async def generate_article(
             "Zacznij od '<strong>[Keyword]</strong> to...' lub '[Keyword] polega na...'. Format AI Overview.\n"
             "2) Drugi akapit = dlaczego to ważne, kontekst praktyczny.\n"
             "3) Trzeci akapit = co czytelnik znajdzie w artykule (zapowiedź sekcji).\n"
-            "Używaj tagów <p> i <strong> dla kluczowych terminów."
+            "Używaj tagów <p> i <strong> dla kluczowych terminów.\n"
+            "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani # ani **tekst**. TYLKO tagi HTML <p> i <strong>."
         )
         intro_user = (
             f"Napisz wstęp do artykułu '{title}' (keyword: '{topic}').\n"
@@ -791,7 +801,8 @@ async def generate_article(
             "Start with '<strong>[Keyword]</strong> is...' format. AI Overview style.\n"
             "2) Second = why it matters, practical context.\n"
             "3) Third = what reader will find (section preview).\n"
-            "Use <p> and <strong> for key terms."
+            "Use <p> and <strong> for key terms.\n"
+            "STRICT: NO markdown. Never use ## or # or **text**. ONLY HTML tags <p> and <strong>."
         )
         intro_user = (
             f"Write intro for '{title}' (keyword: '{topic}').\n"
@@ -909,8 +920,18 @@ async def generate_article(
             f"- Para 3 (optional): CTA or question for readers\n"
             f"Use '{topic}' 1-2x. Specific conclusions, not generalities."
         )
+    _concl_system_pl = (
+        "Jesteś ekspertem SEO. Piszesz zakończenie artykułu w HTML.\n"
+        "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # ani **tekst**. "
+        "TYLKO tagi HTML: <h2>, <p>, <ul>, <li>, <strong>."
+    )
+    _concl_system_en = (
+        "You are an SEO expert. Write article conclusion in HTML.\n"
+        "STRICT: NO markdown. Never use ## or ### or # or **text**. "
+        "ONLY HTML tags: <h2>, <p>, <ul>, <li>, <strong>."
+    )
     conclusion_html = await _gpt(
-        "Jesteś ekspertem SEO." if lang_pl else "You are an SEO expert.",
+        _concl_system_pl if lang_pl else _concl_system_en,
         conclusion_user, temperature=0.7, max_tokens=600
     )
     if not conclusion_html.strip().startswith("<"):
@@ -925,6 +946,22 @@ async def generate_article(
     if paa_questions:
         paa_block_en = "\nReal Google PAA questions (use as base):\n" + "\n".join(f"- {q}" for q in paa_questions[:6])
 
+    _faq_headings_pl = [
+        "Najczęściej zadawane pytania (FAQ)",
+        "Pytania i odpowiedzi",
+        "FAQ — co warto wiedzieć?",
+        "Odpowiedzi na najczęstsze pytania",
+        "To pytają użytkownicy",
+    ]
+    _faq_headings_en = [
+        "Frequently Asked Questions (FAQ)",
+        "Questions & Answers",
+        "FAQ — What You Should Know",
+        "Common Questions Answered",
+        "People Also Ask",
+    ]
+    _faq_h2 = _random.choice(_faq_headings_pl if lang_pl else _faq_headings_en)
+
     if lang_pl:
         faq_user = (
             f"Stwórz sekcję FAQ dla artykułu o '{topic}'.\n"
@@ -933,8 +970,9 @@ async def generate_article(
             f"- Pierwsze pytanie = definicja/wyjaśnienie '{topic}'\n"
             f"- Odpowiedzi: 2-4 zdania, konkretne, bez lania wody\n"
             f"- Mix: pytania informacyjne + praktyczne + porównawcze{paa_block}\n"
-            f"HTML: <h2>Najczęściej zadawane pytania (FAQ)</h2>\n"
-            f"Format każdej pary: <h3>Pytanie?</h3><p>Odpowiedź.</p>"
+            f"HTML: <h2>{_faq_h2}</h2>\n"
+            f"Format każdej pary: <h3>Pytanie?</h3><p>Odpowiedź.</p>\n"
+            f"BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. TYLKO HTML."
         )
     else:
         faq_user = (
@@ -944,8 +982,9 @@ async def generate_article(
             f"- First question = definition/explanation of '{topic}'\n"
             f"- Answers: 2-4 sentences, specific, no filler\n"
             f"- Mix: informational + practical + comparative questions{paa_block_en}\n"
-            f"HTML: <h2>Frequently Asked Questions (FAQ)</h2>\n"
-            f"Each pair: <h3>Question?</h3><p>Answer.</p>"
+            f"HTML: <h2>{_faq_h2}</h2>\n"
+            f"Each pair: <h3>Question?</h3><p>Answer.</p>\n"
+            f"STRICT: NO markdown. ONLY HTML."
         )
     faq_html = await _gpt(
         "Jesteś ekspertem SEO. Tworzysz FAQ zoptymalizowane pod featured snippets, AI Overview i PAA (People Also Ask)." if lang_pl
@@ -977,26 +1016,26 @@ async def generate_article(
     logger.info("[Article] Excerpt done")
 
     # ── STEP 10: Assemble — apply layout variant ──────────────────────────────
-    h1 = f"<h1>{title}</h1>"
+    # NOTE: No <h1> in content — WordPress theme renders post title as H1 already.
+    # Adding <h1> here would create duplicate H1 on the page.
 
     if layout_variant == "faq_top":
-        # FAQ at the very top after H1 (30% of articles)
-        content_parts = [h1, faq_html, intro_html] + sections_html + [conclusion_html]
+        # FAQ at the very top (30% of articles)
+        content_parts = [faq_html, intro_html] + sections_html + [conclusion_html]
     elif layout_variant == "tldr":
-        # TL;DR box right after H1 (20%)
-        tldr_label = "TL;DR" if not lang_pl else "W skrócie"
+        # TL;DR box right at the start (20%)
+        tldr_label = "W skrócie" if lang_pl else "TL;DR"
         tldr_sentence = excerpt[:200] if excerpt else ""
         tldr_box = (
             f'<div style="background:#e8f0fe;border-left:4px solid #1a73e8;padding:12px 18px;'
             f'margin:16px 0 24px;border-radius:0 8px 8px 0;">'
             f'<strong>{tldr_label}:</strong> {tldr_sentence}</div>'
         ) if tldr_sentence else ""
-        content_parts = [h1, tldr_box, intro_html] + sections_html + [conclusion_html, faq_html]
+        content_parts = [tldr_box, intro_html] + sections_html + [conclusion_html, faq_html]
     elif layout_variant == "short_answer":
-        # "Krótka odpowiedź" box after H1 — good for featured snippets (25%)
+        # "Krótka odpowiedź" box — good for featured snippets (25%)
         sa_label = "Krótka odpowiedź" if lang_pl else "Quick Answer"
         sa_intro = intro_html[:400] if intro_html else ""
-        # Strip HTML tags for plain text in box
         import re as _re
         sa_text = _re.sub(r'<[^>]+>', '', sa_intro).strip()[:250]
         sa_box = (
@@ -1004,10 +1043,10 @@ async def generate_article(
             f'margin:16px 0 24px;border-radius:8px;">'
             f'<strong>✅ {sa_label}:</strong> {sa_text}</div>'
         ) if sa_text else ""
-        content_parts = [h1, sa_box, intro_html] + sections_html + [conclusion_html, faq_html]
+        content_parts = [sa_box, intro_html] + sections_html + [conclusion_html, faq_html]
     else:
         # Standard layout
-        content_parts = [h1, intro_html] + sections_html + [conclusion_html, faq_html]
+        content_parts = [intro_html] + sections_html + [conclusion_html, faq_html]
 
     content = "\n\n".join(p for p in content_parts if p)
 
@@ -1016,7 +1055,7 @@ async def generate_article(
 
     # Inject internal links to already-published posts on this domain
     if published_posts:
-        content = _inject_internal_links(content, published_posts, topic)
+        content = _inject_internal_links(content, published_posts, topic, language=language)
 
     # Final strip of any remaining ## markdown before enrichment
     content = _strip_markdown_remnants(content)

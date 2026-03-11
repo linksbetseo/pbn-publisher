@@ -256,12 +256,14 @@ async def publish_posts(body: PublishRequest):
                 title = article["title"]
                 content = article["content"]
                 excerpt = article.get("excerpt", "")
+                lsi_tags = article.get("lsi_tags", [])
                 if title.strip().lower() == body.topic.strip().lower():
                     title = f"{title} — {variation}"
             else:
                 title = body.title
                 content = body.content
                 excerpt = ""
+                lsi_tags = []
 
             # Determine image to use
             image_b64 = body.image_b64
@@ -277,6 +279,7 @@ async def publish_posts(body: PublishRequest):
                 image_b64=image_b64,
                 excerpt=excerpt,
                 keyword=body.topic or None,
+                tags=lsi_tags or None,
                 http_user=d.get("http_user", "") or "",
                 http_pass=d.get("http_pass", "") or "",
             )
