@@ -1,15 +1,16 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import api from '../api/client'
 
 const PAGE_SIZE = 50
 
 function ScoreBadge({ score }) {
   const map = {
-    good:   { label: 'Dobry',   cls: 'bg-green-100 text-green-700' },
-    medium: { label: 'Średni',  cls: 'bg-yellow-100 text-yellow-700' },
-    weak:   { label: 'Słaby',   cls: 'bg-red-100 text-red-700' },
+    good:     { label: 'Dobry',    cls: 'bg-green-100 text-green-700' },
+    medium:   { label: 'Średni',   cls: 'bg-yellow-100 text-yellow-700' },
+    weak:     { label: 'Słaby',    cls: 'bg-red-100 text-red-700' },
+    critical: { label: 'Krytyczny',cls: 'bg-red-200 text-red-800 font-bold' },
   }
-  const { label, cls } = map[score] || { label: score, cls: 'bg-gray-100 text-gray-600' }
+  const { label, cls } = map[score] || { label: score || '—', cls: 'bg-gray-100 text-gray-600' }
   return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${cls}`}>{label}</span>
 }
 
@@ -17,7 +18,7 @@ function ExpiryBadge({ days, date }) {
   if (days === null || days === undefined)
     return <span className="text-gray-400 text-xs">—</span>
   let cls = 'bg-green-100 text-green-700'
-  if (days < 0) cls = 'bg-red-200 text-red-800'
+  if (days < 0)  cls = 'bg-red-200 text-red-800'
   else if (days < 14) cls = 'bg-red-100 text-red-700'
   else if (days < 60) cls = 'bg-yellow-100 text-yellow-700'
   return (
@@ -28,6 +29,8 @@ function ExpiryBadge({ days, date }) {
 }
 
 function WpBadge({ ok }) {
+  if (ok === null || ok === undefined)
+    return <span className="text-gray-300 text-xs">—</span>
   return ok
     ? <span className="inline-flex items-center gap-1 text-green-600 text-xs font-medium"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" />OK</span>
     : <span className="inline-flex items-center gap-1 text-red-500 text-xs font-medium"><span className="w-2 h-2 rounded-full bg-red-400 inline-block" />Błąd</span>
@@ -42,6 +45,29 @@ function StatCard({ label, value, sub, color, onClick, active }) {
       <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">{label}</p>
       <p className={`text-2xl font-bold mt-1 ${color}`}>{value}</p>
       {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
+    </div>
+  )
+}
+
+// ── Progress bar ──────────────────────────────────────────────────────────────
+
+function SnapshotProgress({ progress, onDone }) {
+  if (!progress || !progress.running) return null
+  const pct = progress.pct || 0
+  return (
+    <div className="mb-4 px-4 py-3 bg-blue-50 border border-blue-200 rounded-xl">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-blue-700">
+          Snapshot w toku — {progress.done}/{progress.total} domen ({pct}%)
+        </span>
+        <span className="text-xs text-blue-500 animate-pulse">● działa</span>
+      </div>
+      <div className="w-full bg-blue-100 rounded-full h-2">
+        <div
+          className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
     </div>
   )
 }
@@ -72,7 +98,7 @@ function SnapshotsTab() {
     setSnapping(true)
     try {
       await api.post('/api/health/snapshot')
-      setTimeout(load, 3000) // reload after 3s
+      setTimeout(load, 5000)
     } catch (e) {
       console.error(e)
     } finally {
@@ -84,7 +110,6 @@ function SnapshotsTab() {
     !search || s.domain.toLowerCase().includes(search.toLowerCase())
   )
 
-  // Group by snapped_at date for display
   const byDate = filtered.reduce((acc, s) => {
     const date = s.snapped_at?.slice(0, 10) || 'unknown'
     if (!acc[date]) acc[date] = []
@@ -170,7 +195,7 @@ function SnapshotsTab() {
   )
 }
 
-// ── Live zakładka ─────────────────────────────────────────────────────────────
+// ── HTTP Auth Modal ───────────────────────────────────────────────────────────
 
 function HttpAuthModal({ domain, onClose }) {
   const [user, setUser] = useState('')
@@ -223,6 +248,8 @@ function HttpAuthModal({ domain, onClose }) {
   )
 }
 
+// ── Live zakładka ─────────────────────────────────────────────────────────────
+
 function LiveTab() {
   const [domains, setDomains] = useState([])
   const [total, setTotal] = useState(0)
@@ -236,6 +263,8 @@ function LiveTab() {
   const [authModal, setAuthModal] = useState(null)
   const [snapping, setSnapping] = useState(false)
   const [snapMsg, setSnapMsg] = useState('')
+  const [progress, setProgress] = useState(null)
+  const pollRef = useRef(null)
 
   const liveCheck = useCallback(async (domainId) => {
     setLiveChecking(prev => ({ ...prev, [domainId]: true }))
@@ -256,6 +285,9 @@ function LiveTab() {
       setTotal(res.data.total)
       setDomains(prev => append ? [...prev, ...res.data.domains] : res.data.domains)
       setOffset(off + PAGE_SIZE)
+      if (res.data.snapshot_progress) {
+        setProgress(res.data.snapshot_progress)
+      }
     } catch (e) {
       console.error(e)
     } finally {
@@ -263,21 +295,56 @@ function LiveTab() {
     }
   }, [])
 
-  useEffect(() => { load(0) }, [load])
+  // Poll snapshot progress
+  const startPolling = useCallback(() => {
+    if (pollRef.current) return
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await api.get('/api/health/snapshot-progress')
+        setProgress(res.data)
+        if (!res.data.running) {
+          // Snapshot finished — reload data
+          clearInterval(pollRef.current)
+          pollRef.current = null
+          setSnapping(false)
+          setSnapMsg('Snapshot zakończony! Dane zaktualizowane.')
+          await load(0)
+          setTimeout(() => setSnapMsg(''), 4000)
+        }
+      } catch (e) {
+        clearInterval(pollRef.current)
+        pollRef.current = null
+      }
+    }, 4000)
+  }, [load])
+
+  useEffect(() => {
+    load(0)
+    // Check if snapshot already running
+    api.get('/api/health/snapshot-progress').then(res => {
+      if (res.data.running) {
+        setProgress(res.data)
+        setSnapping(true)
+        startPolling()
+      }
+    }).catch(() => {})
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [load, startPolling])
 
   const triggerSnapshot = async () => {
+    if (snapping) return
     setSnapping(true)
-    setSnapMsg('Snapshot w toku — może potrwać kilka minut...')
+    setSnapMsg('Snapshot uruchomiony — zbieranie danych...')
     try {
-      await api.post('/api/health/snapshot')
-      setSnapMsg('Snapshot uruchomiony w tle. Dane pojawią się za chwilę.')
-      setTimeout(async () => {
-        await load(0)
-        setSnapMsg('')
-      }, 15000)
+      const res = await api.post('/api/health/snapshot')
+      if (res.data.already_running) {
+        setSnapMsg('Snapshot już działa w tle...')
+      }
+      startPolling()
     } catch (e) {
-      setSnapMsg('Błąd snapshotu: ' + (e.response?.data?.detail || e.message))
-    } finally {
+      setSnapMsg('Błąd: ' + (e.response?.data?.detail || e.message))
       setSnapping(false)
     }
   }
@@ -293,8 +360,10 @@ function LiveTab() {
       if (filter === 'good') return d.health_score === 'good'
       if (filter === 'medium') return d.health_score === 'medium'
       if (filter === 'weak') return d.health_score === 'weak'
+      if (filter === 'critical') return d.health_score === 'critical'
       if (filter === 'expiring') return d.days_to_expiry !== null && d.days_to_expiry < 60
       if (filter === 'wp_err') return !d.wp_ok
+      if (filter === 'no_snap') return !d.from_snapshot
       return true
     })
     .sort((a, b) => {
@@ -306,9 +375,14 @@ function LiveTab() {
   const good = domains.filter(d => d.health_score === 'good').length
   const medium = domains.filter(d => d.health_score === 'medium').length
   const weak = domains.filter(d => d.health_score === 'weak').length
+  const critical = domains.filter(d => d.health_score === 'critical').length
   const expiring = domains.filter(d => d.days_to_expiry !== null && d.days_to_expiry < 60).length
   const wpErrors = domains.filter(d => !d.wp_ok).length
-  const avgTraffic = domains.length ? Math.round(domains.reduce((s, d) => s + (d.traffic || 0), 0) / domains.length) : 0
+  const noSnap = domains.filter(d => !d.from_snapshot).length
+  const avgTraffic = domains.length
+    ? Math.round(domains.reduce((s, d) => s + (d.traffic || 0), 0) / domains.length)
+    : 0
+  const lastSnap = domains.find(d => d.snapped_at)?.snapped_at
 
   const SortIcon = ({ k }) => sortKey !== k
     ? <span className="text-gray-300 ml-1">↕</span>
@@ -319,8 +393,9 @@ function LiveTab() {
   return (
     <div>
       {authModal && <HttpAuthModal domain={authModal} onClose={() => setAuthModal(null)} />}
+
       {/* Summary cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 mb-5">
         <StatCard label="Wszystkie" value={total} color="text-gray-800" />
         <StatCard label="Dobre" value={good} color="text-green-600" sub="ruch≥500 lub kw≥200"
           onClick={() => setFilter(f => f === 'good' ? 'all' : 'good')} active={filter === 'good'} />
@@ -328,31 +403,68 @@ function LiveTab() {
           onClick={() => setFilter(f => f === 'medium' ? 'all' : 'medium')} active={filter === 'medium'} />
         <StatCard label="Słabe" value={weak} color="text-red-600"
           onClick={() => setFilter(f => f === 'weak' ? 'all' : 'weak')} active={filter === 'weak'} />
+        <StatCard label="Krytyczne" value={critical} color="text-red-800" sub="wygasa <7d"
+          onClick={() => setFilter(f => f === 'critical' ? 'all' : 'critical')} active={filter === 'critical'} />
         <StatCard label="Wygasające" value={expiring} color="text-orange-600" sub="<60 dni"
           onClick={() => setFilter(f => f === 'expiring' ? 'all' : 'expiring')} active={filter === 'expiring'} />
         <StatCard label="WP błąd" value={wpErrors} color="text-red-500"
           onClick={() => setFilter(f => f === 'wp_err' ? 'all' : 'wp_err')} active={filter === 'wp_err'} />
+        <StatCard label="Bez snapsh." value={noSnap} color="text-gray-400"
+          onClick={() => setFilter(f => f === 'no_snap' ? 'all' : 'no_snap')} active={filter === 'no_snap'} />
       </div>
-      <div className="flex items-center justify-between mb-4">
+
+      {/* Progress bar */}
+      <SnapshotProgress progress={progress} />
+
+      {/* Toolbar */}
+      <div className="flex items-center justify-between mb-3">
         <div className="text-xs text-gray-400">
           Śr. ruch: {avgTraffic.toLocaleString()} / mies. · {domains.length} z {total} załadowanych
-          {domains.length > 0 && domains[0].snapped_at && (
-            <span className="ml-3 text-gray-300">· Snapshot: {domains.find(d => d.snapped_at)?.snapped_at?.slice(0, 16).replace('T', ' ')} UTC</span>
+          {lastSnap && (
+            <span className="ml-3 text-gray-300">
+              · Snapshot: {lastSnap.slice(0, 16).replace('T', ' ')} UTC
+            </span>
           )}
-          {domains.length > 0 && !domains[0].snapped_at && (
-            <span className="ml-3 text-orange-400 font-medium">· Brak snapshotu — kliknij "Odśwież wszystkie"</span>
+          {!lastSnap && domains.length > 0 && (
+            <span className="ml-3 text-orange-400 font-medium">
+              · Brak snapshotu — kliknij Odśwież
+            </span>
           )}
         </div>
-        <button
-          onClick={triggerSnapshot}
-          disabled={snapping}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50"
-        >
-          {snapping ? <><span className="animate-spin inline-block">⟳</span> W toku...</> : '📸 Odśwież wszystkie'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              const token = localStorage.getItem('pbn_token') || btoa(`${localStorage.getItem('pbn_user')||''}:${localStorage.getItem('pbn_pass')||''}`)
+              fetch('/api/health/export-csv', { headers: { Authorization: `Basic ${token}` } })
+                .then(r => r.blob())
+                .then(blob => {
+                  const a = document.createElement('a')
+                  a.href = URL.createObjectURL(blob)
+                  a.download = `domain_health_${new Date().toISOString().slice(0,10)}.csv`
+                  a.click()
+                })
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg text-xs font-medium hover:bg-gray-200 transition-colors"
+            title="Eksportuj do CSV"
+          >
+            ↓ CSV
+          </button>
+          <button
+            onClick={triggerSnapshot}
+            disabled={snapping}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors"
+          >
+            {snapping
+              ? <><span className="animate-spin inline-block">⟳</span> W toku...</>
+              : '📸 Odśwież wszystkie'}
+          </button>
+        </div>
       </div>
+
       {snapMsg && (
-        <div className="mb-3 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">{snapMsg}</div>
+        <div className="mb-3 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">
+          {snapMsg}
+        </div>
       )}
 
       {/* Search + filter */}
@@ -364,7 +476,7 @@ function LiveTab() {
           onChange={e => setSearch(e.target.value)}
           className="border border-gray-200 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
-        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+        <div className="flex flex-wrap gap-1 bg-gray-100 rounded-lg p-1">
           {[
             { k: 'all', label: 'Wszystkie' },
             { k: 'good', label: 'Dobre' },
@@ -372,6 +484,7 @@ function LiveTab() {
             { k: 'weak', label: 'Słabe' },
             { k: 'expiring', label: 'Wygasające' },
             { k: 'wp_err', label: 'WP błąd' },
+            { k: 'no_snap', label: 'Bez danych' },
           ].map(({ k, label }) => (
             <button key={k} onClick={() => setFilter(k)}
               className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
@@ -386,7 +499,7 @@ function LiveTab() {
         {loading && domains.length === 0 ? (
           <div className="flex items-center justify-center h-48 text-gray-400">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mr-3" />
-            Pobieranie danych... (może chwilę potrwać)
+            Pobieranie danych...
           </div>
         ) : (
           <table className="w-full text-sm">
@@ -405,18 +518,23 @@ function LiveTab() {
             </thead>
             <tbody className="divide-y divide-gray-50">
               {filtered.map(d => (
-                <tr key={d.id} className="hover:bg-gray-50 transition-colors">
+                <tr key={d.id} className={`hover:bg-gray-50 transition-colors ${d.health_score === 'critical' ? 'bg-red-50' : ''}`}>
                   <td className="px-4 py-3">
                     <a href={`https://${d.domain.replace(/^https?:\/\//, '')}`}
                       target="_blank" rel="noopener noreferrer"
                       className="text-blue-600 hover:underline font-medium text-xs">
                       {d.domain.replace(/^https?:\/\//, '')}
                     </a>
+                    {!d.from_snapshot && (
+                      <span className="ml-2 text-gray-300 text-xs" title="Brak snapshotu">●</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">{d.server || '—'}</td>
                   <td className="px-4 py-3 font-medium">
                     {d.traffic > 0
-                      ? <span className={d.traffic >= 500 ? 'text-green-600' : d.traffic >= 50 ? 'text-yellow-600' : 'text-gray-500'}>{d.traffic.toLocaleString()}</span>
+                      ? <span className={d.traffic >= 500 ? 'text-green-600' : d.traffic >= 50 ? 'text-yellow-600' : 'text-gray-500'}>
+                          {d.traffic.toLocaleString()}
+                        </span>
                       : <span className="text-gray-300">0</span>}
                   </td>
                   <td className="px-4 py-3 text-gray-700">
@@ -436,7 +554,7 @@ function LiveTab() {
                     <button
                       onClick={() => liveCheck(d.id)}
                       disabled={liveChecking[d.id]}
-                      title="Odśwież live"
+                      title="Sprawdź live teraz"
                       className="text-gray-400 hover:text-green-600 text-xs px-2 py-0.5 rounded hover:bg-green-50 transition-colors disabled:opacity-40"
                     >
                       {liveChecking[d.id] ? '⟳' : d.from_snapshot ? '↻' : '✓'}
@@ -474,14 +592,14 @@ export default function DomainHealth() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Zdrowie Domen</h2>
-          <p className="text-gray-500 text-sm mt-1">Monitoring ruchu, słów kluczowych, WP i wygaśnięcia domen</p>
+          <p className="text-gray-500 text-sm mt-1">Monitoring ruchu organicznego, słów kluczowych, WP i wygaśnięcia</p>
         </div>
       </div>
 
       {/* Tabs */}
       <div className="flex gap-1 bg-gray-100 rounded-lg p-1 mb-6 w-fit">
         {[
-          { k: 'live', label: 'Live check' },
+          { k: 'live', label: 'Przegląd domen' },
           { k: 'history', label: 'Historia snapshotów' },
         ].map(({ k, label }) => (
           <button key={k} onClick={() => setTab(k)}

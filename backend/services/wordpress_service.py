@@ -137,6 +137,24 @@ async def _upload_image(
     return None
 
 
+async def _ping_sitemaps(base_url: str, site_auth) -> None:
+    """Ping Google and Bing with updated sitemap after publishing."""
+    sitemap_url = f"{base_url}/sitemap.xml"
+    ping_urls = [
+        f"https://www.google.com/ping?sitemap={sitemap_url}",
+        f"https://www.bing.com/ping?sitemap={sitemap_url}",
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as ping_client:
+            for url in ping_urls:
+                try:
+                    await ping_client.get(url)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 async def publish_post(
     domain: str,
     wp_login: str,
@@ -193,18 +211,25 @@ async def publish_post(
                 if excerpt:
                     post_data["excerpt"] = excerpt
                 if tags:
-                    # Get or create tag IDs
                     tag_ids = await _get_or_create_tags(client, base_url, auth, tags)
                     if tag_ids:
                         post_data["tags"] = tag_ids
-                # Yoast SEO meta (works if Yoast plugin is installed)
+                # SEO meta — Yoast, RankMath, All-in-One SEO compatible
+                meta = {}
                 if excerpt:
-                    post_data["meta"] = {
-                        "_yoast_wpseo_metadesc": excerpt,
+                    meta.update({
+                        "_yoast_wpseo_metadesc": excerpt[:160],
                         "_yoast_wpseo_title": title,
-                        "rank_math_description": excerpt,
+                        "rank_math_description": excerpt[:160],
                         "rank_math_title": title,
-                    }
+                        "_aioseop_description": excerpt[:160],
+                        "_aioseop_title": title,
+                    })
+                if keyword:
+                    meta["_yoast_wpseo_focuskw"] = keyword
+                    meta["rank_math_focus_keyword"] = keyword
+                if meta:
+                    post_data["meta"] = meta
 
                 resp = await client.post(
                     f"{base_url}/wp-json/wp/v2/posts",
@@ -215,10 +240,15 @@ async def publish_post(
 
                 if resp.status_code in (200, 201):
                     data = resp.json()
+                    post_url = data.get("link", "")
+                    post_id = data.get("id")
+                    # Ping sitemaps asynchronously (non-blocking)
+                    import asyncio as _asyncio
+                    _asyncio.create_task(_ping_sitemaps(base_url, site_auth))
                     return {
                         "success": True,
-                        "url": data.get("link", ""),
-                        "post_id": data.get("id"),
+                        "url": post_url,
+                        "post_id": post_id,
                     }
                 else:
                     last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
