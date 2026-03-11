@@ -168,7 +168,7 @@ function TabPublish() {
   const deselectAll = () => setSelectedIds([])
 
   const handlePublish = async () => {
-    if (!selectedIds.length || !keyword.trim()) return
+    if (!selectedIds.length || !keyword.trim() || !clientDomain.trim()) return
     setPublishing(true)
     setResults([])
     setProgress({ done: 0, total: selectedIds.length })
@@ -321,12 +321,12 @@ function TabPublish() {
 
         {/* Links section */}
         <div className="border border-gray-200 rounded-lg p-4 space-y-3 bg-gray-50">
-          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Linki w artykule (max 3)</p>
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Linki w artykule — 1 obowiązkowy, 2 i 3 opcjonalne</p>
 
           {/* Link 1 */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">URL 1 (domena klienta)</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">URL 1 *</label>
               <input
                 type="text"
                 value={clientDomain}
@@ -336,7 +336,7 @@ function TabPublish() {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Anchor 1</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Anchor 1 *</label>
               <input
                 type="text"
                 value={anchor}
@@ -399,7 +399,7 @@ function TabPublish() {
 
       <button
         onClick={handlePublish}
-        disabled={publishing || !selectedIds.length || !keyword.trim()}
+        disabled={publishing || !selectedIds.length || !keyword.trim() || !clientDomain.trim()}
         className="px-6 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
       >
         {publishing ? (
