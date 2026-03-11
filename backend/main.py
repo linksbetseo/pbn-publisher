@@ -258,10 +258,14 @@ async def basic_auth_middleware(request: Request, call_next):
     path = request.url.path
     if path in ("/health", "/") or path.startswith("/assets") or path.endswith(".svg") or path.endswith(".ico") or path.endswith(".png") or path.endswith(".webmanifest"):
         return await call_next(request)
-    # Allow cron endpoints with X-Cron-Secret header
+    # Allow cron endpoints — triggered by Railway Cron or internal scheduler
     if path in ("/api/autopilot/run-daily", "/api/autopilot/run-bulk"):
         cron_token = request.headers.get("X-Cron-Secret", "")
-        if CRON_SECRET and cron_token and secrets.compare_digest(cron_token, CRON_SECRET):
+        # Accept if: no CRON_SECRET set, or token matches, or request from localhost
+        client_host = request.client.host if request.client else ""
+        is_local = client_host in ("127.0.0.1", "::1", "localhost")
+        token_ok = CRON_SECRET and cron_token and secrets.compare_digest(cron_token, CRON_SECRET)
+        if is_local or token_ok or not CRON_SECRET:
             return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
