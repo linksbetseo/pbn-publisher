@@ -256,7 +256,11 @@ async def basic_auth_middleware(request: Request, call_next):
         return await call_next(request)
     # Skip auth for health check and static assets
     path = request.url.path
-    if path in ("/health", "/") or path.startswith("/assets") or path.endswith(".svg") or path.endswith(".ico") or path.endswith(".png") or path.endswith(".webmanifest"):
+    # Pass-through: health, static assets, login endpoint, and all frontend SPA routes
+    if (path in ("/health", "/", "/api/auth/login")
+            or path.startswith("/assets")
+            or not path.startswith("/api")  # all non-API paths = SPA routes
+            or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
         return await call_next(request)
     # Allow cron endpoints — triggered by Railway Cron or internal scheduler
     if path in ("/api/autopilot/run-daily", "/api/autopilot/run-bulk"):
