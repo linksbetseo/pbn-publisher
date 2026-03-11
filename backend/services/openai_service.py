@@ -1010,8 +1010,14 @@ async def generate_article(
     if published_posts:
         content = _inject_internal_links(content, published_posts, topic)
 
-    # Enrich with random unique elements (2-3 per article)
+    # Final strip of any remaining ## markdown before enrichment
+    content = _strip_markdown_remnants(content)
+
+    # Enrich with random unique elements (3-4 per article)
     content = await enrich_article(content, topic, sections, lang_pl=(language == "pl"), openai_client=client, serp_urls=serp_urls)
+
+    # Final strip again after enrichment (GPT content in enrichments may also have ##)
+    content = _strip_markdown_remnants(content)
 
     # Deduplicate anchor links
     seen_hrefs: set = set()

@@ -586,11 +586,20 @@ async def enrich_article(
     n_elements: int = None,
     serp_urls: list = None,
 ) -> str:
-    """Losuje 3-4 elementy z puli 20 i wstrzykuje je do artykułu."""
-    if n_elements is None:
-        n_elements = random.randint(3, 4)
+    """
+    Wstrzykuje 4 elementy do artykułu:
+    - 2 gwarantowane (update_box + toc) — nie wymagają GPT, zawsze działają
+    - 2 losowe z puli GPT-elementów
+    """
+    # Guaranteed elements (no GPT needed)
+    GUARANTEED = ["update_box", "toc"]
+    # GPT elements pool (exclude guaranteed and source_citations which needs serp_urls)
+    GPT_POOL = [e for e in ALL_ELEMENTS if e not in {"update_box", "toc", "source_citations"}]
 
-    chosen = random.sample(ALL_ELEMENTS, min(n_elements, len(ALL_ELEMENTS)))
+    gpt_picks = random.sample(GPT_POOL, 2)
+    chosen = GUARANTEED + gpt_picks
+    if serp_urls:
+        chosen.append("source_citations")
     logger.info(f"[Enrichment] Chosen for '{topic}': {chosen}")
 
     # Fetch GPT data (parallel)
