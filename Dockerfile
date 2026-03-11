@@ -20,7 +20,7 @@ RUN mkdir -p backend/frontend_dist && \
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# Copy backend (cache bust: 2026-03-11f)
+# Copy backend (cache bust: 2026-03-11g)
 COPY backend/ ./backend/
 
 EXPOSE 8080

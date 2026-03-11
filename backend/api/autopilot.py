@@ -26,7 +26,6 @@ from config import DB_PATH
 from services.topical_map_service import generate_topical_map
 from services.openai_service import generate_article, generate_image
 from services.freepik_service import generate_image_freepik
-from services.gemini_image_service import generate_image_gemini
 from services.freepik_generate_service import generate_image_zimage, generate_image_flux
 from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
 
@@ -552,10 +551,6 @@ async def _fetch_image(image_source: str, keyword: str, title: str, img_prompt: 
         ],
         "freepik_flux": [
             ("freepik_flux", lambda: generate_image_flux(img_prompt)),
-            ("freepik_stock", lambda: generate_image_freepik(keyword)),
-        ],
-        "gemini": [
-            ("gemini", lambda: generate_image_gemini(img_prompt)),
             ("freepik_stock", lambda: generate_image_freepik(keyword)),
         ],
         "dalle": [
@@ -1386,7 +1381,7 @@ async def test_images():
     prompt = f"High-quality professional photo for blog article: '{title}'. Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks."
     results = {}
 
-    for source in ["freepik_stock", "freepik_zimage", "freepik_flux", "gemini", "dalle"]:
+    for source in ["freepik_stock", "freepik_zimage", "freepik_flux", "dalle"]:
         t0 = time.time()
         try:
             img, provider = await _fetch_image(source, keyword, title, prompt)
