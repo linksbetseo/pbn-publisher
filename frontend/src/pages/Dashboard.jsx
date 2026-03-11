@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { dashboard, history as historyApi } from '../api/client'
+import api from '../api/client'
 
 function StatCard({ label, value, color, icon }) {
   return (
@@ -57,19 +58,74 @@ function PublicationChart({ posts }) {
   )
 }
 
+function AutopilotWidget({ autopilotStats }) {
+  if (!autopilotStats) return null
+  const { active_schedules, pending_keywords, published_keywords, failed_keywords, next_cron_utc, recent_jobs } = autopilotStats
+
+  const formatNextRun = (iso) => {
+    if (!iso) return '—'
+    const d = new Date(iso)
+    return d.toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  }
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold text-gray-800">Autopilot</h3>
+        <span className="text-xs text-gray-400">Następny cron: {formatNextRun(next_cron_utc)} UTC</span>
+      </div>
+      <div className="grid grid-cols-4 gap-3 mb-4">
+        {[
+          { label: 'Aktywne', value: active_schedules, color: 'text-cyan-600', bg: 'bg-cyan-50' },
+          { label: 'W kolejce', value: pending_keywords, color: 'text-yellow-600', bg: 'bg-yellow-50' },
+          { label: 'Opublikowane', value: published_keywords, color: 'text-green-600', bg: 'bg-green-50' },
+          { label: 'Błędy', value: failed_keywords || 0, color: 'text-red-600', bg: 'bg-red-50' },
+        ].map(s => (
+          <div key={s.label} className={`${s.bg} rounded-lg p-3 text-center`}>
+            <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
+            <p className="text-xs text-gray-500 mt-1">{s.label}</p>
+          </div>
+        ))}
+      </div>
+      {recent_jobs && recent_jobs.length > 0 && (
+        <div>
+          <p className="text-xs text-gray-400 uppercase font-semibold mb-2">Ostatnie joby</p>
+          <div className="space-y-1">
+            {recent_jobs.map(job => (
+              <div key={job.job_id} className="flex items-center justify-between text-xs text-gray-600 py-1 border-b border-gray-50 last:border-0">
+                <span className="font-mono text-gray-400">{job.created_at?.slice(0, 16)}</span>
+                <span>
+                  <span className="text-green-600 font-medium">+{job.published}</span>
+                  {job.failed > 0 && <span className="text-red-500 ml-2">✗{job.failed}</span>}
+                </span>
+                <span className={`px-2 py-0.5 rounded-full text-xs ${job.error ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
+                  {job.error ? 'error' : 'ok'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [recentPosts, setRecentPosts] = useState([])
+  const [autopilotStats, setAutopilotStats] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     Promise.all([
       dashboard.stats(),
       historyApi.list({ limit: 500, offset: 0, status: 'published' }),
+      api.get('/api/autopilot/stats').catch(() => ({ data: null })),
     ])
-      .then(([s, p]) => {
+      .then(([s, p, ap]) => {
         setStats(s)
         setRecentPosts(p.data.posts || [])
+        setAutopilotStats(ap.data)
       })
       .catch(console.error)
       .finally(() => setLoading(false))
@@ -109,6 +165,10 @@ export default function Dashboard() {
 
           <div className="mb-8">
             <PublicationChart posts={recentPosts} />
+          </div>
+
+          <div className="mb-8">
+            <AutopilotWidget autopilotStats={autopilotStats} />
           </div>
 
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">

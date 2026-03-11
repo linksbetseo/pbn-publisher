@@ -311,6 +311,14 @@ async def generate_map_for_schedule(schedule_id: int):
         ) as cur:
             existing_kws = {row[0] for row in await cur.fetchall()}
 
+        # Also exclude keywords already published on this domain (cross-schedule dedup)
+        async with db.execute(
+            "SELECT DISTINCT keyword FROM domain_keywords WHERE my_domain_id=? AND status='published'",
+            (sched["my_domain_id"],)
+        ) as cur:
+            domain_published_kws = {row[0] for row in await cur.fetchall()}
+        existing_kws |= domain_published_kws
+
         for pillar in tmap.get("pillars", []):
             anchor = pillar["anchor"]
             label = pillar["label"]
@@ -868,7 +876,7 @@ async def run_daily_all():
 
 @router.get("/stats")
 async def autopilot_stats():
-    """Globalne statystyki autopilota."""
+    """Globalne statystyki autopilota — używane przez Dashboard widget."""
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM domain_schedules") as cur:
@@ -881,12 +889,33 @@ async def autopilot_stats():
             pending = (await cur.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='published'") as cur:
             published = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='failed'") as cur:
+            failed = (await cur.fetchone())[0]
+        # Last 3 completed jobs
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM run_jobs WHERE done=1 ORDER BY created_at DESC LIMIT 3"
+        ) as cur:
+            recent_jobs = [dict(r) for r in await cur.fetchall()]
+        # Next cron run: daily 08:00 UTC
+        now = datetime.utcnow()
+        next_cron = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if next_cron <= now:
+            from datetime import timedelta
+            next_cron += timedelta(days=1)
+
+    for job in recent_jobs:
+        job['results'] = _json.loads(job.pop('results_json', '[]'))
+
     return {
         "total_schedules": total_schedules,
         "active_schedules": active_schedules,
         "total_keywords": total_keywords,
         "pending_keywords": pending,
         "published_keywords": published,
+        "failed_keywords": failed,
+        "next_cron_utc": next_cron.strftime("%Y-%m-%dT%H:%M:00Z"),
+        "recent_jobs": recent_jobs,
     }
 
 
@@ -1228,3 +1257,48 @@ async def retry_keyword(keyword_id: int):
         )
         await db.commit()
     return {"updated": keyword_id, "status": "pending"}
+
+
+@router.get("/schedules/{schedule_id}/export-csv")
+async def export_keywords_csv(schedule_id: int):
+    """Export keyword map as CSV — keyword, type, pillar, volume, difficulty, status, published_at, url."""
+    from fastapi.responses import StreamingResponse
+    import csv
+    import io
+
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM domain_schedules WHERE id=?", (schedule_id,)
+        ) as cur:
+            sched_row = await cur.fetchone()
+        if not sched_row:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Harmonogram nie istnieje")
+        async with db.execute(
+            """SELECT keyword, keyword_type, pillar_label, search_volume, keyword_difficulty,
+                      status, published_at, wp_post_url, title
+               FROM domain_keywords WHERE schedule_id=?
+               ORDER BY keyword_type DESC, search_volume DESC""",
+            (schedule_id,)
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=[
+        "keyword", "keyword_type", "pillar_label", "search_volume",
+        "keyword_difficulty", "status", "published_at", "wp_post_url", "title"
+    ])
+    writer.writeheader()
+    writer.writerows(rows)
+    output.seek(0)
+
+    seed = dict(sched_row).get("seed_keyword", str(schedule_id)).replace(" ", "_")[:30]
+    filename = f"keywords_{seed}_{schedule_id}.csv"
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )

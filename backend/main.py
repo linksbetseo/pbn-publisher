@@ -135,6 +135,82 @@ async def _daily_autopilot_cron():
             print(f"[DailyCron] Error: {e}")
 
 
+async def _date_modified_refresh_cron():
+    """Refresh dateModified on published WP posts every ~6 months (180 days)."""
+    import asyncio as _asyncio
+    from datetime import timedelta
+    import aiosqlite as _aiosqlite
+    import httpx as _httpx
+    import base64 as _b64
+
+    # Run every Sunday at 04:00 UTC
+    while True:
+        now = datetime.utcnow()
+        days_ahead = (6 - now.weekday()) % 7 or 7  # next Sunday
+        next_run = (now + timedelta(days=days_ahead)).replace(hour=4, minute=0, second=0, microsecond=0)
+        wait_sec = max(0, (next_run - now).total_seconds())
+        await _asyncio.sleep(wait_sec)
+        try:
+            cutoff = (datetime.utcnow() - timedelta(days=180)).isoformat()
+            async with _aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = _aiosqlite.Row
+                async with db.execute(
+                    """SELECT dk.id, dk.wp_post_url, md.domain, md.wp_login, md.wp_pass
+                       FROM domain_keywords dk
+                       JOIN my_domains md ON md.id = dk.my_domain_id
+                       WHERE dk.status='published' AND dk.wp_post_url!=''
+                         AND (dk.published_at IS NULL OR dk.published_at < ?)
+                       LIMIT 50""",
+                    (cutoff,)
+                ) as cur:
+                    posts = [dict(r) for r in await cur.fetchall()]
+
+            refreshed = 0
+            for post in posts:
+                try:
+                    # Extract WP post ID from URL
+                    import re as _re
+                    # Try WP REST API: PATCH /wp-json/wp/v2/posts/{id}
+                    url = post["wp_post_url"]
+                    domain = post["domain"].rstrip("/")
+                    if not domain.startswith("http"):
+                        domain = "https://" + domain
+                    creds = _b64.b64encode(f"{post['wp_login']}:{post['wp_pass']}".encode()).decode()
+                    headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+                    now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                    # Try to find post ID via search by URL
+                    slug = url.rstrip("/").split("/")[-1]
+                    async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
+                        search_resp = await hc.get(
+                            f"{domain}/wp-json/wp/v2/posts",
+                            params={"slug": slug, "_fields": "id"},
+                            headers=headers
+                        )
+                    if search_resp.status_code == 200:
+                        found = search_resp.json()
+                        if found:
+                            wp_id = found[0]["id"]
+                            async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
+                                patch_resp = await hc.post(
+                                    f"{domain}/wp-json/wp/v2/posts/{wp_id}",
+                                    json={"modified": now_str},
+                                    headers=headers
+                                )
+                            if patch_resp.status_code in (200, 201):
+                                async with _aiosqlite.connect(DB_PATH) as db:
+                                    await db.execute(
+                                        "UPDATE domain_keywords SET published_at=? WHERE id=?",
+                                        (datetime.utcnow().isoformat(), post["id"])
+                                    )
+                                    await db.commit()
+                                refreshed += 1
+                except Exception:
+                    pass
+            print(f"[DateModifiedCron] Refreshed {refreshed}/{len(posts)} posts")
+        except Exception as e:
+            print(f"[DateModifiedCron] Error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -154,9 +230,11 @@ async def lifespan(app: FastAPI):
     import asyncio as _asyncio
     cron_task = _asyncio.create_task(_weekly_cron())
     daily_task = _asyncio.create_task(_daily_autopilot_cron())
+    date_mod_task = _asyncio.create_task(_date_modified_refresh_cron())
     yield
     cron_task.cancel()
     daily_task.cancel()
+    date_mod_task.cancel()
 
 
 app = FastAPI(title="PBN Publisher API", version="1.0.0", lifespan=lifespan)

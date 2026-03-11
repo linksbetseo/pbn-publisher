@@ -615,6 +615,23 @@ export default function Autopilot() {
     await load()
   }
 
+  const exportCsv = (id) => {
+    const BASE = import.meta.env.VITE_API_URL || ''
+    const token = localStorage.getItem('pbn_auth_token')
+    const headers = token ? `&_auth=${encodeURIComponent(token)}` : ''
+    // Use fetch + blob to keep auth header
+    fetch(`${BASE}/api/autopilot/schedules/${id}/export-csv`, {
+      headers: token ? { Authorization: `Basic ${token}` } : {},
+    }).then(r => r.blob()).then(blob => {
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `keywords_${id}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    }).catch(e => alert('Błąd eksportu CSV: ' + e.message))
+  }
+
   const updatePpd = async (id, val) => {
     await api.patch(`/api/autopilot/schedules/${id}`, { posts_per_day: Number(val) })
     await load()
@@ -841,6 +858,15 @@ export default function Autopilot() {
                   >
                     {expandedId === sched.id ? '▲ Frazy' : '▼ Frazy'}
                   </button>
+                  {sched.map_generated && (
+                    <button
+                      onClick={() => exportCsv(sched.id)}
+                      title="Eksportuj keyword map do CSV"
+                      className="px-2 py-1.5 text-green-600 border border-green-200 rounded-lg text-xs hover:bg-green-50"
+                    >
+                      ↓ CSV
+                    </button>
+                  )}
                   <button
                     onClick={() => deleteSchedule(sched.id)}
                     className="px-2 py-1.5 text-red-500 border border-red-200 rounded-lg text-xs hover:bg-red-50"

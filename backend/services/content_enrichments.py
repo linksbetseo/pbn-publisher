@@ -296,30 +296,10 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
             tips = [t.strip("- •*").strip() for t in resp.choices[0].message.content.strip().split("\n") if t.strip()][:2]
             return {"tips": tips}
 
-        elif element == "stats_block":
-            if lang_pl:
-                prompt = (
-                    f"Podaj 4 realistyczne (ale fikcyjne) statystyki dotyczące '{topic}'. "
-                    f"Format JSON: lista obiektów {{\"stat\": \"73%\", \"desc\": \"opis\"}}. "
-                    f"Tylko JSON, bez markdown."
-                )
-            else:
-                prompt = (
-                    f"Give 4 realistic (but fictional) statistics about '{topic}'. "
-                    f"JSON format: list of objects {{\"stat\": \"73%\", \"desc\": \"description\"}}. "
-                    f"JSON only, no markdown."
-                )
-            resp = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6, max_tokens=200,
-                response_format={"type": "json_object"},
-            )
-            import json
-            raw = json.loads(resp.choices[0].message.content)
-            items = raw if isinstance(raw, list) else raw.get("stats", raw.get("statistics", []))
-            stats = [(s.get("stat", ""), s.get("desc", "")) for s in items[:4] if isinstance(s, dict)]
-            return {"stats": stats}
+        elif element == "source_citations":
+            # Real source citations are passed from SERP data, not GPT-generated
+            # This element is handled specially in enrich_article() — skip GPT call
+            return {}
 
         elif element == "comparison_table":
             if lang_pl:
@@ -384,9 +364,26 @@ ALL_ELEMENTS = [
     "pro_tip",
     "comparison_table",
     "checklist",
-    "stats_block",
+    "source_citations",
     "update_box",
 ]
+
+
+def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
+    """Build a 'Sources' block from real SERP URLs."""
+    if not urls:
+        return ""
+    heading = "Źródła i dodatkowe informacje" if lang_pl else "Sources & Further Reading"
+    items = "".join(
+        f'<li><a href="{url}" rel="nofollow noopener" target="_blank">{url}</a></li>\n'
+        for url in urls[:3]
+    )
+    return (
+        f'<div {_STYLE_STATS}>\n'
+        f'<strong style="display:block;margin-bottom:10px;">📚 {heading}</strong>\n'
+        f'<ul style="margin:0;padding-left:20px;">\n{items}</ul>\n'
+        f'</div>\n'
+    )
 
 
 async def enrich_article(
@@ -396,6 +393,7 @@ async def enrich_article(
     lang_pl: bool,
     openai_client,
     n_elements: int = None,
+    serp_urls: list = None,
 ) -> str:
     """
     Losuje 2-3 elementy z puli i wstrzykuje je do artykułu.
@@ -408,7 +406,7 @@ async def enrich_article(
     logger.info(f"[Enrichment] Chosen for '{topic}': {chosen}")
 
     # Fetch GPT data for elements that need it (in parallel)
-    gpt_elements = [e for e in chosen if e not in ("toc", "update_box")]
+    gpt_elements = [e for e in chosen if e not in ("toc", "update_box", "source_citations")]
     gpt_tasks = {e: _gpt_enrichment(openai_client, topic, e, lang_pl) for e in gpt_elements}
     gpt_results = {}
     if gpt_tasks:
@@ -516,6 +514,12 @@ async def enrich_article(
                 para_end = content.find("</p>", h2_matches[mid_idx])
                 if para_end != -1:
                     content = content[:para_end + 4] + f"\n\n{check_html}" + content[para_end + 4:]
+
+    # ── Source Citations — wstaw na końcu (real SERP URLs, nie fikcyjne dane) ─
+    if "source_citations" in chosen and serp_urls:
+        citations_html = _build_source_citations(serp_urls, lang_pl)
+        if citations_html:
+            content = content + f"\n\n{citations_html}"
 
     logger.info(f"[Enrichment] Done for '{topic}' — {len(chosen)} elements injected")
     return content

@@ -14,23 +14,52 @@ Multi-pass article generation following n8n workflow pattern:
 """
 import asyncio
 import hashlib
+import json as _json
 import logging
 import re
+import time
 from typing import Optional
 
+import aiosqlite
 from openai import AsyncOpenAI
 
-from config import OPENAI_API_KEY
+from config import OPENAI_API_KEY, DB_PATH
 from services.content_enrichments import enrich_article
-
-import time
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 logger = logging.getLogger(__name__)
 
-# In-memory SERP cache: key=(topic,location,lang) → (timestamp, data)
-_SERP_CACHE: dict = {}
-_SERP_CACHE_TTL = 86400  # 24 hours
+_SERP_CACHE_TTL = 86400  # 24 hours — stored in SQLite serp_cache table
+
+
+async def _serp_cache_get(key: str) -> Optional[dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT data_json FROM serp_cache WHERE cache_key=? AND expires_at > ?",
+                (key, time.time())
+            ) as cur:
+                row = await cur.fetchone()
+        if row:
+            return _json.loads(row[0])
+    except Exception:
+        pass
+    return None
+
+
+async def _serp_cache_set(key: str, data: dict) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS serp_cache (cache_key TEXT PRIMARY KEY, data_json TEXT, expires_at REAL)"
+            )
+            await db.execute(
+                "INSERT OR REPLACE INTO serp_cache (cache_key, data_json, expires_at) VALUES (?,?,?)",
+                (key, _json.dumps(data, ensure_ascii=False), time.time() + _SERP_CACHE_TTL)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[SERP] Cache write failed: {e}")
 
 _BLOG_SKIP = re.compile(
     r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|tiktok\.com"
@@ -93,17 +122,15 @@ async def _fetch_serp_content(
     Returns: text, avg_words, avg_density, lsi_terms, paa_questions
     Cached 24h per (topic, location, language).
     """
-    empty = {"text": "", "avg_words": 0, "avg_density": 0.0, "lsi_terms": [], "paa_questions": []}
+    empty = {"text": "", "avg_words": 0, "avg_density": 0.0, "lsi_terms": [], "paa_questions": [], "serp_urls": []}
     if not dfs_login or not dfs_password:
         return empty
 
-    cache_key = (topic.lower().strip(), location_code, language_code)
-    now = time.time()
-    if cache_key in _SERP_CACHE:
-        ts, cached = _SERP_CACHE[cache_key]
-        if now - ts < _SERP_CACHE_TTL:
-            logger.info(f"[SERP] Cache hit for '{topic}'")
-            return cached
+    cache_key = f"{topic.lower().strip()}:{location_code}:{language_code}"
+    cached = await _serp_cache_get(cache_key)
+    if cached:
+        logger.info(f"[SERP] Cache hit for '{topic}'")
+        return cached
 
     try:
         from services.dataforseo_service import DataForSEOClient
@@ -146,8 +173,9 @@ async def _fetch_serp_content(
             "avg_density": avg_density,
             "lsi_terms": lsi_terms,
             "paa_questions": paa_questions[:8],
+            "serp_urls": blog_urls,  # real URLs for source_citations
         }
-        _SERP_CACHE[cache_key] = (now, result)
+        await _serp_cache_set(cache_key, result)
         return result
 
     except Exception as e:
@@ -380,6 +408,7 @@ async def generate_article(
     location_code: int = 2616,
     published_posts: Optional[list] = None,  # for internal linking
     domain_fingerprints: Optional[set] = None,  # for dedup check
+    layout_variant: Optional[str] = None,  # "faq_top" | "tldr" | "short_answer" | None (random)
 ) -> dict:
     def clean_url(url: str) -> str:
         url = url.strip()
@@ -395,8 +424,14 @@ async def generate_article(
     if anchor_text3 and anchor_url3:
         anchors_info += f', <a href="{clean_url(anchor_url3)}">{anchor_text3}</a>'
 
+    import random as _random
     variation = f" Kąt tematyczny: {variation_hint}." if variation_hint else ""
     lang_pl = language == "pl"
+
+    # ── Layout variant (30% faq_top, 20% tldr, 25% short_answer, 25% standard) ──
+    if layout_variant is None:
+        _rv = _random.random()
+        layout_variant = "faq_top" if _rv < 0.30 else ("tldr" if _rv < 0.50 else ("short_answer" if _rv < 0.75 else "standard"))
 
     # ── STEP 1: SERP + competitor analysis ───────────────────────────────────
     language_code = "pl" if lang_pl else "en"
@@ -406,6 +441,7 @@ async def generate_article(
     avg_density = serp_data["avg_density"] or 1.5
     lsi_terms = serp_data["lsi_terms"]
     paa_questions = serp_data.get("paa_questions", [])
+    serp_urls = serp_data.get("serp_urls", [])
 
     target_words = max(800, avg_words)
     target_density = round(max(0.5, min(3.0, avg_density)), 1)
@@ -686,12 +722,40 @@ async def generate_article(
     excerpt = excerpt.strip('"\'').strip()
     logger.info("[Article] Excerpt done")
 
-    # ── STEP 10: Assemble ─────────────────────────────────────────────────────
-    # H1 at top (some WP themes don't add it automatically)
+    # ── STEP 10: Assemble — apply layout variant ──────────────────────────────
     h1 = f"<h1>{title}</h1>"
 
-    content_parts = [h1, intro_html] + sections_html + [conclusion_html, faq_html]
-    content = "\n\n".join(content_parts)
+    if layout_variant == "faq_top":
+        # FAQ at the very top after H1 (30% of articles)
+        content_parts = [h1, faq_html, intro_html] + sections_html + [conclusion_html]
+    elif layout_variant == "tldr":
+        # TL;DR box right after H1 (20%)
+        tldr_label = "TL;DR" if not lang_pl else "W skrócie"
+        tldr_sentence = excerpt[:200] if excerpt else ""
+        tldr_box = (
+            f'<div style="background:#e8f0fe;border-left:4px solid #1a73e8;padding:12px 18px;'
+            f'margin:16px 0 24px;border-radius:0 8px 8px 0;">'
+            f'<strong>{tldr_label}:</strong> {tldr_sentence}</div>'
+        ) if tldr_sentence else ""
+        content_parts = [h1, tldr_box, intro_html] + sections_html + [conclusion_html, faq_html]
+    elif layout_variant == "short_answer":
+        # "Krótka odpowiedź" box after H1 — good for featured snippets (25%)
+        sa_label = "Krótka odpowiedź" if lang_pl else "Quick Answer"
+        sa_intro = intro_html[:400] if intro_html else ""
+        # Strip HTML tags for plain text in box
+        import re as _re
+        sa_text = _re.sub(r'<[^>]+>', '', sa_intro).strip()[:250]
+        sa_box = (
+            f'<div style="background:#f0fdf4;border:1px solid #86efac;padding:16px 20px;'
+            f'margin:16px 0 24px;border-radius:8px;">'
+            f'<strong>✅ {sa_label}:</strong> {sa_text}</div>'
+        ) if sa_text else ""
+        content_parts = [h1, sa_box, intro_html] + sections_html + [conclusion_html, faq_html]
+    else:
+        # Standard layout
+        content_parts = [h1, intro_html] + sections_html + [conclusion_html, faq_html]
+
+    content = "\n\n".join(p for p in content_parts if p)
 
     # Inject external anchor links
     content = _inject_anchors(content, anchors_info)
@@ -701,7 +765,7 @@ async def generate_article(
         content = _inject_internal_links(content, published_posts, topic)
 
     # Enrich with random unique elements (2-3 per article)
-    content = await enrich_article(content, topic, sections, lang_pl=(language == "pl"), openai_client=client)
+    content = await enrich_article(content, topic, sections, lang_pl=(language == "pl"), openai_client=client, serp_urls=serp_urls)
 
     # Deduplicate anchor links
     seen_hrefs: set = set()
