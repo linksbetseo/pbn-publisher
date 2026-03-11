@@ -263,20 +263,24 @@ def _strip_markdown_remnants(html: str) -> str:
     """
     Remove leftover markdown syntax from HTML content that GPT mixed in.
     Called on every GPT output AFTER markdown_to_html to catch mixed content.
-    e.g. GPT returns <h2>Title</h2> but inside <p> writes ## SubHeading or **bold**
     """
-    # Remove ```html ... ``` and ``` ... ``` code fences GPT wraps output in
+    # Remove ```html ... ``` and ``` ... ``` code fences
     html = re.sub(r"```(?:html|HTML)?\s*", "", html)
     html = re.sub(r"```\s*$", "", html, flags=re.MULTILINE)
-    # Convert any remaining ## / # headers that GPT slipped inside HTML blocks
-    html = re.sub(r"(?m)^#### (.+)$", r"<h4>\1</h4>", html)
-    html = re.sub(r"(?m)^### (.+)$", r"<h3>\1</h3>", html)
-    html = re.sub(r"(?m)^## (.+)$", r"<h2>\1</h2>", html)
-    html = re.sub(r"(?m)^# (.+)$", r"<h1>\1</h1>", html)
-    # Bold/italic inside HTML tags
+    # Convert ## headers — catch both line-start and inside <p> tags (GPT sometimes wraps heading in <p>)
+    html = re.sub(r"(?m)^\s*####\s+(.+)$", r"<h4>\1</h4>", html)
+    html = re.sub(r"(?m)^\s*###\s+(.+)$", r"<h3>\1</h3>", html)
+    html = re.sub(r"(?m)^\s*##\s+(.+)$", r"<h2>\1</h2>", html)
+    html = re.sub(r"(?m)^\s*#\s+(.+)$", r"<h1>\1</h1>", html)
+    # Also catch ## inside <p>...</p> blocks (GPT wraps heading in paragraph)
+    html = re.sub(r"<p>\s*####\s+(.+?)\s*</p>", r"<h4>\1</h4>", html, flags=re.DOTALL)
+    html = re.sub(r"<p>\s*###\s+(.+?)\s*</p>", r"<h3>\1</h3>", html, flags=re.DOTALL)
+    html = re.sub(r"<p>\s*##\s+(.+?)\s*</p>", r"<h2>\1</h2>", html, flags=re.DOTALL)
+    html = re.sub(r"<p>\s*#\s+(.+?)\s*</p>", r"<h2>\1</h2>", html, flags=re.DOTALL)
+    # Bold/italic inside HTML
     html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
     html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
-    # Single backtick code (but not triple — already handled above)
+    # Single backtick code
     html = re.sub(r"`([^`]+?)`", r"<code>\1</code>", html)
     return html.strip()
 
