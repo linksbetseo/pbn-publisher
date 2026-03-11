@@ -265,6 +265,9 @@ def _strip_markdown_remnants(html: str) -> str:
     Called on every GPT output AFTER markdown_to_html to catch mixed content.
     e.g. GPT returns <h2>Title</h2> but inside <p> writes ## SubHeading or **bold**
     """
+    # Remove ```html ... ``` and ``` ... ``` code fences GPT wraps output in
+    html = re.sub(r"```(?:html|HTML)?\s*", "", html)
+    html = re.sub(r"```\s*$", "", html, flags=re.MULTILINE)
     # Convert any remaining ## / # headers that GPT slipped inside HTML blocks
     html = re.sub(r"(?m)^#### (.+)$", r"<h4>\1</h4>", html)
     html = re.sub(r"(?m)^### (.+)$", r"<h3>\1</h3>", html)
@@ -273,9 +276,9 @@ def _strip_markdown_remnants(html: str) -> str:
     # Bold/italic inside HTML tags
     html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
     html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
-    # Backtick code
-    html = re.sub(r"`(.+?)`", r"<code>\1</code>", html)
-    return html
+    # Single backtick code (but not triple — already handled above)
+    html = re.sub(r"`([^`]+?)`", r"<code>\1</code>", html)
+    return html.strip()
 
 
 async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = "gpt-4o-mini") -> str:
