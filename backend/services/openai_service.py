@@ -260,47 +260,69 @@ async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int
 
 
 def _build_faq_schema(faq_html: str, topic: str) -> str:
-    """Extract Q&A pairs from FAQ HTML and build FAQPage JSON-LD schema."""
+    """Extract Q&A pairs from FAQ HTML and build FAQPage JSON-LD schema.
+    Handles both <h3>Q</h3><p>A</p> and <dt>Q</dt><dd>A</dd> patterns.
+    Falls back to extracting all h3+next-sibling content."""
     import json
-    questions = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', faq_html, re.DOTALL | re.IGNORECASE)
-    if not questions:
-        return ""
     entities = []
+
+    # Primary: h3 followed by p (most common GPT output)
+    questions = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', faq_html, re.DOTALL | re.IGNORECASE)
     for q, a in questions[:8]:
         q_clean = re.sub(r'<[^>]+>', '', q).strip()
         a_clean = re.sub(r'<[^>]+>', '', a).strip()
-        if q_clean and a_clean:
+        if q_clean and a_clean and len(a_clean) > 20:
             entities.append({"@type": "Question", "name": q_clean,
                              "acceptedAnswer": {"@type": "Answer", "text": a_clean}})
+
+    # Fallback: h3 followed by any block element
+    if not entities:
+        qs = re.findall(r'<h3[^>]*>(.*?)</h3>(.*?)(?=<h3|</div>|$)', faq_html, re.DOTALL | re.IGNORECASE)
+        for q, a_block in qs[:8]:
+            q_clean = re.sub(r'<[^>]+>', '', q).strip()
+            a_clean = re.sub(r'<[^>]+>', ' ', a_block).strip()
+            a_clean = re.sub(r'\s+', ' ', a_clean).strip()
+            if q_clean and a_clean and len(a_clean) > 20:
+                entities.append({"@type": "Question", "name": q_clean,
+                                 "acceptedAnswer": {"@type": "Answer", "text": a_clean[:500]}})
+
     if not entities:
         return ""
     schema = {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": entities}
     return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
 
 
-def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int = 0) -> str:
+def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int = 0, domain: str = "") -> str:
     """Build Article JSON-LD schema with E-E-A-T signals."""
     import json
     from datetime import datetime
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Derive publisher name from domain
+    publisher_name = "Redakcja"
+    if domain:
+        clean = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
+        publisher_name = clean.replace("www.", "").split(".")[0].capitalize()
     schema = {
         "@context": "https://schema.org",
         "@type": "Article",
-        "headline": title,
-        "description": excerpt,
+        "headline": title[:110],  # Google truncates at 110 chars
+        "description": excerpt[:300] if excerpt else "",
         "keywords": topic,
         "datePublished": now,
         "dateModified": now,
         "inLanguage": "pl",
         "author": {
             "@type": "Organization",
-            "name": "Redakcja",
+            "name": publisher_name,
         },
         "publisher": {
             "@type": "Organization",
-            "name": "Redakcja",
+            "name": publisher_name,
         },
-        "mainEntityOfPage": {"@type": "WebPage"},
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": f"https://{domain.replace('https://','').replace('http://','').rstrip('/')}/" if domain else "",
+        },
     }
     if word_count:
         schema["wordCount"] = word_count
@@ -308,12 +330,29 @@ def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int 
 
 
 def _inject_anchors(html: str, anchors_info: str) -> str:
+    """
+    Inject client links into article paragraphs contextually.
+    - First link: injected in paragraph 3-5 (after intro, inside content)
+    - Additional links: spread across later paragraphs
+    - Never injected in first 2 or last 2 paragraphs
+    - Surrounding context varies to avoid footprint
+    """
     if not anchors_info:
         return html
     links = re.findall(r'<a\s[^>]*>.*?</a>', anchors_info, re.DOTALL | re.IGNORECASE)
     seen_hrefs: set = set()
     paragraphs = re.findall(r'<p>.*?</p>', html, re.DOTALL)
     para_count = len(paragraphs)
+
+    # Vary the surrounding context — anti-footprint
+    _LINK_CONTEXTS = [
+        lambda lnk: f" Więcej na ten temat znajdziesz na stronie {lnk}.",
+        lambda lnk: f" Szczegółowe informacje dostępne są pod adresem {lnk}.",
+        lambda lnk: f" Warto odwiedzić serwis {lnk}, gdzie znajdziesz więcej materiałów.",
+        lambda lnk: f" Dodatkowe zasoby: {lnk}.",
+        lambda lnk: f" Polecamy również stronę {lnk}.",
+    ]
+    import random as _r
 
     for i, link in enumerate(links):
         href_match = re.search(r'href=["\']([^"\']+)["\']', link)
@@ -323,10 +362,25 @@ def _inject_anchors(html: str, anchors_info: str) -> str:
         if href in seen_hrefs:
             continue
         seen_hrefs.add(href)
-        target_idx = max(0, min(para_count - 1, (para_count // (len(links) + 1)) * (i + 1)))
+
+        # Spread links across content, skip first 2 and last 2 paragraphs
+        safe_start = 2
+        safe_end = max(safe_start + 1, para_count - 2)
+        if safe_end <= safe_start:
+            continue
+
+        # For first link: target 1/3 into article; for others: spread later
+        if i == 0:
+            target_idx = safe_start + (safe_end - safe_start) // 3
+        else:
+            target_idx = safe_start + ((safe_end - safe_start) * (i + 1)) // (len(links) + 1)
+        target_idx = max(safe_start, min(safe_end, target_idx))
+
         para = paragraphs[target_idx] if target_idx < para_count else None
-        if para and link not in html:
-            new_para = para[:-4] + f" {link}</p>"
+        # Skip paragraphs that already have links
+        if para and 'href=' not in para and link not in html:
+            ctx = _r.choice(_LINK_CONTEXTS)
+            new_para = para[:-4] + ctx(link) + "</p>"
             html = html.replace(para, new_para, 1)
     return html
 
@@ -334,7 +388,8 @@ def _inject_anchors(html: str, anchors_info: str) -> str:
 def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -> str:
     """
     Inject 2-3 internal links to already-published posts on the same domain.
-    Matches anchor text from post title to existing paragraph text.
+    Uses keyword/topic overlap (not just title words) for better matching.
+    Adds title attribute for accessibility and SEO.
     """
     if not published_posts:
         return html
@@ -343,36 +398,56 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
     if len(paragraphs) < 4:
         return html
 
+    # Current article topic words for avoiding self-similar links
+    topic_words = set(re.findall(r'\w{4,}', topic.lower()))
+
     injected = 0
     used_urls: set = set()
 
-    for post in published_posts[:5]:
+    # Vary surrounding context for internal links
+    _INT_CONTEXTS = [
+        lambda lnk, title: f" Przeczytaj też: {lnk}.",
+        lambda lnk, title: f" Polecamy powiązany artykuł: {lnk}.",
+        lambda lnk, title: f" Więcej o tym w artykule: {lnk}.",
+        lambda lnk, title: f" Powiązane informacje: {lnk}.",
+    ]
+    import random as _r
+
+    for post in published_posts[:8]:
         if injected >= 3:
             break
         url = post.get("url") or post.get("wp_post_url", "")
-        title = post.get("title", "")
+        title = post.get("title", "") or post.get("keyword", "")
         if not url or not title or url in used_urls:
             continue
 
-        # Find a paragraph that has thematic overlap with the linked post title
+        # Match on keyword/title words
         title_words = set(re.findall(r'\w{4,}', title.lower()))
+        if not title_words:
+            continue
+
         best_para = None
         best_score = 0
-        for para in paragraphs[2:-2]:  # skip first 2 and last 2 paragraphs
+        for para in paragraphs[2:-2]:
             para_text = re.sub(r'<[^>]+>', '', para).lower()
-            if 'href=' in para:  # skip paragraphs that already have links
+            if 'href=' in para:
                 continue
-            overlap = len(title_words & set(re.findall(r'\w{4,}', para_text)))
-            if overlap > best_score:
-                best_score = overlap
+            para_words = set(re.findall(r'\w{4,}', para_text))
+            # Score = overlap with title words, bonus for topic words in paragraph
+            overlap = len(title_words & para_words)
+            topic_bonus = 1 if len(topic_words & para_words) > 2 else 0
+            score = overlap + topic_bonus
+            if score > best_score:
+                best_score = score
                 best_para = para
 
-        if best_para and best_score >= 2:
-            # Use first 4-5 words of title as anchor text
-            anchor_words = title.split()[:5]
+        if best_para and best_score >= 1:
+            # Use title as anchor (4-6 words), with title attribute
+            anchor_words = title.split()[:6]
             anchor_text = " ".join(anchor_words)
-            link = f'<a href="{url}">{anchor_text}</a>'
-            new_para = best_para[:-4] + f" Więcej na ten temat: {link}.</p>"
+            link = f'<a href="{url}" title="{title}">{anchor_text}</a>'
+            ctx = _r.choice(_INT_CONTEXTS)
+            new_para = best_para[:-4] + ctx(link, title) + "</p>"
             html = html.replace(best_para, new_para, 1)
             used_urls.add(url)
             injected += 1
@@ -383,19 +458,20 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
 
 
 # Anchor text rotation pools — reduces footprint, more natural link profile
-_ANCHOR_GENERIC_PL = ["tutaj", "sprawdź", "dowiedz się więcej", "kliknij tutaj", "więcej informacji", "przeczytaj więcej"]
-_ANCHOR_GENERIC_EN = ["here", "check it out", "learn more", "click here", "find out more", "read more"]
+_ANCHOR_GENERIC_PL = ["tutaj", "sprawdź", "dowiedz się więcej", "więcej informacji", "przeczytaj więcej", "na tej stronie"]
+_ANCHOR_GENERIC_EN = ["here", "check it out", "learn more", "find out more", "read more", "on this page"]
 
 
 def _rotate_anchor(anchor_text: str, client_domain: str, language: str = "pl") -> str:
     """
-    Rotate anchor text to avoid footprint.
+    Rotate anchor text to avoid footprint — RANDOM per article call.
     Distribution: 35% exact match, 20% brand/naked URL, 25% partial/topic, 20% generic
-    Uses hash of (domain+anchor) for deterministic-but-varied rotation per article batch.
+    Uses os.urandom for true randomness (not deterministic hash).
     """
-    import hashlib
-    seed = int(hashlib.md5(f"{client_domain}{anchor_text}".encode()).hexdigest()[:8], 16)
-    bucket = seed % 100
+    import random as _rand
+    import os
+    # Use os.urandom for non-deterministic rotation per article
+    bucket = int.from_bytes(os.urandom(1), "big") % 100
     if bucket < 35:
         # Exact match — keep as-is
         return anchor_text
@@ -404,13 +480,13 @@ def _rotate_anchor(anchor_text: str, client_domain: str, language: str = "pl") -
         domain = client_domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
         return domain.replace("www.", "")
     elif bucket < 80:
-        # Partial match — first word(s) of anchor or topic
+        # Partial match — first word(s) of anchor
         words = anchor_text.split()
         return " ".join(words[:max(1, len(words) - 1)]) if len(words) > 1 else anchor_text
     else:
         # Generic
         generics = _ANCHOR_GENERIC_PL if language == "pl" else _ANCHOR_GENERIC_EN
-        return generics[seed % len(generics)]
+        return _rand.choice(generics)
 
 
 async def generate_article(
@@ -809,7 +885,7 @@ async def generate_article(
 
     # Schema markup: FAQPage + Article
     faq_schema = _build_faq_schema(faq_html, topic)
-    article_schema = _build_article_schema(title, topic, excerpt, word_count=_count_words(content))
+    article_schema = _build_article_schema(title, topic, excerpt, word_count=_count_words(content), domain=client_domain)
     if faq_schema:
         content += f"\n\n{faq_schema}"
     if article_schema:

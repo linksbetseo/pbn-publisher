@@ -563,11 +563,11 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT title, wp_post_url FROM domain_keywords
+                """SELECT title, keyword, wp_post_url FROM domain_keywords
                    WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
                 (schedule_id,)
             ) as cur:
-                published_posts = [{"title": r["title"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+                published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
 
         domain_fingerprints: set = set()
         _published = 0
@@ -583,7 +583,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                 async with asyncio.timeout(360):  # 6 min per artykuł
                     article = await _with_retry(lambda: generate_article(
                         topic=keyword,
-                        client_domain=sched["client_domain"] or sched["domain"],
+                        client_domain=sched["client_domain"] or "",
                         anchor_text=sched["anchor_text"] or keyword,
                         language=sched["language"],
                         variation_hint=variation,
@@ -635,7 +635,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                 if result.get("success"):
                     wp_url = result.get("url", "")
                     _published += 1
-                    published_posts.append({"title": title, "url": wp_url})
+                    published_posts.append({"title": title, "keyword": keyword, "url": wp_url})
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
                             """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
@@ -763,11 +763,11 @@ async def run_daily_all():
             ) as cur:
                 keywords = [dict(r) for r in await cur.fetchall()]
             async with db.execute(
-                """SELECT title, wp_post_url FROM domain_keywords
+                """SELECT title, keyword, wp_post_url FROM domain_keywords
                    WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
                 (schedule_id,)
             ) as cur:
-                published_posts = [{"title": r["title"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+                published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
 
         domain_fingerprints: set = set()
 
@@ -779,7 +779,7 @@ async def run_daily_all():
                 async with asyncio.timeout(360):
                     article = await _with_retry(lambda: generate_article(
                         topic=keyword,
-                        client_domain=sched["client_domain"] or sched["domain"],
+                        client_domain=sched["client_domain"] or "",
                         anchor_text=sched["anchor_text"] or keyword,
                         language=sched["language"],
                         variation_hint=variation,
@@ -826,11 +826,11 @@ async def run_daily_all():
                 if result.get("success"):
                     wp_url = result.get("url", "")
                     published += 1
-                    published_posts.append({"title": article["title"], "url": wp_url})
+                    published_posts.append({"title": article["title"], "keyword": keyword, "url": wp_url})
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
                             "INSERT INTO posts (client_id, client_domain, my_domain_id, title, content, wp_post_url, status) VALUES (?,?,?,?,?,?,?)",
-                            (None, sched["client_domain"] or sched["domain"],
+                            (None, sched["client_domain"] or "",
                              sched["my_domain_id"], article["title"], article["content"], wp_url, "published")
                         )
                         await db.execute(
@@ -1113,11 +1113,11 @@ async def bulk_run_schedules(body: BulkActionRequest):
             ) as cur:
                 keywords = [dict(r) for r in await cur.fetchall()]
             async with db.execute(
-                """SELECT title, wp_post_url FROM domain_keywords
+                """SELECT title, keyword, wp_post_url FROM domain_keywords
                    WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
                 (schedule_id,)
             ) as cur:
-                published_posts = [{"title": r["title"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+                published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
 
         if not keywords:
             all_results.append({"schedule_id": schedule_id, "domain": sched["domain"], "published": 0, "failed": 0, "skipped": True, "reason": "no pending keywords"})
@@ -1140,7 +1140,7 @@ async def bulk_run_schedules(body: BulkActionRequest):
                 location_code = 2616 if sched["language"] == "pl" else 2840
                 article = await generate_article(
                     topic=keyword,
-                    client_domain=sched["client_domain"] or sched["domain"],
+                    client_domain=sched["client_domain"] or "",
                     anchor_text=sched["anchor_text"] or keyword,
                     language=sched["language"],
                     variation_hint=variation,
@@ -1183,12 +1183,12 @@ async def bulk_run_schedules(body: BulkActionRequest):
                 if result.get("success"):
                     wp_url = result.get("url", "")
                     published += 1
-                    published_posts.append({"title": article["title"], "url": wp_url})
+                    published_posts.append({"title": article["title"], "keyword": keyword, "url": wp_url})
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
                             """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
                                wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
-                            (None, sched["client_domain"] or sched["domain"],
+                            (None, sched["client_domain"] or "",
                              sched["my_domain_id"], article["title"], article["content"], wp_url, "published")
                         )
                         await db.execute(
