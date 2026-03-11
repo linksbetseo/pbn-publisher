@@ -27,6 +27,7 @@ from services.topical_map_service import generate_topical_map
 from services.openai_service import generate_article, generate_image
 from services.freepik_service import generate_image_freepik
 from services.gemini_image_service import generate_image_gemini
+from services.freepik_generate_service import generate_image_zimage, generate_image_flux
 from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
 
 logger = logging.getLogger(__name__)
@@ -538,20 +539,28 @@ async def _fetch_image(image_source: str, keyword: str, title: str, img_prompt: 
     """
     Fetch image based on image_source setting.
     Returns (base64_str_or_None, provider_name).
-    image_source: 'freepik_stock' | 'gemini' | 'dalle' | 'none'
+    image_source: 'freepik_stock' | 'freepik_zimage' | 'freepik_flux' | 'gemini' | 'dalle' | 'none'
     """
     if image_source == "none":
         return None, "none"
 
     providers = {
-        "freepik_stock": [("freepik", lambda: generate_image_freepik(keyword))],
+        "freepik_stock": [("freepik_stock", lambda: generate_image_freepik(keyword))],
+        "freepik_zimage": [
+            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
+            ("freepik_stock", lambda: generate_image_freepik(keyword)),
+        ],
+        "freepik_flux": [
+            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
+            ("freepik_stock", lambda: generate_image_freepik(keyword)),
+        ],
         "gemini": [
             ("gemini", lambda: generate_image_gemini(img_prompt)),
-            ("freepik", lambda: generate_image_freepik(keyword)),
+            ("freepik_stock", lambda: generate_image_freepik(keyword)),
         ],
         "dalle": [
             ("dalle", lambda: generate_image(f"Professional illustration for article about: {title}. Clean, modern, no text.")),
-            ("freepik", lambda: generate_image_freepik(keyword)),
+            ("freepik_stock", lambda: generate_image_freepik(keyword)),
         ],
     }
     order = providers.get(image_source, providers["freepik_stock"])
@@ -1377,7 +1386,7 @@ async def test_images():
     prompt = f"High-quality professional photo for blog article: '{title}'. Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks."
     results = {}
 
-    for source in ["freepik_stock", "gemini", "dalle"]:
+    for source in ["freepik_stock", "freepik_zimage", "freepik_flux", "gemini", "dalle"]:
         t0 = time.time()
         try:
             img, provider = await _fetch_image(source, keyword, title, prompt)

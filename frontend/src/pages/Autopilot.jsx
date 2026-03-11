@@ -754,7 +754,9 @@ export default function Autopilot() {
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Źródło zdjęć</label>
               <select value={newForm.image_source} onChange={e => set('image_source', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="freepik_stock">📷 Freepik Stock (~$0.01/zdjęcie)</option>
+                <option value="freepik_stock">📷 Freepik Stock (wyszukiwanie)</option>
+                <option value="freepik_zimage">⚡ Freepik Z-Image (generowanie)</option>
+                <option value="freepik_flux">🌊 Freepik Flux Pro 1.1 (generowanie)</option>
                 <option value="dalle">🎨 DALL-E 3 (~$0.04/zdjęcie)</option>
                 <option value="none">🚫 Bez zdjęcia</option>
               </select>
@@ -833,7 +835,9 @@ export default function Autopilot() {
                     className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
                     title="Źródło zdjęć"
                   >
-                    <option value="freepik_stock">📷 Freepik</option>
+                    <option value="freepik_stock">📷 Stock</option>
+                    <option value="freepik_zimage">⚡ Z-Image</option>
+                    <option value="freepik_flux">🌊 Flux</option>
                     <option value="dalle">🎨 DALL-E</option>
                     <option value="none">🚫 Brak</option>
                   </select>
