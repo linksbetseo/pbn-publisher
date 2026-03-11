@@ -1,8 +1,12 @@
 """
 Freepik AI text-to-image generation service.
 Supports Z-Image Turbo and Flux Pro 1.1 models.
-Both use async polling: POST → task_id → GET until COMPLETED.
-Returns base64 JPEG string.
+
+API response shape (both models, GET /{task-id}):
+  {"data": {"task_id": "...", "status": "COMPLETED", "generated": ["https://..."]}}
+
+POST response shape:
+  {"data": {"task_id": "...", "status": "IN_PROGRESS", "generated": []}}
 """
 import asyncio
 import base64
@@ -14,8 +18,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _BASE = "https://api.freepik.com/v1/ai/text-to-image"
-_POLL_INTERVAL = 3  # seconds between status checks
-_MAX_POLLS = 30    # max 90 seconds
+_POLL_INTERVAL = 4   # seconds between status checks
+_MAX_POLLS = 25      # max 100 seconds
 
 
 def _headers() -> dict:
@@ -27,67 +31,31 @@ def _headers() -> dict:
     }
 
 
-def _extract_image_url(data: dict) -> str | None:
-    """
-    Extract image URL from completed task response.
-    Tries multiple known response shapes.
-    """
-    # Common patterns in Freepik API responses
-    generated = data.get("generated") or data.get("data", {}).get("generated") or []
-    if isinstance(generated, list) and generated:
-        item = generated[0]
-        if isinstance(item, str):
-            return item
-        if isinstance(item, dict):
-            return item.get("url") or item.get("source", {}).get("url")
-
-    # Try top-level url
-    for key in ("url", "image_url", "result_url"):
-        val = data.get(key) or data.get("data", {}).get(key)
-        if val:
-            return val
-
-    # Try nested result
-    result = data.get("result") or data.get("data", {}).get("result")
-    if isinstance(result, dict):
-        return result.get("url")
-    if isinstance(result, list) and result:
-        return result[0].get("url") if isinstance(result[0], dict) else result[0]
-
-    return None
-
-
 async def _poll_task(client: httpx.AsyncClient, endpoint: str, task_id: str) -> str:
-    """Poll task status until COMPLETED, return image URL."""
+    """Poll GET /{task-id} until COMPLETED. Returns image URL."""
     url = f"{endpoint}/{task_id}"
     for attempt in range(_MAX_POLLS):
         await asyncio.sleep(_POLL_INTERVAL)
         resp = await client.get(url, headers=_headers())
         if resp.status_code != 200:
-            logger.warning(f"[Freepik] poll {task_id} status={resp.status_code}")
+            logger.warning(f"[Freepik] poll {task_id} http={resp.status_code} body={resp.text[:200]}")
             continue
 
-        data = resp.json()
-        logger.debug(f"[Freepik] poll attempt={attempt} data={data}")
-
-        # Extract status from various response shapes
-        status = (
-            data.get("status")
-            or data.get("data", {}).get("status")
-            or (data.get("data") or [{}])[0].get("status") if isinstance(data.get("data"), list) else None
-        )
+        body = resp.json()
+        # Response: {"data": {"task_id": "...", "status": "...", "generated": [...]}}
+        task_data = body.get("data", {})
+        status = task_data.get("status", "")
+        logger.info(f"[Freepik] poll attempt={attempt} task_id={task_id} status={status}")
 
         if status == "COMPLETED":
-            image_url = _extract_image_url(data)
-            if image_url:
-                return image_url
-            logger.error(f"[Freepik] COMPLETED but no image URL. Full response: {data}")
-            raise RuntimeError(f"Freepik task {task_id} completed but no image URL found")
+            generated = task_data.get("generated", [])
+            if generated and isinstance(generated, list) and generated[0]:
+                return generated[0]
+            logger.error(f"[Freepik] COMPLETED but generated empty: {body}")
+            raise RuntimeError(f"Freepik task {task_id} completed but no image URL in generated[]")
 
         if status == "FAILED":
-            raise RuntimeError(f"Freepik task {task_id} FAILED: {data}")
-
-        logger.info(f"[Freepik] task {task_id} status={status}, waiting...")
+            raise RuntimeError(f"Freepik task {task_id} FAILED: {body}")
 
     raise RuntimeError(f"Freepik task {task_id} timed out after {_MAX_POLLS * _POLL_INTERVAL}s")
 
@@ -117,25 +85,23 @@ async def generate_image_zimage(prompt: str) -> str:
         "num_inference_steps": 8,
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(endpoint, headers=_headers(), json=payload)
-        logger.info(f"[Freepik Z-Image] POST status={resp.status_code} body={resp.text[:500]}")
+        logger.info(f"[Freepik Z-Image] POST status={resp.status_code} body={resp.text[:300]}")
         resp.raise_for_status()
-        data = resp.json()
+        body = resp.json()
 
-    task_id = (
-        data.get("task_id")
-        or data.get("data", {}).get("task_id")
-    )
+    # POST response: {"data": {"task_id": "...", "status": "IN_PROGRESS", "generated": []}}
+    task_id = body.get("data", {}).get("task_id")
     if not task_id:
-        raise RuntimeError(f"Freepik Z-Image: no task_id in response: {data}")
+        raise RuntimeError(f"Freepik Z-Image: no task_id in response: {body}")
 
     logger.info(f"[Freepik Z-Image] task_id={task_id}, polling...")
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         image_url = await _poll_task(client, endpoint, task_id)
 
-    logger.info(f"[Freepik Z-Image] got image_url={image_url}")
+    logger.info(f"[Freepik Z-Image] image_url={image_url}")
     return await _download_image(image_url)
 
 
@@ -155,23 +121,20 @@ async def generate_image_flux(prompt: str) -> str:
         "output_format": "jpeg",
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(endpoint, headers=_headers(), json=payload)
-        logger.info(f"[Freepik Flux] POST status={resp.status_code} body={resp.text[:500]}")
+        logger.info(f"[Freepik Flux] POST status={resp.status_code} body={resp.text[:300]}")
         resp.raise_for_status()
-        data = resp.json()
+        body = resp.json()
 
-    task_id = (
-        data.get("task_id")
-        or data.get("data", {}).get("task_id")
-    )
+    task_id = body.get("data", {}).get("task_id")
     if not task_id:
-        raise RuntimeError(f"Freepik Flux: no task_id in response: {data}")
+        raise RuntimeError(f"Freepik Flux: no task_id in response: {body}")
 
     logger.info(f"[Freepik Flux] task_id={task_id}, polling...")
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=150) as client:
         image_url = await _poll_task(client, endpoint, task_id)
 
-    logger.info(f"[Freepik Flux] got image_url={image_url}")
+    logger.info(f"[Freepik Flux] image_url={image_url}")
     return await _download_image(image_url)
