@@ -1403,3 +1403,39 @@ async def test_images():
         results[source]["provider_errors"] = getattr(_fetch_image, "_last_errors", {})
 
     return results
+
+@router.get("/test-freepik-raw")
+async def test_freepik_raw():
+    """Debug: check raw Freepik z-image POST response and poll URLs."""
+    import os
+    import asyncio
+    import httpx
+    api_key = os.getenv("FREEPIK_API_KEY", "")
+    headers = {"x-freepik-api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"}
+    prompt = "professional blog photo SEO optimization"
+    results = {}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.freepik.com/v1/ai/text-to-image/z-image",
+            headers=headers,
+            json={"prompt": prompt, "image_size": "landscape_4_3", "output_format": "jpeg", "num_inference_steps": 8}
+        )
+        results["post_status"] = resp.status_code
+        results["post_body"] = resp.json() if resp.status_code < 300 else resp.text[:500]
+
+        data = resp.json() if resp.status_code < 300 else {}
+        task_id = data.get("task_id") or data.get("data", {}).get("task_id")
+        results["task_id"] = task_id
+
+        if task_id:
+            await asyncio.sleep(10)
+            for url in [
+                f"https://api.freepik.com/v1/ai/text-to-image/z-image/{task_id}",
+                f"https://api.freepik.com/v1/ai/text-to-image/z-image?task_id={task_id}",
+            ]:
+                r = await client.get(url, headers=headers)
+                key = "get_by_path" if task_id in url and "?" not in url else "get_by_param"
+                results[key] = {"status": r.status_code, "body": r.text[:800]}
+
+    return results
