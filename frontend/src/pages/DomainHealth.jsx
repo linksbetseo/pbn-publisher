@@ -234,6 +234,8 @@ function LiveTab() {
   const [sortDir, setSortDir] = useState('desc')
   const [filter, setFilter] = useState('all')
   const [authModal, setAuthModal] = useState(null)
+  const [snapping, setSnapping] = useState(false)
+  const [snapMsg, setSnapMsg] = useState('')
 
   const liveCheck = useCallback(async (domainId) => {
     setLiveChecking(prev => ({ ...prev, [domainId]: true }))
@@ -262,6 +264,23 @@ function LiveTab() {
   }, [])
 
   useEffect(() => { load(0) }, [load])
+
+  const triggerSnapshot = async () => {
+    setSnapping(true)
+    setSnapMsg('Snapshot w toku — może potrwać kilka minut...')
+    try {
+      await api.post('/api/health/snapshot')
+      setSnapMsg('Snapshot uruchomiony w tle. Dane pojawią się za chwilę.')
+      setTimeout(async () => {
+        await load(0)
+        setSnapMsg('')
+      }, 15000)
+    } catch (e) {
+      setSnapMsg('Błąd snapshotu: ' + (e.response?.data?.detail || e.message))
+    } finally {
+      setSnapping(false)
+    }
+  }
 
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -314,7 +333,27 @@ function LiveTab() {
         <StatCard label="WP błąd" value={wpErrors} color="text-red-500"
           onClick={() => setFilter(f => f === 'wp_err' ? 'all' : 'wp_err')} active={filter === 'wp_err'} />
       </div>
-      <div className="text-xs text-gray-400 mb-4">Śr. ruch: {avgTraffic.toLocaleString()} / mies. · {domains.length} z {total} załadowanych</div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-xs text-gray-400">
+          Śr. ruch: {avgTraffic.toLocaleString()} / mies. · {domains.length} z {total} załadowanych
+          {domains.length > 0 && domains[0].snapped_at && (
+            <span className="ml-3 text-gray-300">· Snapshot: {domains.find(d => d.snapped_at)?.snapped_at?.slice(0, 16).replace('T', ' ')} UTC</span>
+          )}
+          {domains.length > 0 && !domains[0].snapped_at && (
+            <span className="ml-3 text-orange-400 font-medium">· Brak snapshotu — kliknij "Odśwież wszystkie"</span>
+          )}
+        </div>
+        <button
+          onClick={triggerSnapshot}
+          disabled={snapping}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50"
+        >
+          {snapping ? <><span className="animate-spin inline-block">⟳</span> W toku...</> : '📸 Odśwież wszystkie'}
+        </button>
+      </div>
+      {snapMsg && (
+        <div className="mb-3 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">{snapMsg}</div>
+      )}
 
       {/* Search + filter */}
       <div className="flex flex-wrap gap-3 mb-4">
