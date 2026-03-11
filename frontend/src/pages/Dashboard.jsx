@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { dashboard, history as historyApi } from '../api/client'
 import api from '../api/client'
 
@@ -50,6 +50,77 @@ function PublicationChart({ posts }) {
               <span className="text-gray-400 text-[9px] rotate-45 origin-left whitespace-nowrap">
                 {day.slice(5)}
               </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function FailedAlert({ failedCount }) {
+  if (!failedCount) return null
+  return (
+    <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3">
+      <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+      </svg>
+      <span className="text-sm text-red-700">
+        <strong>{failedCount}</strong> {failedCount === 1 ? 'fraza' : failedCount < 5 ? 'frazy' : 'fraz'} autopilota zakończyło się błędem. Sprawdź zakładkę <strong>Autopilot → Historia</strong>.
+      </span>
+    </div>
+  )
+}
+
+function ActiveJobsProgress({ jobs }) {
+  if (!jobs || jobs.length === 0) return null
+  const running = jobs.filter(j => !j.done)
+  if (running.length === 0) return null
+  return (
+    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+      <div className="flex items-center gap-2 mb-3">
+        <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
+        <span className="text-sm font-semibold text-blue-800">Autopilot w trakcie ({running.length} aktywnych jobów)</span>
+      </div>
+      {running.map(job => {
+        const total = job.total || 1
+        const done = (job.published || 0) + (job.failed || 0)
+        const pct = Math.round((done / total) * 100)
+        return (
+          <div key={job.job_id} className="mb-2 last:mb-0">
+            <div className="flex justify-between text-xs text-blue-700 mb-1">
+              <span>Job {job.job_id?.slice(0, 8)}…</span>
+              <span>{done}/{total} ({pct}%)</span>
+            </div>
+            <div className="h-2 bg-blue-200 rounded-full overflow-hidden">
+              <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+            </div>
+            {job.failed > 0 && <span className="text-xs text-red-500 mt-0.5 block">✗ {job.failed} błędów</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function RecentPublications({ posts }) {
+  const recent = [...posts].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 5)
+  if (!recent.length) return null
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-8">
+      <h3 className="text-base font-semibold text-gray-800 mb-3">Ostatnie publikacje</h3>
+      <div className="space-y-2">
+        {recent.map((p, i) => (
+          <div key={i} className="flex items-start justify-between gap-3 py-2 border-b border-gray-50 last:border-0">
+            <div className="min-w-0">
+              <p className="text-sm text-gray-800 truncate font-medium">{p.title || p.keyword || '—'}</p>
+              <p className="text-xs text-gray-400">{p.domain || p.my_domain} · {p.created_at?.slice(0, 16).replace('T', ' ')}</p>
+            </div>
+            {p.wp_post_url && (
+              <a href={p.wp_post_url} target="_blank" rel="noopener noreferrer"
+                className="flex-shrink-0 text-xs text-blue-600 hover:underline">
+                Zobacz →
+              </a>
             )}
           </div>
         ))}
@@ -114,21 +185,41 @@ export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [recentPosts, setRecentPosts] = useState([])
   const [autopilotStats, setAutopilotStats] = useState(null)
+  const [activeJobs, setActiveJobs] = useState([])
   const [loading, setLoading] = useState(true)
+  const pollRef = useRef(null)
+
+  const loadAll = () => Promise.all([
+    dashboard.stats(),
+    historyApi.list({ limit: 100, offset: 0, status: 'published' }),
+    api.get('/api/autopilot/stats').catch(() => ({ data: null })),
+    api.get('/api/autopilot/jobs').catch(() => ({ data: [] })),
+  ]).then(([s, p, ap, jobs]) => {
+    setStats(s)
+    setRecentPosts(p.data.posts || [])
+    setAutopilotStats(ap.data)
+    const jobList = Array.isArray(jobs.data) ? jobs.data : (jobs.data?.jobs || [])
+    setActiveJobs(jobList)
+    // Poll while there are running jobs
+    const hasRunning = jobList.some(j => !j.done)
+    if (hasRunning && !pollRef.current) {
+      pollRef.current = setInterval(() => {
+        api.get('/api/autopilot/jobs').then(r => {
+          const jl = Array.isArray(r.data) ? r.data : (r.data?.jobs || [])
+          setActiveJobs(jl)
+          if (!jl.some(j => !j.done)) {
+            clearInterval(pollRef.current)
+            pollRef.current = null
+            loadAll()
+          }
+        }).catch(() => {})
+      }, 8000)
+    }
+  }).catch(console.error)
 
   useEffect(() => {
-    Promise.all([
-      dashboard.stats(),
-      historyApi.list({ limit: 500, offset: 0, status: 'published' }),
-      api.get('/api/autopilot/stats').catch(() => ({ data: null })),
-    ])
-      .then(([s, p, ap]) => {
-        setStats(s)
-        setRecentPosts(p.data.posts || [])
-        setAutopilotStats(ap.data)
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false))
+    loadAll().finally(() => setLoading(false))
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
 
   return (
@@ -163,9 +254,14 @@ export default function Dashboard() {
             />
           </div>
 
+          <FailedAlert failedCount={autopilotStats?.failed_keywords} />
+          <ActiveJobsProgress jobs={activeJobs} />
+
           <div className="mb-8">
             <PublicationChart posts={recentPosts} />
           </div>
+
+          <RecentPublications posts={recentPosts} />
 
           <div className="mb-8">
             <AutopilotWidget autopilotStats={autopilotStats} />

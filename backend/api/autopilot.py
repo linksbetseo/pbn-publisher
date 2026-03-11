@@ -932,6 +932,23 @@ async def autopilot_stats():
     }
 
 
+@router.get("/jobs")
+async def get_jobs(_: str = Depends(get_current_user)):
+    """Return recent run_jobs — both running and completed (last 20)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM run_jobs ORDER BY created_at DESC LIMIT 20"
+        ) as cur:
+            jobs = [dict(r) for r in await cur.fetchall()]
+    for job in jobs:
+        try:
+            job['results'] = _json.loads(job.pop('results_json', '[]'))
+        except Exception:
+            job['results'] = []
+    return jobs
+
+
 class BulkScheduleItem(BaseModel):
     my_domain_id: int
     seed_keyword: str  # can be overridden per domain or shared
@@ -1181,19 +1198,25 @@ async def bulk_run_schedules(body: BulkActionRequest):
                         except Exception:
                             pass
 
-                result = await publish_post(
-                    domain=sched["domain"],
-                    wp_login=sched["wp_login"],
-                    wp_pass=sched["wp_pass"],
-                    title=article["title"],
-                    content=article["content"],
-                    image_b64=image_b64,
-                    category_id=kw_row.get("wp_category_id") or None,
-                    excerpt=article.get("excerpt", ""),
-                    keyword=keyword,
-                    http_user=sched.get("http_user", ""),
-                    http_pass=sched.get("http_pass", ""),
-                )
+                _art_bulk = article
+                async def _do_publish_bulk():
+                    r = await publish_post(
+                        domain=sched["domain"],
+                        wp_login=sched["wp_login"],
+                        wp_pass=sched["wp_pass"],
+                        title=_art_bulk["title"],
+                        content=_art_bulk["content"],
+                        image_b64=image_b64,
+                        category_id=kw_row.get("wp_category_id") or None,
+                        excerpt=_art_bulk.get("excerpt", ""),
+                        keyword=keyword,
+                        http_user=sched.get("http_user", ""),
+                        http_pass=sched.get("http_pass", ""),
+                    )
+                    if not r.get("success"):
+                        raise RuntimeError(r.get("error", "WP publish failed"))
+                    return r
+                result = await _with_retry(_do_publish_bulk, max_attempts=2, base_delay=5.0)
                 if result.get("success"):
                     wp_url = result.get("url", "")
                     published += 1

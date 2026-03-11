@@ -79,6 +79,26 @@ function SnapshotsTab() {
   const [loading, setLoading] = useState(false)
   const [snapping, setSnapping] = useState(false)
   const [search, setSearch] = useState('')
+  const [sortKey, setSortKey] = useState('traffic')
+  const [sortDir, setSortDir] = useState('desc')
+
+  const toggleSort = (key) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortKey(key); setSortDir('desc') }
+  }
+
+  const SortTh = ({ col, label }) => {
+    const active = sortKey === col
+    const arrow = active ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ⇅'
+    return (
+      <th
+        onClick={() => toggleSort(col)}
+        className={`px-4 py-2 text-left text-xs font-semibold cursor-pointer select-none ${active ? 'text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}
+      >
+        {label}<span className="opacity-60">{arrow}</span>
+      </th>
+    )
+  }
 
   const load = async () => {
     setLoading(true)
@@ -116,6 +136,18 @@ function SnapshotsTab() {
     acc[date].push(s)
     return acc
   }, {})
+
+  const sortRows = (rows) => [...rows].sort((a, b) => {
+    let av, bv
+    if (sortKey === 'traffic') { av = a.traffic || 0; bv = b.traffic || 0 }
+    else if (sortKey === 'keywords') { av = a.keywords || 0; bv = b.keywords || 0 }
+    else if (sortKey === 'expiry') { av = a.days_to_expiry ?? 9999; bv = b.days_to_expiry ?? 9999 }
+    else if (sortKey === 'health') { av = a.health_score || 0; bv = b.health_score || 0 }
+    else if (sortKey === 'dr') { av = a.dr || 0; bv = b.dr || 0 }
+    else { av = a.domain; bv = b.domain }
+    if (typeof av === 'string') return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
+    return sortDir === 'asc' ? av - bv : bv - av
+  })
 
   return (
     <div>
@@ -166,16 +198,16 @@ function SnapshotsTab() {
                 <table className="w-full text-sm">
                   <thead className="border-b border-gray-100 bg-gray-50">
                     <tr>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Domena</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Ruch</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Słowa kl.</th>
+                      <SortTh col="domain" label="Domena" />
+                      <SortTh col="traffic" label="Ruch" />
+                      <SortTh col="keywords" label="Słowa kl." />
                       <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">WP</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Wygasa</th>
-                      <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Zdrowie</th>
+                      <SortTh col="expiry" label="Wygasa" />
+                      <SortTh col="health" label="Zdrowie" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {rows.map(s => (
+                    {sortRows(rows).map(s => (
                       <tr key={s.id} className="hover:bg-gray-50">
                         <td className="px-4 py-2 text-blue-600 font-medium text-xs">{s.domain.replace(/^https?:\/\//, '')}</td>
                         <td className="px-4 py-2 text-gray-700">{s.traffic?.toLocaleString() || 0}</td>

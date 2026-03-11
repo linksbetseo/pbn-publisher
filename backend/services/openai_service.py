@@ -32,7 +32,26 @@ logger = logging.getLogger(__name__)
 _SERP_CACHE_TTL = 86400  # 24 hours — stored in SQLite serp_cache table
 
 
+_SERP_CACHE_TABLE_CREATED = False
+
+async def _ensure_serp_cache_table() -> None:
+    """Create serp_cache table once per process lifecycle."""
+    global _SERP_CACHE_TABLE_CREATED
+    if _SERP_CACHE_TABLE_CREATED:
+        return
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS serp_cache (cache_key TEXT PRIMARY KEY, data_json TEXT, expires_at REAL)"
+            )
+            await db.commit()
+        _SERP_CACHE_TABLE_CREATED = True
+    except Exception as e:
+        logger.warning(f"[SERP] Cache table init failed: {e}")
+
+
 async def _serp_cache_get(key: str) -> Optional[dict]:
+    await _ensure_serp_cache_table()
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
@@ -48,11 +67,9 @@ async def _serp_cache_get(key: str) -> Optional[dict]:
 
 
 async def _serp_cache_set(key: str, data: dict) -> None:
+    await _ensure_serp_cache_table()
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "CREATE TABLE IF NOT EXISTS serp_cache (cache_key TEXT PRIMARY KEY, data_json TEXT, expires_at REAL)"
-            )
             await db.execute(
                 "INSERT OR REPLACE INTO serp_cache (cache_key, data_json, expires_at) VALUES (?,?,?)",
                 (key, _json.dumps(data, ensure_ascii=False), time.time() + _SERP_CACHE_TTL)
@@ -89,7 +106,7 @@ def _keyword_density(text: str, keyword: str) -> float:
 
 
 def _extract_lsi(text: str, keyword: str, top_n: int = 20) -> list[str]:
-    """Extract most frequent non-stopword terms from text excluding seed keyword words."""
+    """Extract most frequent non-stopword unigrams + bigrams from text."""
     STOPWORDS = {
         "i", "w", "z", "na", "do", "po", "o", "a", "się", "nie", "jak", "co",
         "czy", "że", "to", "jest", "są", "dla", "przez", "przy", "za", "od",
@@ -99,12 +116,27 @@ def _extract_lsi(text: str, keyword: str, top_n: int = 20) -> list[str]:
         "have", "from", "on", "your", "can", "we", "our", "you", "they", "their",
     }
     kw_words = set(keyword.lower().split())
-    words = re.findall(r'\b[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]{4,}\b', text.lower())
+    words = re.findall(r'\b[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]{3,}\b', text.lower())
     freq: dict[str, int] = {}
+    # Unigrams
     for w in words:
-        if w not in STOPWORDS and w not in kw_words:
+        if w not in STOPWORDS and w not in kw_words and len(w) >= 4:
             freq[w] = freq.get(w, 0) + 1
-    return [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])[:top_n]]
+    # Bigrams — two consecutive non-stopword words
+    for i in range(len(words) - 1):
+        w1, w2 = words[i], words[i + 1]
+        if (w1 not in STOPWORDS and w2 not in STOPWORDS
+                and w1 not in kw_words and w2 not in kw_words
+                and len(w1) >= 3 and len(w2) >= 3):
+            bigram = f"{w1} {w2}"
+            freq[bigram] = freq.get(bigram, 0) + 1
+    # Return mix: top unigrams + top bigrams, interleaved
+    unigrams = [(w, c) for w, c in freq.items() if " " not in w]
+    bigrams = [(w, c) for w, c in freq.items() if " " in w]
+    top_uni = [w for w, _ in sorted(unigrams, key=lambda x: -x[1])[:top_n // 2 + 5]]
+    top_bi = [w for w, _ in sorted(bigrams, key=lambda x: -x[1])[:top_n // 2]]
+    combined = top_uni + top_bi
+    return combined[:top_n]
 
 
 def _content_fingerprint(content: str) -> str:
@@ -268,14 +300,10 @@ async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int
     return ""  # unreachable
 
 
-def _build_faq_schema(faq_html: str, topic: str) -> str:
-    """Extract Q&A pairs from FAQ HTML and build FAQPage JSON-LD schema.
-    Handles both <h3>Q</h3><p>A</p> and <dt>Q</dt><dd>A</dd> patterns.
-    Falls back to extracting all h3+next-sibling content."""
-    import json
+def _extract_faq_entities(faq_html: str) -> list:
+    """Extract Q&A pairs from FAQ HTML. Returns list of schema Question objects."""
     entities = []
-
-    # Primary: h3 followed by p (most common GPT output)
+    # Primary: h3 followed by p
     questions = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', faq_html, re.DOTALL | re.IGNORECASE)
     for q, a in questions[:8]:
         q_clean = re.sub(r'<[^>]+>', '', q).strip()
@@ -283,8 +311,7 @@ def _build_faq_schema(faq_html: str, topic: str) -> str:
         if q_clean and a_clean and len(a_clean) > 20:
             entities.append({"@type": "Question", "name": q_clean,
                              "acceptedAnswer": {"@type": "Answer", "text": a_clean}})
-
-    # Fallback: h3 followed by any block element
+    # Fallback: h3 + any block
     if not entities:
         qs = re.findall(r'<h3[^>]*>(.*?)</h3>(.*?)(?=<h3|</div>|$)', faq_html, re.DOTALL | re.IGNORECASE)
         for q, a_block in qs[:8]:
@@ -294,47 +321,91 @@ def _build_faq_schema(faq_html: str, topic: str) -> str:
             if q_clean and a_clean and len(a_clean) > 20:
                 entities.append({"@type": "Question", "name": q_clean,
                                  "acceptedAnswer": {"@type": "Answer", "text": a_clean[:500]}})
-
-    if not entities:
-        return ""
-    schema = {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": entities}
-    return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
+    return entities
 
 
-def _build_article_schema(title: str, topic: str, excerpt: str, word_count: int = 0, domain: str = "", language: str = "pl") -> str:
-    """Build Article JSON-LD schema with E-E-A-T signals."""
+def _build_combined_schema(
+    title: str,
+    topic: str,
+    excerpt: str,
+    faq_html: str,
+    sections: list,
+    word_count: int = 0,
+    domain: str = "",
+    language: str = "pl",
+) -> str:
+    """
+    Build single @graph JSON-LD with Article + FAQPage + BreadcrumbList.
+    One <script> block is better for Google rich results than multiple separate ones.
+    """
     import json
     from datetime import datetime
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Derive publisher name from domain
+
+    # Publisher name from domain
     publisher_name = "Redakcja"
+    base_url = ""
     if domain:
-        clean = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
-        publisher_name = clean.replace("www.", "").split(".")[0].capitalize()
-    schema = {
-        "@context": "https://schema.org",
+        clean_d = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
+        publisher_name = clean_d.replace("www.", "").split(".")[0].capitalize()
+        base_url = f"https://{clean_d}"
+
+    article_id = f"{base_url}/#article" if base_url else "#article"
+    webpage_id = f"{base_url}/" if base_url else "#webpage"
+    faq_id = f"{base_url}/#faq" if base_url else "#faq"
+
+    graph = []
+
+    # WebPage node
+    graph.append({
+        "@type": "WebPage",
+        "@id": webpage_id,
+        "url": webpage_id,
+        "name": title,
+        "description": excerpt[:300] if excerpt else "",
+        "inLanguage": language,
+    })
+
+    # Article node
+    article_node = {
         "@type": "Article",
-        "headline": title[:110],  # Google truncates at 110 chars
+        "@id": article_id,
+        "headline": title[:110],
         "description": excerpt[:300] if excerpt else "",
         "keywords": topic,
         "datePublished": now,
         "dateModified": now,
         "inLanguage": language,
-        "author": {
-            "@type": "Organization",
-            "name": publisher_name,
-        },
-        "publisher": {
-            "@type": "Organization",
-            "name": publisher_name,
-        },
-        "mainEntityOfPage": {
-            "@type": "WebPage",
-            "@id": f"https://{domain.replace('https://','').replace('http://','').rstrip('/')}/" if domain else "",
-        },
+        "author": {"@type": "Organization", "name": publisher_name, "url": base_url or None},
+        "publisher": {"@type": "Organization", "name": publisher_name, "url": base_url or None},
+        "mainEntityOfPage": {"@id": webpage_id},
     }
     if word_count:
-        schema["wordCount"] = word_count
+        article_node["wordCount"] = word_count
+    graph.append(article_node)
+
+    # BreadcrumbList
+    if base_url and topic:
+        graph.append({
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Strona główna" if language == "pl" else "Home", "item": base_url + "/"},
+                {"@type": "ListItem", "position": 2, "name": title},
+            ],
+        })
+
+    # FAQPage node (only if we have Q&A pairs)
+    faq_entities = _extract_faq_entities(faq_html)
+    if faq_entities:
+        graph.append({
+            "@type": "FAQPage",
+            "@id": faq_id,
+            "mainEntity": faq_entities,
+        })
+        # Cross-link Article → FAQPage
+        article_node["mentions"] = {"@id": faq_id}
+
+    schema = {"@context": "https://schema.org", "@graph": graph}
     return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
 
 
@@ -768,12 +839,22 @@ async def generate_article(
     ]))
 
     # ── STEP 7: Conclusion ────────────────────────────────────────────────────
+    # Rotate conclusion H2 heading — anti-footprint
+    _concl_headings_pl = [
+        "Podsumowanie", "Wnioski końcowe", "Co warto zapamiętać?",
+        "Najważniejsze informacje", "Kluczowe wnioski", "Na zakończenie",
+    ]
+    _concl_headings_en = [
+        "Summary", "Final Thoughts", "Key Takeaways",
+        "What to Remember", "In Conclusion", "Wrapping Up",
+    ]
+    _concl_h2 = _random.choice(_concl_headings_pl if lang_pl else _concl_headings_en)
     if lang_pl:
         conclusion_user = (
             f"Napisz zakończenie artykułu '{title}' (keyword: '{topic}').\n"
             f"Omówione tematy: {', '.join(sections[:5])}\n"
             f"STRUKTURA:\n"
-            f"<h2>Podsumowanie</h2>\n"
+            f"<h2>{_concl_h2}</h2>\n"
             f"- Akapit 1: główne wnioski (bullet points w <ul> lub tekst)\n"
             f"- Akapit 2: praktyczne zastosowanie / co teraz zrobić\n"
             f"- Akapit 3 (opcjonalny): CTA lub pytanie do czytelnika\n"
@@ -784,7 +865,7 @@ async def generate_article(
             f"Write conclusion for '{title}' (keyword: '{topic}').\n"
             f"Topics covered: {', '.join(sections[:5])}\n"
             f"STRUCTURE:\n"
-            f"<h2>Summary</h2>\n"
+            f"<h2>{_concl_h2}</h2>\n"
             f"- Para 1: key takeaways (bullets in <ul> or prose)\n"
             f"- Para 2: practical next steps\n"
             f"- Para 3 (optional): CTA or question for readers\n"
@@ -917,13 +998,19 @@ async def generate_article(
 
     content = re.sub(r'<a\s[^>]*?>.*?</a>', _dedup_link, content, flags=re.DOTALL | re.IGNORECASE)
 
-    # Schema markup: FAQPage + Article
-    faq_schema = _build_faq_schema(faq_html, topic)
-    article_schema = _build_article_schema(title, topic, excerpt, word_count=_count_words(content), domain=client_domain, language=language)
-    if faq_schema:
-        content += f"\n\n{faq_schema}"
-    if article_schema:
-        content += f"\n\n{article_schema}"
+    # Combined @graph schema: Article + FAQPage + BreadcrumbList in one <script>
+    combined_schema = _build_combined_schema(
+        title=title,
+        topic=topic,
+        excerpt=excerpt,
+        faq_html=faq_html,
+        sections=sections,
+        word_count=_count_words(content),
+        domain=client_domain,
+        language=language,
+    )
+    if combined_schema:
+        content += f"\n\n{combined_schema}"
 
     # Dedup fingerprint
     fingerprint = _content_fingerprint(content)

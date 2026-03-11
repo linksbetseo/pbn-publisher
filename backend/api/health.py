@@ -66,6 +66,17 @@ async def ensure_tables():
             await db.execute("ALTER TABLE domain_health_snapshots ADD COLUMN dr INTEGER DEFAULT NULL")
         except Exception:
             pass
+        # Clean up old progress records (keep only last 10)
+        try:
+            await db.execute(
+                """DELETE FROM domain_health_snapshot_progress
+                   WHERE id NOT IN (
+                       SELECT id FROM domain_health_snapshot_progress
+                       ORDER BY id DESC LIMIT 10
+                   )"""
+            )
+        except Exception:
+            pass
         await db.commit()
 
 
