@@ -1357,6 +1357,17 @@ async def export_keywords_csv(schedule_id: int):
     )
 
 
+@router.get("/test-env")
+async def test_env():
+    """Debug: show which API keys are set (masked)."""
+    import os
+    keys = ["GEMINI_API_KEY", "OPENAI_API_KEY", "FREEPIK_API_KEY", "DATAFORSEO_LOGIN"]
+    return {
+        k: (os.getenv(k, "")[:6] + "..." if os.getenv(k) else "NOT SET")
+        for k in keys
+    }
+
+
 @router.get("/test-images")
 async def test_images():
     """Test all image providers. Returns status and image size for each."""
