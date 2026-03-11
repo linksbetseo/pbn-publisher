@@ -11,7 +11,7 @@ import httpx
 logger = logging.getLogger(__name__)
 GEMINI_IMAGE_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.0-flash-preview-image-generation:generateContent"
+    "imagen-3.0-generate-002:predict"
 )
 
 
@@ -25,8 +25,8 @@ async def generate_image_gemini(prompt: str) -> str:
         raise RuntimeError("GEMINI_API_KEY not set")
 
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        "instances": [{"prompt": prompt}],
+        "parameters": {"sampleCount": 1, "aspectRatio": "16:9"},
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -40,16 +40,11 @@ async def generate_image_gemini(prompt: str) -> str:
 
         data = resp.json()
 
-    # Extract inline image data from response
-    for candidate in data.get("candidates", []):
-        for part in candidate.get("content", {}).get("parts", []):
-            inline = part.get("inlineData")
-            if inline:
-                mime = inline.get("mimeType", "image/jpeg")
-                b64_data = inline.get("data", "")
-                if b64_data:
-                    logger.info(f"[Gemini] image generated, mime={mime}, size={len(b64_data)} chars")
-                    # Return as-is if already jpeg, else return raw b64
-                    return b64_data
+    # Extract base64 image from Imagen response
+    for prediction in data.get("predictions", []):
+        b64_data = prediction.get("bytesBase64Encoded", "")
+        if b64_data:
+            logger.info(f"[Gemini/Imagen] image generated, size={len(b64_data)} chars")
+            return b64_data
 
-    raise RuntimeError(f"No image in Gemini response: {str(data)[:300]}")
+    raise RuntimeError(f"No image in Imagen response: {str(data)[:300]}")
