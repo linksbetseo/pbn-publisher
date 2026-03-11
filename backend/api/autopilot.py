@@ -562,6 +562,8 @@ async def _fetch_image(image_source: str, keyword: str, title: str, img_prompt: 
             return img, _provider
         except Exception as e:
             logger.warning(f"[Image] {_provider} failed for '{keyword}': {e}")
+            _fetch_image._last_errors = getattr(_fetch_image, "_last_errors", {})
+            _fetch_image._last_errors[_provider] = str(e)
     return None, "none"
 
 
@@ -1377,5 +1379,7 @@ async def test_images():
             }
         except Exception as e:
             results[source] = {"ok": False, "error": str(e)[:200], "elapsed_s": round(time.time() - t0, 2)}
+        # Attach provider errors if any
+        results[source]["provider_errors"] = getattr(_fetch_image, "_last_errors", {})
 
     return results
