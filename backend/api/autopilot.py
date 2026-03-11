@@ -31,6 +31,10 @@ from services.wordpress_service import publish_post, get_or_create_category, get
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
+# In-memory job tracker for async run status
+import uuid as _uuid
+_run_jobs: dict = {}  # job_id -> {status, results, published, failed, done, error}
+
 DFS_LOGIN = os.getenv("DATAFORSEO_LOGIN", "")
 DFS_PASSWORD = os.getenv("DATAFORSEO_PASSWORD", "")
 
@@ -454,167 +458,189 @@ async def sync_categories(schedule_id: int):
     return {"synced": synced, "total": len(results), "categories": results}
 
 
-@router.post("/schedules/{schedule_id}/run")
-async def run_schedule_now(schedule_id: int, body: RunNowRequest):
-    """
-    Uruchom publikację teraz — generuje i publikuje X artykułów z kolejki.
-    Zwraca wyniki po zakończeniu (Railway blokuje SSE streaming).
-    """
-    await ensure_tables()
-    async with aiosqlite.connect(DB_PATH) as db:
-        sched = await get_schedule(db, schedule_id)
-    if not sched:
-        from fastapi import HTTPException
-        raise HTTPException(404, "Harmonogram nie istnieje")
+async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
+    """Background task: generate and publish articles, updating _run_jobs[job_id]."""
+    job = _run_jobs[job_id]
+    try:
+        await ensure_tables()
+        async with aiosqlite.connect(DB_PATH) as db:
+            sched = await get_schedule(db, schedule_id)
+        if not sched:
+            job.update({"done": True, "error": "Harmonogram nie istnieje"})
+            return
 
-    limit = body.limit if body.limit else sched["posts_per_day"]
+        limit = body.limit if body.limit else sched["posts_per_day"]
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT * FROM domain_keywords
-               WHERE schedule_id = ? AND status = 'pending'
-               ORDER BY keyword_type DESC, search_volume DESC
-               LIMIT ?""",
-            (schedule_id, limit)
-        ) as cur:
-            keywords = [dict(r) for r in await cur.fetchall()]
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT * FROM domain_keywords
+                   WHERE schedule_id = ? AND status = 'pending'
+                   ORDER BY keyword_type DESC, search_volume DESC
+                   LIMIT ?""",
+                (schedule_id, limit)
+            ) as cur:
+                keywords = [dict(r) for r in await cur.fetchall()]
 
-    if not keywords:
-        return {"done": True, "message": "Brak pending keywords", "published": 0, "failed": 0, "results": []}
+        if not keywords:
+            job.update({"done": True, "message": "Brak pending keywords", "published": 0, "failed": 0})
+            return
 
-    # Pre-check WP credentials before burning tokens on generation
-    wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"],
-                                       http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""))
-    if not wp_ok:
-        logger.warning(f"[Autopilot] WP credentials invalid for {sched['domain']} — aborting")
-        return {"done": False, "error": f"WP credentials invalid for {sched['domain']}", "published": 0, "failed": 0, "results": []}
+        wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"],
+                                           http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""))
+        if not wp_ok:
+            logger.warning(f"[Autopilot] WP credentials invalid for {sched['domain']} — aborting")
+            job.update({"done": True, "error": f"WP credentials invalid for {sched['domain']}"})
+            return
 
-    published = 0
-    failed = 0
-    results = []
+        job["total"] = len(keywords)
 
-    # Fetch already-published posts on this domain for internal linking
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT title, wp_post_url FROM domain_keywords
-               WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
-            (schedule_id,)
-        ) as cur:
-            published_posts = [{"title": r["title"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT title, wp_post_url FROM domain_keywords
+                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
+                (schedule_id,)
+            ) as cur:
+                published_posts = [{"title": r["title"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
 
-    domain_fingerprints: set = set()
+        domain_fingerprints: set = set()
 
-    for kw_row in keywords:
-        keyword = kw_row["keyword"]
-        variation = random.choice(VARIATION_HINTS)
+        for kw_row in keywords:
+            keyword = kw_row["keyword"]
+            variation = random.choice(VARIATION_HINTS)
 
-        try:
-            location_code = 2616 if sched["language"] == "pl" else 2840
-            article = await generate_article(
-                topic=keyword,
-                client_domain=sched["client_domain"] or sched["domain"],
-                anchor_text=sched["anchor_text"] or keyword,
-                language=sched["language"],
-                variation_hint=variation,
-                dfs_login=DFS_LOGIN,
-                dfs_password=DFS_PASSWORD,
-                location_code=location_code,
-                published_posts=published_posts,
-                domain_fingerprints=domain_fingerprints,
-            )
-            title = article["title"]
-            content = article["content"]
-            excerpt = article.get("excerpt", "")
-
-            category_id = kw_row.get("wp_category_id") or None
-
-            # Generuj obrazek featured (Gemini → Freepik → DALL-E)
-            image_b64 = None
-            image_provider = "none"
-            img_prompt = (
-                f"High-quality professional photo for blog article: '{title}'. "
-                f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
-            )
             try:
-                image_b64 = await generate_image_gemini(img_prompt)
-                image_provider = "gemini"
-            except Exception as img_err:
-                logger.warning(f"Gemini image failed for '{keyword}': {img_err} — trying Freepik")
+                location_code = 2616 if sched["language"] == "pl" else 2840
+                article = await generate_article(
+                    topic=keyword,
+                    client_domain=sched["client_domain"] or sched["domain"],
+                    anchor_text=sched["anchor_text"] or keyword,
+                    language=sched["language"],
+                    variation_hint=variation,
+                    dfs_login=DFS_LOGIN,
+                    dfs_password=DFS_PASSWORD,
+                    location_code=location_code,
+                    published_posts=published_posts,
+                    domain_fingerprints=domain_fingerprints,
+                )
+                title = article["title"]
+                content = article["content"]
+                excerpt = article.get("excerpt", "")
+
+                category_id = kw_row.get("wp_category_id") or None
+
+                image_b64 = None
+                image_provider = "none"
+                img_prompt = (
+                    f"High-quality professional photo for blog article: '{title}'. "
+                    f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
+                )
                 try:
-                    image_b64 = await generate_image_freepik(keyword)
-                    image_provider = "freepik"
-                except Exception as img_err2:
-                    logger.warning(f"Freepik image failed for '{keyword}': {img_err2} — trying DALL-E")
+                    image_b64 = await generate_image_gemini(img_prompt)
+                    image_provider = "gemini"
+                except Exception as img_err:
+                    logger.warning(f"Gemini image failed for '{keyword}': {img_err} — trying Freepik")
                     try:
-                        image_b64 = await generate_image(
-                            f"Professional illustration for article about: {title}. Clean, modern, no text."
+                        image_b64 = await generate_image_freepik(keyword)
+                        image_provider = "freepik"
+                    except Exception as img_err2:
+                        logger.warning(f"Freepik image failed for '{keyword}': {img_err2} — trying DALL-E")
+                        try:
+                            image_b64 = await generate_image(
+                                f"Professional illustration for article about: {title}. Clean, modern, no text."
+                            )
+                            image_provider = "dalle"
+                        except Exception as img_err3:
+                            logger.warning(f"All image providers failed for '{keyword}': {img_err3}")
+
+                result = await publish_post(
+                    domain=sched["domain"],
+                    wp_login=sched["wp_login"],
+                    wp_pass=sched["wp_pass"],
+                    title=title,
+                    content=content,
+                    image_b64=image_b64,
+                    category_id=category_id,
+                    excerpt=excerpt,
+                    keyword=keyword,
+                    http_user=sched.get("http_user", ""),
+                    http_pass=sched.get("http_pass", ""),
+                )
+
+                if result.get("success"):
+                    wp_url = result.get("url", "")
+                    job["published"] += 1
+                    published_posts.append({"title": title, "url": wp_url})
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
+                               wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
+                            (None, sched["client_domain"] or sched["domain"],
+                             sched["my_domain_id"], title, content, wp_url, "published")
                         )
-                        image_provider = "dalle"
-                    except Exception as img_err3:
-                        logger.warning(f"All image providers failed for '{keyword}': {img_err3}")
+                        await db.execute(
+                            """UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=?
+                               WHERE id=?""",
+                            (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                        )
+                        await db.commit()
+                    job["results"].append({"status": "published", "keyword": keyword, "url": wp_url, "title": title, "image": image_provider})
+                else:
+                    job["failed"] += 1
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                        await db.commit()
+                    job["results"].append({"status": "failed", "keyword": keyword, "error": result.get("error", "WP error")})
 
-            result = await publish_post(
-                domain=sched["domain"],
-                wp_login=sched["wp_login"],
-                wp_pass=sched["wp_pass"],
-                title=title,
-                content=content,
-                image_b64=image_b64,
-                category_id=category_id,
-                excerpt=excerpt,
-                keyword=keyword,
-                http_user=sched.get("http_user", ""),
-                http_pass=sched.get("http_pass", ""),
-            )
-
-            if result.get("success"):
-                wp_url = result.get("url", "")
-                published += 1
-                published_posts.append({"title": title, "url": wp_url})
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute(
-                        """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                           wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
-                        (None, sched["client_domain"] or sched["domain"],
-                         sched["my_domain_id"], title, content, wp_url, "published")
-                    )
-                    await db.execute(
-                        """UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=?
-                           WHERE id=?""",
-                        (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
-                    )
-                    await db.commit()
-                results.append({"status": "published", "keyword": keyword, "url": wp_url, "title": title, "image": image_provider})
-            else:
-                failed += 1
+            except Exception as e:
+                job["failed"] += 1
+                logger.error(f"Autopilot error for {keyword}: {e}")
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
                     await db.commit()
-                results.append({"status": "failed", "keyword": keyword, "error": result.get("error", "WP error")})
+                job["results"].append({"status": "failed", "keyword": keyword, "error": str(e)})
 
-        except Exception as e:
-            failed += 1
-            logger.error(f"Autopilot error for {keyword}: {e}")
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
-                await db.commit()
-            results.append({"status": "failed", "keyword": keyword, "error": str(e)})
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='published'",
+                (schedule_id,)
+            ) as cur:
+                total_pub = (await cur.fetchone())[0]
+            await db.execute(
+                "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
+                (total_pub, datetime.utcnow().isoformat(), schedule_id)
+            )
+            await db.commit()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='published'",
-            (schedule_id,)
-        ) as cur:
-            total_pub = (await cur.fetchone())[0]
-        await db.execute(
-            "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
-            (total_pub, datetime.utcnow().isoformat(), schedule_id)
-        )
-        await db.commit()
+        job["total_published"] = total_pub
+        job["done"] = True
 
-    return {"done": True, "published": published, "failed": failed, "total_published": total_pub, "results": results}
+    except Exception as e:
+        logger.error(f"[Autopilot] Job {job_id} crashed: {e}")
+        job.update({"done": True, "error": str(e)})
+
+
+@router.post("/schedules/{schedule_id}/run")
+async def run_schedule_now(schedule_id: int, body: RunNowRequest, background_tasks: BackgroundTasks):
+    """
+    Uruchom publikację w tle — zwraca job_id natychmiast.
+    Frontned odpytuje GET /schedules/{id}/run-status/{job_id} co 3s.
+    """
+    job_id = str(_uuid.uuid4())
+    _run_jobs[job_id] = {"status": "running", "results": [], "published": 0, "failed": 0, "total": 0, "done": False}
+    background_tasks.add_task(_run_job, job_id, schedule_id, body)
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.get("/schedules/{schedule_id}/run-status/{job_id}")
+async def run_status(schedule_id: int, job_id: str):
+    """Pobierz status uruchomionego joba."""
+    job = _run_jobs.get(job_id)
+    if not job:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Job nie istnieje")
+    return job
 
 
 @router.post("/run-daily")
@@ -871,6 +897,8 @@ async def bulk_generate_maps(body: BulkActionRequest):
         raise HTTPException(400, "Brak konfiguracji DataForSEO")
 
     results = []
+    _dfs_sem = asyncio.Semaphore(3)  # max 3 concurrent DFS requests
+
     for schedule_id in body.schedule_ids:
         async with aiosqlite.connect(DB_PATH) as db:
             sched = await get_schedule(db, schedule_id)
@@ -878,15 +906,17 @@ async def bulk_generate_maps(body: BulkActionRequest):
             results.append({"schedule_id": schedule_id, "error": "not found"})
             continue
         try:
-            tmap = await generate_topical_map(
-                seed=sched["seed_keyword"],
-                location_code=2616 if sched["language"] == "pl" else 2840,
-                language_code=sched["language"],
-                min_volume=sched["min_volume"],
-                max_clusters=8,
-                dfs_login=DFS_LOGIN,
-                dfs_password=DFS_PASSWORD,
-            )
+            async with _dfs_sem:
+                tmap = await generate_topical_map(
+                    seed=sched["seed_keyword"],
+                    location_code=2616 if sched["language"] == "pl" else 2840,
+                    language_code=sched["language"],
+                    min_volume=sched["min_volume"],
+                    max_clusters=8,
+                    dfs_login=DFS_LOGIN,
+                    dfs_password=DFS_PASSWORD,
+                )
+            await asyncio.sleep(0.5)  # small delay between DFS requests
             inserted = 0
             async with aiosqlite.connect(DB_PATH) as db:
                 async with db.execute(

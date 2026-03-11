@@ -118,6 +118,10 @@ async def _weekly_cron():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with aiosqlite.connect(DB_PATH) as db:
+        # Enable WAL mode for better concurrent read/write performance
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA cache_size=-64000")  # 64MB cache
         await db.executescript(CREATE_TABLES_SQL)
         # Migration: add wp_ok column if missing
         try:

@@ -34,6 +34,9 @@ function BulkTab() {
   const [anchorText, setAnchorText] = useState('')
   const [runLimit, setRunLimit] = useState(1)
 
+  const [csvImporting, setCsvImporting] = useState(false)
+  const csvInputRef = useRef(null)
+
   const log = (msg, type = 'info') => setActionLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString('pl-PL') }])
 
   const load = useCallback(async () => {
@@ -48,6 +51,53 @@ function BulkTab() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  const handleCsvImport = async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    setCsvImporting(true)
+    try {
+      const text = await file.text()
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+      if (lines.length < 2) { log('CSV jest pusty', 'err'); return }
+      // Detect delimiter
+      const delim = lines[0].includes(';') ? ';' : ','
+      const headers = lines[0].split(delim).map(h => h.replace(/^\uFEFF/, '').trim().toLowerCase())
+      const col = (name, aliases = []) => {
+        const idx = [name, ...aliases].map(a => headers.indexOf(a)).find(i => i >= 0)
+        return idx !== undefined ? idx : -1
+      }
+      const iDomain = col('domena', ['domain'])
+      const iLogin = col('login wp', ['login_wp', 'wp_login', 'login'])
+      const iPass = col('haslo aplikacji', ['password', 'wp_pass', 'pass', 'haslo'])
+      const iServer = col('serwer', ['server'])
+      if (iDomain < 0 || iLogin < 0 || iPass < 0) {
+        log('CSV musi mieć kolumny: Domena, Login WP, Haslo Aplikacji', 'err'); return
+      }
+      const items = []
+      for (const line of lines.slice(1)) {
+        const cols = line.split(delim).map(c => c.trim().replace(/^"|"$/g, ''))
+        const domain = cols[iDomain]
+        if (!domain) continue
+        items.push({
+          domain,
+          wp_login: cols[iLogin] || '',
+          wp_pass: cols[iPass] || '',
+          server: iServer >= 0 ? (cols[iServer] || '') : '',
+          active: 1,
+        })
+      }
+      if (items.length === 0) { log('Brak danych w CSV', 'err'); return }
+      const res = await api.post('/api/domains/bulk-import', items)
+      log(`✓ Zaimportowano ${res.data.inserted} domen (pominięto ${res.data.skipped} duplikatów)`, 'ok')
+      await load()
+    } catch (err) {
+      log(`✗ Błąd importu: ${err.response?.data?.detail || err.message}`, 'err')
+    } finally {
+      setCsvImporting(false)
+      e.target.value = ''
+    }
+  }
 
   const servers = ['all', ...new Set(allDomains.map(d => d.server).filter(Boolean))]
 
@@ -201,6 +251,26 @@ function BulkTab() {
             <span className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-xs font-medium">
               Zaznaczono: {selectedList.length}
             </span>
+            {tab === 'domains' && (
+              <>
+                <input
+                  ref={csvInputRef}
+                  type="file"
+                  accept=".csv"
+                  className="hidden"
+                  onChange={handleCsvImport}
+                />
+                <button
+                  onClick={() => csvInputRef.current?.click()}
+                  disabled={csvImporting}
+                  className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 flex items-center gap-1"
+                >
+                  {csvImporting ? (
+                    <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Importuję...</>
+                  ) : '↑ Import CSV'}
+                </button>
+              </>
+            )}
           </div>
 
           {/* Table */}
@@ -463,18 +533,43 @@ export default function Autopilot() {
 
     const limit = limitOverride || sched.posts_per_day
     try {
+      // Start background job
       const res = await api.post(`/api/autopilot/schedules/${id}/run`, { schedule_id: id, limit })
-      const data = res.data
-      // Wyświetl każdy wynik
-      const entries = data.results || []
-      if (entries.length === 0 && data.message) {
-        entries.push({ status: 'info', keyword: '—', error: data.message })
+      const { job_id } = res.data
+      if (!job_id) throw new Error('Brak job_id w odpowiedzi')
+
+      // Poll every 3s until done
+      let lastCount = 0
+      while (true) {
+        await new Promise(r => setTimeout(r, 3000))
+        const statusRes = await api.get(`/api/autopilot/schedules/${id}/run-status/${job_id}`)
+        const data = statusRes.data
+
+        // Show new results since last poll
+        const entries = data.results || []
+        if (entries.length > lastCount) {
+          setRunLog(l => ({ ...l, [id]: entries }))
+          lastCount = entries.length
+          setTimeout(() => {
+            const el = logRefs.current[id]
+            if (el) el.scrollTop = el.scrollHeight
+          }, 50)
+        }
+
+        if (data.done) {
+          if (data.error) {
+            setRunLog(l => ({ ...l, [id]: [...(data.results || []), { status: 'failed', keyword: '—', error: data.error }] }))
+          } else {
+            const finalEntries = data.results || []
+            if (finalEntries.length === 0 && data.message) {
+              finalEntries.push({ status: 'info', keyword: '—', error: data.message })
+            }
+            setRunLog(l => ({ ...l, [id]: [...finalEntries, { done: true, published: data.published, failed: data.failed }] }))
+          }
+          break
+        }
       }
-      setRunLog(l => ({ ...l, [id]: [...entries, { done: true, published: data.published, failed: data.failed }] }))
-      setTimeout(() => {
-        const el = logRefs.current[id]
-        if (el) el.scrollTop = el.scrollHeight
-      }, 50)
+
       await load()
       if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
     } catch (e) {
