@@ -184,6 +184,7 @@ async def _fetch_serp_content(
 
 
 def _markdown_to_html(text: str) -> str:
+    """Convert markdown to HTML. Safe to call on mixed markdown+HTML content."""
     # Convert markdown tables to HTML
     def _convert_table(m: re.Match) -> str:
         rows = [r.strip() for r in m.group(0).strip().split("\n") if r.strip()]
@@ -198,6 +199,7 @@ def _markdown_to_html(text: str) -> str:
         return html
 
     text = re.sub(r"(\|.+\|\n)+", _convert_table, text)
+    text = re.sub(r"^#### (.+)$", r"<h4>\1</h4>", text, flags=re.MULTILINE)
     text = re.sub(r"^### (.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
     text = re.sub(r"^## (.+)$", r"<h2>\1</h2>", text, flags=re.MULTILINE)
     text = re.sub(r"^# (.+)$", r"<h1>\1</h1>", text, flags=re.MULTILINE)
@@ -214,6 +216,25 @@ def _markdown_to_html(text: str) -> str:
             continue
         result.append(line if line.startswith("<") else f"<p>{line}</p>")
     return "\n".join(result)
+
+
+def _strip_markdown_remnants(html: str) -> str:
+    """
+    Remove leftover markdown syntax from HTML content that GPT mixed in.
+    Called on every GPT output AFTER markdown_to_html to catch mixed content.
+    e.g. GPT returns <h2>Title</h2> but inside <p> writes ## SubHeading or **bold**
+    """
+    # Convert any remaining ## / # headers that GPT slipped inside HTML blocks
+    html = re.sub(r"(?m)^#### (.+)$", r"<h4>\1</h4>", html)
+    html = re.sub(r"(?m)^### (.+)$", r"<h3>\1</h3>", html)
+    html = re.sub(r"(?m)^## (.+)$", r"<h2>\1</h2>", html)
+    html = re.sub(r"(?m)^# (.+)$", r"<h1>\1</h1>", html)
+    # Bold/italic inside HTML tags
+    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
+    html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
+    # Backtick code
+    html = re.sub(r"`(.+?)`", r"<code>\1</code>", html)
+    return html
 
 
 async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = "gpt-4o-mini") -> str:
@@ -572,6 +593,7 @@ async def generate_article(
     intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=700)
     if not intro_html.strip().startswith("<"):
         intro_html = _markdown_to_html(intro_html)
+    intro_html = _strip_markdown_remnants(intro_html)
     logger.info("[Article] Intro done")
 
     # ── STEP 6: Sections (parallel) ───────────────────────────────────────────
@@ -626,6 +648,7 @@ async def generate_article(
         sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=1100)
         if not sec_html.strip().startswith("<"):
             sec_html = _markdown_to_html(sec_html)
+        sec_html = _strip_markdown_remnants(sec_html)
         logger.info(f"[Article] Section {i+1}/{len(sections)}: {heading[:40]}")
         return sec_html
 
@@ -663,6 +686,7 @@ async def generate_article(
     )
     if not conclusion_html.strip().startswith("<"):
         conclusion_html = _markdown_to_html(conclusion_html)
+    conclusion_html = _strip_markdown_remnants(conclusion_html)
 
     # ── STEP 8: FAQ ───────────────────────────────────────────────────────────
     paa_block = ""
@@ -701,6 +725,7 @@ async def generate_article(
     )
     if not faq_html.strip().startswith("<"):
         faq_html = _markdown_to_html(faq_html)
+    faq_html = _strip_markdown_remnants(faq_html)
 
     # ── STEP 9: Excerpt ───────────────────────────────────────────────────────
     if lang_pl:
