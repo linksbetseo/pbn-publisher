@@ -333,6 +333,37 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -
     return html
 
 
+# Anchor text rotation pools — reduces footprint, more natural link profile
+_ANCHOR_GENERIC_PL = ["tutaj", "sprawdź", "dowiedz się więcej", "kliknij tutaj", "więcej informacji", "przeczytaj więcej"]
+_ANCHOR_GENERIC_EN = ["here", "check it out", "learn more", "click here", "find out more", "read more"]
+
+
+def _rotate_anchor(anchor_text: str, client_domain: str, language: str = "pl") -> str:
+    """
+    Rotate anchor text to avoid footprint.
+    Distribution: 35% exact match, 20% brand/naked URL, 25% partial/topic, 20% generic
+    Uses hash of (domain+anchor) for deterministic-but-varied rotation per article batch.
+    """
+    import hashlib
+    seed = int(hashlib.md5(f"{client_domain}{anchor_text}".encode()).hexdigest()[:8], 16)
+    bucket = seed % 100
+    if bucket < 35:
+        # Exact match — keep as-is
+        return anchor_text
+    elif bucket < 55:
+        # Naked URL / brand name (strip www, use domain root)
+        domain = client_domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
+        return domain.replace("www.", "")
+    elif bucket < 80:
+        # Partial match — first word(s) of anchor or topic
+        words = anchor_text.split()
+        return " ".join(words[:max(1, len(words) - 1)]) if len(words) > 1 else anchor_text
+    else:
+        # Generic
+        generics = _ANCHOR_GENERIC_PL if language == "pl" else _ANCHOR_GENERIC_EN
+        return generics[seed % len(generics)]
+
+
 async def generate_article(
     topic: str,
     client_domain: str,
@@ -356,7 +387,9 @@ async def generate_article(
             url = "https://" + url
         return url
 
-    anchors_info = f'<a href="{clean_url(client_domain)}">{anchor_text}</a>'
+    # Rotate anchor text for natural link profile
+    rotated_anchor = _rotate_anchor(anchor_text, client_domain, language)
+    anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
     if anchor_text2 and anchor_url2:
         anchors_info += f', <a href="{clean_url(anchor_url2)}">{anchor_text2}</a>'
     if anchor_text3 and anchor_url3:
@@ -707,6 +740,7 @@ async def generate_article(
         "content": content,
         "excerpt": excerpt,
         "fingerprint": fingerprint,
+        "lsi_tags": lsi_terms[:5],  # top 5 LSI terms for WP tags
     }
 
 

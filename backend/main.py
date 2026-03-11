@@ -115,6 +115,26 @@ async def _weekly_cron():
             print(f"[WeeklyCron] Error: {e}")
 
 
+async def _daily_autopilot_cron():
+    """Run autopilot for all active schedules every day at 08:00 UTC."""
+    import asyncio as _asyncio
+    from datetime import timedelta
+    while True:
+        now = datetime.utcnow()
+        next_run = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        wait_sec = (next_run - now).total_seconds()
+        await _asyncio.sleep(wait_sec)
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=30) as hc:
+                await hc.post("http://localhost:8080/api/autopilot/run-daily")
+            print(f"[DailyCron] Autopilot triggered at {datetime.utcnow().isoformat()}")
+        except Exception as e:
+            print(f"[DailyCron] Error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -130,11 +150,13 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass  # column already exists
         await import_csv_domains(db)
-    # Start weekly cron
+    # Start background crons
     import asyncio as _asyncio
     cron_task = _asyncio.create_task(_weekly_cron())
+    daily_task = _asyncio.create_task(_daily_autopilot_cron())
     yield
     cron_task.cancel()
+    daily_task.cancel()
 
 
 app = FastAPI(title="PBN Publisher API", version="1.0.0", lifespan=lifespan)
