@@ -453,6 +453,7 @@ export default function Autopilot() {
     min_volume: 10,
     client_domain: '',
     anchor_text: '',
+    image_source: 'freepik_stock',
   })
   const [addError, setAddError] = useState('')
   const [adding, setAdding] = useState(false)
@@ -488,7 +489,7 @@ export default function Autopilot() {
         min_volume: Number(newForm.min_volume),
       })
       setShowAdd(false)
-      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, client_domain: '', anchor_text: '' })
+      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, client_domain: '', anchor_text: '', image_source: 'freepik_stock' })
       await load()
     } catch (e) {
       setAddError(e.response?.data?.detail || e.message)
@@ -637,6 +638,11 @@ export default function Autopilot() {
     await load()
   }
 
+  const updateImageSource = async (id, val) => {
+    await api.patch(`/api/autopilot/schedules/${id}`, { image_source: val })
+    await load()
+  }
+
   const set = (f, v) => setNewForm(n => ({ ...n, [f]: v }))
   const fmt = (s) => s ? new Date(s).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
   const pending_count = (id) => keywords[id]?.filter(k => k.status === 'pending').length ?? '?'
@@ -745,6 +751,15 @@ export default function Autopilot() {
               <label className="block text-xs font-medium text-gray-600 mb-1">Anchor text klienta</label>
               <input value={newForm.anchor_text} onChange={e => set('anchor_text', e.target.value)} placeholder="usługi prawne (opcjonalne)" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
             </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Źródło zdjęć</label>
+              <select value={newForm.image_source} onChange={e => set('image_source', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="freepik_stock">📷 Freepik Stock (~$0.01/zdjęcie)</option>
+                <option value="gemini">🤖 Gemini AI (generowane)</option>
+                <option value="dalle">🎨 DALL-E 3 (~$0.04/zdjęcie)</option>
+                <option value="none">🚫 Bez zdjęcia</option>
+              </select>
+            </div>
           </div>
           {addError && <p className="text-red-600 text-xs mt-2">{addError}</p>}
           <div className="flex gap-3 mt-4">
@@ -809,6 +824,21 @@ export default function Autopilot() {
                     onBlur={e => updatePpd(sched.id, e.target.value)}
                     className="w-14 border border-gray-300 rounded px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
+                </div>
+
+                {/* Image source */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <select
+                    defaultValue={sched.image_source || 'freepik_stock'}
+                    onChange={e => updateImageSource(sched.id, e.target.value)}
+                    className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    title="Źródło zdjęć"
+                  >
+                    <option value="freepik_stock">📷 Freepik</option>
+                    <option value="gemini">🤖 Gemini</option>
+                    <option value="dalle">🎨 DALL-E</option>
+                    <option value="none">🚫 Brak</option>
+                  </select>
                 </div>
 
                 {/* Actions */}

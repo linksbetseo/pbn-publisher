@@ -60,9 +60,9 @@ class ScheduleCreate(BaseModel):
     posts_per_day: int = 1
     language: str = "pl"
     min_volume: int = 10
-    # Opcjonalne linki do klienta wbudowane w artykuły
     client_domain: str = ""
     anchor_text: str = ""
+    image_source: str = "freepik_stock"  # freepik_stock | gemini | dalle | none
 
 
 class ScheduleUpdate(BaseModel):
@@ -70,6 +70,7 @@ class ScheduleUpdate(BaseModel):
     active: Optional[int] = None
     client_domain: Optional[str] = None
     anchor_text: Optional[str] = None
+    image_source: Optional[str] = None
 
 
 class RunNowRequest(BaseModel):
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS domain_schedules (
     total_keywords INTEGER DEFAULT 0,
     published_count INTEGER DEFAULT 0,
     last_run_at TEXT,
+    image_source TEXT DEFAULT 'freepik_stock',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -157,6 +159,11 @@ async def ensure_tables():
                 await db.execute(f"ALTER TABLE domain_keywords ADD COLUMN {col} {typedef}")
             except Exception:
                 pass
+        # Migracja domain_schedules
+        try:
+            await db.execute("ALTER TABLE domain_schedules ADD COLUMN image_source TEXT DEFAULT 'freepik_stock'")
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -219,10 +226,11 @@ async def create_schedule(body: ScheduleCreate):
 
         cursor = await db.execute(
             """INSERT INTO domain_schedules
-               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, client_domain, anchor_text)
-               VALUES (?,?,?,?,?,?,?)""",
+               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, client_domain, anchor_text, image_source)
+               VALUES (?,?,?,?,?,?,?,?)""",
             (body.my_domain_id, body.seed_keyword, body.posts_per_day,
-             body.language, body.min_volume, body.client_domain, body.anchor_text)
+             body.language, body.min_volume, body.client_domain, body.anchor_text,
+             body.image_source)
         )
         schedule_id = cursor.lastrowid
         await db.commit()
@@ -242,6 +250,8 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate):
             await db.execute("UPDATE domain_schedules SET client_domain=? WHERE id=?", (body.client_domain, schedule_id))
         if body.anchor_text is not None:
             await db.execute("UPDATE domain_schedules SET anchor_text=? WHERE id=?", (body.anchor_text, schedule_id))
+        if body.image_source is not None:
+            await db.execute("UPDATE domain_schedules SET image_source=? WHERE id=?", (body.image_source, schedule_id))
         await db.commit()
     return {"ok": True}
 
@@ -524,6 +534,37 @@ async def _with_retry(coro_fn, max_attempts: int = 3, base_delay: float = 2.0):
     raise last_exc
 
 
+async def _fetch_image(image_source: str, keyword: str, title: str, img_prompt: str) -> tuple[str | None, str]:
+    """
+    Fetch image based on image_source setting.
+    Returns (base64_str_or_None, provider_name).
+    image_source: 'freepik_stock' | 'gemini' | 'dalle' | 'none'
+    """
+    if image_source == "none":
+        return None, "none"
+
+    providers = {
+        "freepik_stock": [("freepik", lambda: generate_image_freepik(keyword))],
+        "gemini": [
+            ("gemini", lambda: generate_image_gemini(img_prompt)),
+            ("freepik", lambda: generate_image_freepik(keyword)),
+        ],
+        "dalle": [
+            ("dalle", lambda: generate_image(f"Professional illustration for article about: {title}. Clean, modern, no text.")),
+            ("freepik", lambda: generate_image_freepik(keyword)),
+        ],
+    }
+    order = providers.get(image_source, providers["freepik_stock"])
+
+    for _provider, _fn in order:
+        try:
+            img = await _fn()
+            return img, _provider
+        except Exception as e:
+            logger.warning(f"[Image] {_provider} failed for '{keyword}': {e}")
+    return None, "none"
+
+
 async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
     """Background task: generate and publish articles, persisting status to run_jobs table."""
     try:
@@ -600,23 +641,13 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     lsi_tags = article.get("lsi_tags", [])
                     category_id = kw_row.get("wp_category_id") or None
 
-                    image_b64 = None
-                    image_provider = "none"
                     img_prompt = (
                         f"High-quality professional photo for blog article: '{title}'. "
                         f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
                     )
-                    for _img_provider, _img_fn in [
-                        ("gemini", lambda: generate_image_gemini(img_prompt)),
-                        ("freepik", lambda: generate_image_freepik(keyword)),
-                        ("dalle", lambda: generate_image(f"Professional illustration for article about: {title}. Clean, modern, no text.")),
-                    ]:
-                        try:
-                            image_b64 = await _img_fn()
-                            image_provider = _img_provider
-                            break
-                        except Exception as _ie:
-                            logger.warning(f"[Image] {_img_provider} failed for '{keyword}': {_ie}")
+                    image_b64, image_provider = await _fetch_image(
+                        sched.get("image_source", "freepik_stock"), keyword, title, img_prompt
+                    )
 
                     async def _do_publish():
                         r = await publish_post(
@@ -799,21 +830,13 @@ async def run_daily_all():
                     excerpt = article.get("excerpt", "")
                     lsi_tags = article.get("lsi_tags", [])
 
-                    image_b64 = None
                     img_prompt_daily = (
                         f"High-quality professional photo for blog article: '{article['title']}'. "
                         f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
                     )
-                    for _ip, _ifn in [
-                        ("gemini", lambda: generate_image_gemini(img_prompt_daily)),
-                        ("freepik", lambda: generate_image_freepik(keyword)),
-                        ("dalle", lambda: generate_image(f"Professional illustration for article about: {article['title']}. Clean, modern, no text.")),
-                    ]:
-                        try:
-                            image_b64 = await _ifn()
-                            break
-                        except Exception as _ie:
-                            logger.warning(f"[Image] {_ip} failed for '{keyword}': {_ie}")
+                    image_b64, _ = await _fetch_image(
+                        sched.get("image_source", "freepik_stock"), keyword, article["title"], img_prompt_daily
+                    )
 
                     _art = article  # capture for lambda
                     async def _do_publish_daily():
@@ -1181,22 +1204,13 @@ async def bulk_run_schedules(body: BulkActionRequest):
                     published_posts=published_posts,
                     domain_fingerprints=domain_fingerprints,
                 )
-                image_b64 = None
-                try:
-                    image_b64 = await generate_image_gemini(
-                        f"High-quality professional photo for blog article: '{article['title']}'. "
-                        f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks."
-                    )
-                except Exception:
-                    try:
-                        image_b64 = await generate_image_freepik(keyword)
-                    except Exception:
-                        try:
-                            image_b64 = await generate_image(
-                                f"Professional illustration for article about: {article['title']}. Clean, modern, no text."
-                            )
-                        except Exception:
-                            pass
+                img_prompt_bulk = (
+                    f"High-quality professional photo for blog article: '{article['title']}'. "
+                    f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks."
+                )
+                image_b64, _ = await _fetch_image(
+                    sched.get("image_source", "freepik_stock"), keyword, article["title"], img_prompt_bulk
+                )
 
                 _art_bulk = article
                 async def _do_publish_bulk():
