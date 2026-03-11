@@ -7,9 +7,10 @@ const INDEXER_URL =
 
 const IMAGE_SOURCES = [
   { value: 'none', label: 'Brak obrazka' },
-  { value: 'gemini', label: 'Gemini AI' },
-  { value: 'freepik_stock', label: 'Freepik Stock' },
-  { value: 'dalle', label: 'DALL-E' },
+  { value: 'freepik_stock', label: '📷 Freepik Stock' },
+  { value: 'freepik_zimage', label: '⚡ Freepik Z-Image (generowanie)' },
+  { value: 'freepik_flux', label: '🌊 Freepik Flux Pro 1.1 (generowanie)' },
+  { value: 'dalle', label: '🎨 DALL-E 3' },
 ]
 
 function TabImport({ projects }) {
@@ -130,6 +131,10 @@ function TabPublish() {
   const [keyword, setKeyword] = useState('')
   const [anchor, setAnchor] = useState('')
   const [clientDomain, setClientDomain] = useState('')
+  const [anchor2, setAnchor2] = useState('')
+  const [url2, setUrl2] = useState('')
+  const [anchor3, setAnchor3] = useState('')
+  const [url3, setUrl3] = useState('')
   const [language, setLanguage] = useState('pl')
   const [imageSource, setImageSource] = useState('none')
   const [publishing, setPublishing] = useState(false)
@@ -176,6 +181,10 @@ function TabPublish() {
         client_domain: clientDomain,
         topic: keyword,
         anchor_text: anchor || keyword,
+        anchor_text2: anchor2,
+        anchor_url2: url2,
+        anchor_text3: anchor3,
+        anchor_url3: url3,
         language,
         unique_per_domain: true,
         batch_tag: selectedBatch,
@@ -283,48 +292,108 @@ function TabPublish() {
       )}
 
       {/* Publish settings */}
-      <div className="grid grid-cols-2 gap-4 max-w-2xl">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Keyword / Temat *</label>
-          <input
-            type="text"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            placeholder="np. hydraulik warszawa"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
+      <div className="space-y-4 max-w-2xl">
+        {/* Row 1: keyword + language */}
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Keyword / Temat *</label>
+            <input
+              type="text"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="np. hydraulik warszawa"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Źródło obrazka</label>
+            <select
+              value={imageSource}
+              onChange={(e) => setImageSource(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {IMAGE_SOURCES.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Anchor text</label>
-          <input
-            type="text"
-            value={anchor}
-            onChange={(e) => setAnchor(e.target.value)}
-            placeholder="(domyślnie = keyword)"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Domena klienta (link docelowy)</label>
-          <input
-            type="text"
-            value={clientDomain}
-            onChange={(e) => setClientDomain(e.target.value)}
-            placeholder="np. https://firma.pl"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Źródło obrazka</label>
-          <select
-            value={imageSource}
-            onChange={(e) => setImageSource(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            {IMAGE_SOURCES.map((s) => (
-              <option key={s.value} value={s.value}>{s.label}</option>
-            ))}
-          </select>
+
+        {/* Links section */}
+        <div className="border border-gray-200 rounded-lg p-4 space-y-3 bg-gray-50">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Linki w artykule (max 3)</p>
+
+          {/* Link 1 */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">URL 1 (domena klienta)</label>
+              <input
+                type="text"
+                value={clientDomain}
+                onChange={(e) => setClientDomain(e.target.value)}
+                placeholder="https://firma.pl"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Anchor 1</label>
+              <input
+                type="text"
+                value={anchor}
+                onChange={(e) => setAnchor(e.target.value)}
+                placeholder="(domyślnie = keyword)"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+          </div>
+
+          {/* Link 2 */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">URL 2 (opcjonalny)</label>
+              <input
+                type="text"
+                value={url2}
+                onChange={(e) => setUrl2(e.target.value)}
+                placeholder="https://drugi-link.pl"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Anchor 2</label>
+              <input
+                type="text"
+                value={anchor2}
+                onChange={(e) => setAnchor2(e.target.value)}
+                placeholder="tekst anchora"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+          </div>
+
+          {/* Link 3 */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">URL 3 (opcjonalny)</label>
+              <input
+                type="text"
+                value={url3}
+                onChange={(e) => setUrl3(e.target.value)}
+                placeholder="https://trzeci-link.pl"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Anchor 3</label>
+              <input
+                type="text"
+                value={anchor3}
+                onChange={(e) => setAnchor3(e.target.value)}
+                placeholder="tekst anchora"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+          </div>
         </div>
       </div>
 
