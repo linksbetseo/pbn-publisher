@@ -933,7 +933,7 @@ async def autopilot_stats():
 
 
 @router.get("/jobs")
-async def get_jobs(_: str = Depends(get_current_user)):
+async def get_jobs():
     """Return recent run_jobs — both running and completed (last 20)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
