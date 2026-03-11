@@ -15,6 +15,7 @@ from api import projects, clients, domains, publish, history, topical_map, conte
 
 APP_USER = os.getenv("APP_USER", "admin")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -258,6 +259,11 @@ async def basic_auth_middleware(request: Request, call_next):
     path = request.url.path
     if path in ("/health", "/") or path.startswith("/assets") or path.endswith(".svg") or path.endswith(".ico") or path.endswith(".png") or path.endswith(".webmanifest"):
         return await call_next(request)
+    # Allow cron endpoints with X-Cron-Secret header
+    if path in ("/api/autopilot/run-daily", "/api/autopilot/run-bulk"):
+        cron_token = request.headers.get("X-Cron-Secret", "")
+        if CRON_SECRET and cron_token and secrets.compare_digest(cron_token, CRON_SECRET):
+            return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
         import base64
