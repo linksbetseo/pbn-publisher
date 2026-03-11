@@ -755,7 +755,6 @@ export default function Autopilot() {
               <label className="block text-xs font-medium text-gray-600 mb-1">Źródło zdjęć</label>
               <select value={newForm.image_source} onChange={e => set('image_source', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <option value="freepik_stock">📷 Freepik Stock (~$0.01/zdjęcie)</option>
-                <option value="gemini">🤖 Gemini AI (generowane)</option>
                 <option value="dalle">🎨 DALL-E 3 (~$0.04/zdjęcie)</option>
                 <option value="none">🚫 Bez zdjęcia</option>
               </select>
@@ -835,7 +834,6 @@ export default function Autopilot() {
                     title="Źródło zdjęć"
                   >
                     <option value="freepik_stock">📷 Freepik</option>
-                    <option value="gemini">🤖 Gemini</option>
                     <option value="dalle">🎨 DALL-E</option>
                     <option value="none">🚫 Brak</option>
                   </select>
