@@ -4,10 +4,9 @@ Uses gemini-2.0-flash-exp (cheapest option with native image output).
 Returns base64 JPEG string.
 """
 import logging
+import os
 
 import httpx
-
-from config import GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
 GEMINI_IMAGE_URL = (
@@ -21,7 +20,8 @@ async def generate_image_gemini(prompt: str) -> str:
     Generate an image with Gemini 2.0 Flash.
     Returns base64-encoded JPEG string, or raises on failure.
     """
-    if not GEMINI_API_KEY:
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
 
     payload = {
@@ -32,7 +32,7 @@ async def generate_image_gemini(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             GEMINI_IMAGE_URL,
-            params={"key": GEMINI_API_KEY},
+            params={"key": api_key},
             json=payload,
         )
         if resp.status_code != 200:
