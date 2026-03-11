@@ -9,6 +9,7 @@ import TopicalMap from './pages/TopicalMap'
 import ContentWriter from './pages/ContentWriter'
 import Autopilot from './pages/Autopilot'
 import DomainHealth from './pages/DomainHealth'
+import BulkPublish from './pages/BulkPublish'
 import { hasAuthToken, setAuthCredentials, clearAuthCredentials, checkCredentials } from './api/client'
 import api from './api/client'
 
@@ -122,6 +123,7 @@ export default function App() {
             <Route path="/content-writer" element={<ContentWriter />} />
             <Route path="/autopilot" element={<Autopilot />} />
             <Route path="/domain-health" element={<DomainHealth />} />
+            <Route path="/bulk-publish" element={<BulkPublish />} />
           </Routes>
         </main>
       </div>

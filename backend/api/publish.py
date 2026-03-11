@@ -89,6 +89,8 @@ class PublishRequest(BaseModel):
     custom_prompt: str = ""
     language: str = "pl"
     unique_per_domain: bool = True
+    batch_tag: str = ""
+    image_source: str = "none"  # none | gemini | freepik_stock | dalle
 
 
 @router.post("/generate")
@@ -145,10 +147,48 @@ async def regenerate_image(body: RegenerateImageRequest):
     return {"image_b64": image_b64}
 
 
+async def _fetch_image(topic: str, image_source: str) -> Optional[str]:
+    """Fetch image based on image_source setting."""
+    if image_source == "none":
+        return None
+    img_prompt = (
+        f"High-quality professional photo for an article about '{topic}'. "
+        f"Realistic scene, natural lighting, no text overlays, no watermarks, "
+        f"16:9 aspect, clean modern aesthetic."
+    )
+    if image_source == "gemini":
+        try:
+            return await generate_image_gemini(img_prompt)
+        except Exception as e:
+            logger.warning(f"Gemini image failed: {e}")
+            return None
+    elif image_source == "dalle":
+        try:
+            return await generate_image(f"Professional photo for blog post about: {topic}. Clean, no text.")
+        except Exception as e:
+            logger.warning(f"DALL-E image failed: {e}")
+            return None
+    elif image_source in ("freepik_stock", "freepik_zimage", "freepik_flux"):
+        try:
+            return await generate_image_freepik(topic)
+        except Exception as e:
+            logger.warning(f"Freepik image failed: {e}")
+            return None
+    return None
+
+
 @router.post("/post")
 async def publish_posts(body: PublishRequest):
     if not body.my_domain_ids:
         return {"results": [], "published": 0, "failed": 0}
+
+    # Ensure batch_tag column exists in posts
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN batch_tag TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -196,13 +236,18 @@ async def publish_posts(body: PublishRequest):
                 content = body.content
                 excerpt = ""
 
+            # Determine image to use
+            image_b64 = body.image_b64
+            if not image_b64 and body.image_source and body.image_source != "none":
+                image_b64 = await _fetch_image(title or body.topic, body.image_source)
+
             result = await publish_post(
                 domain=d["domain"],
                 wp_login=d["wp_login"],
                 wp_pass=d["wp_pass"],
                 title=title,
                 content=content,
-                image_b64=body.image_b64,
+                image_b64=image_b64,
                 excerpt=excerpt,
                 keyword=body.topic or None,
                 http_user=d.get("http_user", "") or "",
@@ -218,8 +263,8 @@ async def publish_posts(body: PublishRequest):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                       wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
-                    (body.client_id, body.client_domain, d["id"], title, content, wp_url, status),
+                       wp_post_url, status, batch_tag) VALUES (?,?,?,?,?,?,?,?)""",
+                    (body.client_id, body.client_domain, d["id"], title, content, wp_url, status, body.batch_tag),
                 )
                 await db.commit()
 
@@ -234,8 +279,8 @@ async def publish_posts(body: PublishRequest):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                       status) VALUES (?,?,?,?,?,?)""",
-                    (body.client_id, body.client_domain, d["id"], body.title, body.content, "failed"),
+                       status, batch_tag) VALUES (?,?,?,?,?,?,?)""",
+                    (body.client_id, body.client_domain, d["id"], body.title, body.content, "failed", body.batch_tag),
                 )
                 await db.commit()
             results.append({"domain": d["domain"], "url": "", "status": "failed", "error": str(e)})

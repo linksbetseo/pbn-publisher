@@ -72,6 +72,12 @@ export const domains = {
   used: (client_id) => api.get('/api/domains/used', { params: { client_id } }),
 }
 
+export const bulkPublish = {
+  importDomains: (data) => api.post('/api/domains/batch-import', data),
+  listBatches: () => api.get('/api/domains/batches'),
+  listByBatch: (batch_tag) => api.get('/api/domains', { params: { batch_tag } }),
+}
+
 export const publish = {
   generate: (data) => api.post('/api/publish/generate', data),
 }

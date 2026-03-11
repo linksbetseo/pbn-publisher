@@ -8,9 +8,14 @@ router = APIRouter(prefix="/api/domains", tags=["domains"])
 
 
 async def _ensure_http_auth_columns():
-    """Migration: add http_user / http_pass columns if missing."""
+    """Migration: add http_user / http_pass / project_id / batch_tag columns if missing."""
     async with aiosqlite.connect(DB_PATH) as db:
-        for col in [("http_user", "TEXT DEFAULT ''"), ("http_pass", "TEXT DEFAULT ''")]:
+        for col in [
+            ("http_user", "TEXT DEFAULT ''"),
+            ("http_pass", "TEXT DEFAULT ''"),
+            ("project_id", "INTEGER DEFAULT NULL"),
+            ("batch_tag", "TEXT DEFAULT ''"),
+        ]:
             try:
                 await db.execute(f"ALTER TABLE my_domains ADD COLUMN {col[0]} {col[1]}")
             except Exception:
@@ -36,9 +41,78 @@ class DomainImportItem(BaseModel):
     http_pass: Optional[str] = None
 
 
+class BatchImportRequest(BaseModel):
+    lines: str
+    batch_tag: str
+    project_id: Optional[int] = None
+    server: str = ""
+
+
 @router.on_event("startup")
 async def startup():
     await _ensure_http_auth_columns()
+
+
+@router.get("/batches")
+async def list_batches():
+    """List distinct batch_tags with domain count and earliest created_at."""
+    await _ensure_http_auth_columns()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT d.batch_tag, COUNT(*) as count, d.project_id,
+                   p.name as project_name
+            FROM my_domains d
+            LEFT JOIN projects p ON p.id = d.project_id
+            WHERE d.batch_tag != '' AND d.batch_tag IS NOT NULL
+            GROUP BY d.batch_tag, d.project_id
+            ORDER BY d.batch_tag DESC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/batch-import")
+async def batch_import(body: BatchImportRequest):
+    """Parse domain;login;password lines and insert, skipping duplicates."""
+    await _ensure_http_auth_columns()
+    inserted = 0
+    skipped = 0
+    errors = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        for raw in body.lines.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            parts = line.split(";")
+            if len(parts) < 3:
+                errors.append(f"Pominięto (zły format): {line}")
+                continue
+            domain = parts[0].strip()
+            wp_login = parts[1].strip()
+            wp_pass = parts[2].strip()
+            server = parts[3].strip() if len(parts) >= 4 else body.server
+            if not domain:
+                errors.append(f"Pominięto (brak domeny): {line}")
+                continue
+            async with db.execute(
+                "SELECT id FROM my_domains WHERE domain = ?", (domain,)
+            ) as cursor:
+                existing = await cursor.fetchone()
+            if existing:
+                skipped += 1
+                continue
+            await db.execute(
+                """INSERT INTO my_domains
+                   (domain, wp_login, wp_pass, server, active, http_user, http_pass, batch_tag, project_id)
+                   VALUES (?,?,?,?,1,'','',?,?)""",
+                (domain, wp_login, wp_pass, server, body.batch_tag, body.project_id),
+            )
+            inserted += 1
+        await db.commit()
+    return {"inserted": inserted, "skipped": skipped, "errors": errors}
 
 
 @router.post("/bulk-import")
@@ -81,6 +155,7 @@ async def list_domains(
     server: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     active: Optional[int] = Query(None),
+    batch_tag: Optional[str] = Query(None),
 ):
     conditions = []
     params = []
@@ -94,6 +169,9 @@ async def list_domains(
     if active is not None:
         conditions.append("active = ?")
         params.append(active)
+    if batch_tag is not None:
+        conditions.append("batch_tag = ?")
+        params.append(batch_tag)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"SELECT * FROM my_domains {where} ORDER BY server, domain"
