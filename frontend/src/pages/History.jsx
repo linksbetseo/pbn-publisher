@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { history as historyApi, clients as clientsApi } from '../api/client'
+import api from '../api/client'
 
 const STATUS_COLORS = {
   published: 'bg-green-100 text-green-700',
@@ -41,10 +42,24 @@ export default function History() {
 
   useEffect(() => { load(0) }, [clientFilter, statusFilter])
 
+  const [retrying, setRetrying] = useState(null)
+
   const deletePost = async (id) => {
     if (!confirm('Usunąć ten wpis z historii?')) return
     await historyApi.delete(id)
     await load(offset)
+  }
+
+  const retryPost = async (id) => {
+    setRetrying(id)
+    try {
+      await api.post(`/api/history/${id}/retry-status`)
+      await load(offset)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setRetrying(null)
+    }
   }
 
   const copyAllUrls = () => {
@@ -219,7 +234,17 @@ export default function History() {
                         <span className="text-gray-300 text-xs">—</span>
                       )}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 flex items-center gap-2">
+                      {p.status === 'failed' && (
+                        <button
+                          onClick={() => retryPost(p.id)}
+                          disabled={retrying === p.id}
+                          className="text-blue-500 hover:text-blue-700 text-xs disabled:opacity-40"
+                          title="Ponów"
+                        >
+                          {retrying === p.id ? '...' : '↻'}
+                        </button>
+                      )}
                       <button
                         onClick={() => deletePost(p.id)}
                         className="text-red-400 hover:text-red-600 text-xs"

@@ -152,7 +152,7 @@ async def basic_auth_middleware(request: Request, call_next):
         return await call_next(request)
     # Skip auth for health check and static assets
     path = request.url.path
-    if path in ("/health", "/") or path.startswith("/assets"):
+    if path in ("/health", "/") or path.startswith("/assets") or path.endswith(".svg") or path.endswith(".ico") or path.endswith(".png") or path.endswith(".webmanifest"):
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
@@ -160,11 +160,10 @@ async def basic_auth_middleware(request: Request, call_next):
         try:
             decoded = base64.b64decode(auth[6:]).decode("utf-8")
             user, pwd = decoded.split(":", 1)
-        except Exception:
-            pass
-        else:
             if secrets.compare_digest(user, APP_USER) and secrets.compare_digest(pwd, APP_PASSWORD):
                 return await call_next(request)
+        except Exception:
+            pass
     # Return 401 WITHOUT WWW-Authenticate to avoid browser popup
     # Frontend handles redirect to login page
     return Response(

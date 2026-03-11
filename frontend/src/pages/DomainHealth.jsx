@@ -228,11 +228,24 @@ function LiveTab() {
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [liveChecking, setLiveChecking] = useState({})
   const [search, setSearch] = useState('')
   const [sortKey, setSortKey] = useState('traffic')
   const [sortDir, setSortDir] = useState('desc')
   const [filter, setFilter] = useState('all')
   const [authModal, setAuthModal] = useState(null)
+
+  const liveCheck = useCallback(async (domainId) => {
+    setLiveChecking(prev => ({ ...prev, [domainId]: true }))
+    try {
+      const res = await api.get(`/api/health/${domainId}`)
+      setDomains(prev => prev.map(d => d.id === domainId ? { ...res.data, from_snapshot: false } : d))
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLiveChecking(prev => ({ ...prev, [domainId]: false }))
+    }
+  }, [])
 
   const load = useCallback(async (off = 0, append = false) => {
     setLoading(true)
@@ -348,6 +361,7 @@ function LiveTab() {
                 <th className={thCls}>WP</th>
                 <th className={thCls} onClick={() => handleSort('health_score')}>Zdrowie <SortIcon k="health_score" /></th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Auth</th>
+                <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
@@ -379,10 +393,20 @@ function LiveTab() {
                       🔑
                     </button>
                   </td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => liveCheck(d.id)}
+                      disabled={liveChecking[d.id]}
+                      title="Odśwież live"
+                      className="text-gray-400 hover:text-green-600 text-xs px-2 py-0.5 rounded hover:bg-green-50 transition-colors disabled:opacity-40"
+                    >
+                      {liveChecking[d.id] ? '⟳' : d.from_snapshot ? '↻' : '✓'}
+                    </button>
+                  </td>
                 </tr>
               ))}
               {filtered.length === 0 && !loading && (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-gray-400">Brak domen</td></tr>
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-gray-400">Brak domen</td></tr>
               )}
             </tbody>
           </table>

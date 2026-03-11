@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS domain_keywords (
     status TEXT DEFAULT 'pending',
     wp_post_url TEXT DEFAULT '',
     wp_category_id INTEGER DEFAULT NULL,
+    title TEXT DEFAULT '',
     published_at TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

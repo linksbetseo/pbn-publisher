@@ -1,4 +1,6 @@
+import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
+import api from '../api/client'
 
 const navGroups = [
   {
@@ -99,6 +101,19 @@ const navGroups = [
 ]
 
 export default function Sidebar() {
+  const [expiringCount, setExpiringCount] = useState(0)
+
+  useEffect(() => {
+    api.get('/api/health', { params: { limit: 500, offset: 0 } })
+      .then(res => {
+        const count = (res.data.domains || []).filter(d =>
+          d.days_to_expiry !== null && d.days_to_expiry !== undefined && d.days_to_expiry < 30
+        ).length
+        setExpiringCount(count)
+      })
+      .catch(() => {})
+  }, [])
+
   return (
     <div className="w-64 h-full flex flex-col" style={{ backgroundColor: '#1e293b' }}>
       <div className="p-6 border-b border-slate-700">
@@ -123,7 +138,12 @@ export default function Sidebar() {
                   }
                 >
                   {item.icon}
-                  {item.label}
+                  <span className="flex-1">{item.label}</span>
+                  {item.to === '/domain-health' && expiringCount > 0 && (
+                    <span className="bg-orange-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                      {expiringCount > 9 ? '9+' : expiringCount}
+                    </span>
+                  )}
                 </NavLink>
               ))}
             </div>
