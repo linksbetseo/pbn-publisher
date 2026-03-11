@@ -1353,3 +1353,29 @@ async def export_keywords_csv(schedule_id: int):
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
+
+@router.get("/test-images")
+async def test_images():
+    """Test all image providers. Returns status and image size for each."""
+    import time
+    keyword = "SEO optimization"
+    title = "SEO Optimization Guide 2025"
+    prompt = f"High-quality professional photo for blog article: '{title}'. Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks."
+    results = {}
+
+    for source in ["freepik_stock", "gemini", "dalle"]:
+        t0 = time.time()
+        try:
+            img, provider = await _fetch_image(source, keyword, title, prompt)
+            elapsed = round(time.time() - t0, 2)
+            results[source] = {
+                "ok": img is not None,
+                "provider_used": provider,
+                "size_kb": round(len(img) / 1024) if img else 0,
+                "elapsed_s": elapsed,
+            }
+        except Exception as e:
+            results[source] = {"ok": False, "error": str(e)[:200], "elapsed_s": round(time.time() - t0, 2)}
+
+    return results
