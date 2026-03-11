@@ -638,11 +638,15 @@ async def generate_article(
             url = "https://" + url
         return url
 
-    # Rotate anchor text for natural link profile
-    # Guard: skip if no client_domain (avoid https:// broken link)
+    # Anchor text for link 1: use exact anchor_text if explicitly provided by user.
+    # Rotation only happens when anchor equals the raw topic (autopilot default) — not when user typed it.
     anchors_info = ""
     if client_domain and client_domain.strip():
-        rotated_anchor = _rotate_anchor(anchor_text, client_domain, language)
+        # Only rotate if anchor_text looks like an auto-generated default (same as topic or empty)
+        if not anchor_text or anchor_text.strip().lower() == topic.strip().lower():
+            rotated_anchor = _rotate_anchor(anchor_text or topic, client_domain, language)
+        else:
+            rotated_anchor = anchor_text  # user provided explicit anchor — use as-is
         anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
     if anchor_text2 and anchor_url2:
         anchors_info += f', <a href="{clean_url(anchor_url2)}">{anchor_text2}</a>'
@@ -817,7 +821,9 @@ async def generate_article(
             "- Używaj <p>, <ul>/<li> lub <ol>/<li> tam gdzie pasuje\n"
             "- Dodaj <strong> dla najważniejszych terminów i faktów\n"
             "- Pisz konkretnie — dane, liczby, przykłady, porady praktyczne\n"
-            "- Bez powtarzania wstępu ani zakończenia artykułu"
+            "- Bez powtarzania wstępu ani zakończenia artykułu\n"
+            "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # na początku linii. "
+            "NIE używaj **tekst** ani *tekst*. TYLKO czysty HTML — tagi <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>."
         )
     else:
         section_system = (
@@ -827,7 +833,9 @@ async def generate_article(
             "- Use <p>, <ul>/<li> or <ol>/<li> where appropriate\n"
             "- Add <strong> for key terms and important facts\n"
             "- Be specific — data, numbers, examples, practical tips\n"
-            "- Don't repeat intro or conclusion"
+            "- Don't repeat intro or conclusion\n"
+            "STRICT: NO markdown. Never use ## or ### or # at line start. "
+            "Never use **text** or *text*. ONLY pure HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>."
         )
 
     # Semaphore: max 4 concurrent GPT calls for sections (avoid rate limit)

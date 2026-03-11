@@ -9,6 +9,7 @@ from config import DB_PATH
 from services.openai_service import generate_article, generate_image, describe_image_and_generate
 from services.gemini_image_service import generate_image_gemini
 from services.freepik_service import generate_image_freepik
+from services.freepik_generate_service import generate_image_zimage, generate_image_flux
 from services.wordpress_service import publish_post
 
 logger = logging.getLogger(__name__)
@@ -147,32 +148,58 @@ async def regenerate_image(body: RegenerateImageRequest):
     return {"image_b64": image_b64}
 
 
-async def _fetch_image(topic: str, image_source: str) -> Optional[str]:
+def _build_image_prompt(topic: str, title: str = "") -> str:
+    """Build a descriptive image prompt tied to the article topic."""
+    subject = title if title and title.strip() else topic
+    return (
+        f"High-quality professional photograph directly related to: {subject}. "
+        f"The image must clearly illustrate the topic '{topic}'. "
+        f"Realistic scene, natural lighting, sharp focus, no text overlays, no watermarks, "
+        f"no logos, 16:9 landscape format, clean modern aesthetic. "
+        f"Do NOT show random objects unrelated to the topic."
+    )
+
+
+async def _fetch_image(topic: str, image_source: str, title: str = "") -> Optional[str]:
     """Fetch image based on image_source setting."""
     if image_source == "none":
         return None
-    img_prompt = (
-        f"High-quality professional photo for an article about '{topic}'. "
-        f"Realistic scene, natural lighting, no text overlays, no watermarks, "
-        f"16:9 aspect, clean modern aesthetic."
-    )
-    if image_source == "gemini":
+    img_prompt = _build_image_prompt(topic, title)
+    if image_source == "freepik_zimage":
+        try:
+            return await generate_image_zimage(img_prompt)
+        except Exception as e:
+            logger.warning(f"Freepik Z-Image failed: {e}")
+            try:
+                return await generate_image_freepik(topic)
+            except Exception:
+                return None
+    elif image_source == "freepik_flux":
+        try:
+            return await generate_image_flux(img_prompt)
+        except Exception as e:
+            logger.warning(f"Freepik Flux failed: {e}")
+            try:
+                return await generate_image_freepik(topic)
+            except Exception:
+                return None
+    elif image_source == "freepik_stock":
+        try:
+            return await generate_image_freepik(topic)
+        except Exception as e:
+            logger.warning(f"Freepik stock failed: {e}")
+            return None
+    elif image_source == "dalle":
+        try:
+            return await generate_image(f"Professional illustration for article about: {topic}. Clean, no text, no watermarks.")
+        except Exception as e:
+            logger.warning(f"DALL-E image failed: {e}")
+            return None
+    elif image_source == "gemini":
         try:
             return await generate_image_gemini(img_prompt)
         except Exception as e:
             logger.warning(f"Gemini image failed: {e}")
-            return None
-    elif image_source == "dalle":
-        try:
-            return await generate_image(f"Professional photo for blog post about: {topic}. Clean, no text.")
-        except Exception as e:
-            logger.warning(f"DALL-E image failed: {e}")
-            return None
-    elif image_source in ("freepik_stock", "freepik_zimage", "freepik_flux"):
-        try:
-            return await generate_image_freepik(topic)
-        except Exception as e:
-            logger.warning(f"Freepik image failed: {e}")
             return None
     return None
 
@@ -239,7 +266,7 @@ async def publish_posts(body: PublishRequest):
             # Determine image to use
             image_b64 = body.image_b64
             if not image_b64 and body.image_source and body.image_source != "none":
-                image_b64 = await _fetch_image(title or body.topic, body.image_source)
+                image_b64 = await _fetch_image(body.topic, body.image_source, title)
 
             result = await publish_post(
                 domain=d["domain"],
