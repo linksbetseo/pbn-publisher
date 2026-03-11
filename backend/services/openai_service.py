@@ -481,77 +481,100 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
 
 def _inject_internal_links(html: str, published_posts: list[dict], topic: str) -> str:
     """
-    Inject 2-3 internal links to already-published posts on the same domain.
-    Uses keyword/topic overlap (not just title words) for better matching.
-    Adds title attribute for accessibility and SEO.
+    Inject internal links to already-published posts on the same domain.
+    - 1 link per ~400 words (min 2, max 5)
+    - Best-matching paragraph per post (keyword overlap)
+    - Natural inline context, not just appended at end
     """
     if not published_posts:
         return html
 
     paragraphs = re.findall(r'<p>.*?</p>', html, re.DOTALL)
-    if len(paragraphs) < 4:
+    if len(paragraphs) < 3:
         return html
 
-    # Current article topic words for avoiding self-similar links
-    topic_words = set(re.findall(r'\w{4,}', topic.lower()))
+    # How many links to inject based on article length
+    word_count = len(re.sub(r'<[^>]+>', '', html).split())
+    max_links = max(2, min(5, word_count // 400))
+
+    topic_words = set(re.findall(r'\w{3,}', topic.lower()))
+
+    import random as _r
+
+    _INT_CONTEXTS_PL = [
+        lambda lnk: f" Więcej na ten temat znajdziesz w artykule: {lnk}.",
+        lambda lnk: f" Przeczytaj też: {lnk}.",
+        lambda lnk: f" Powiązany artykuł: {lnk}.",
+        lambda lnk: f" Szczegóły opisaliśmy w: {lnk}.",
+        lambda lnk: f" Warto zapoznać się z: {lnk}.",
+        lambda lnk: f" Dowiedz się więcej: {lnk}.",
+    ]
 
     injected = 0
     used_urls: set = set()
+    used_paras: set = set()
 
-    # Vary surrounding context for internal links
-    _INT_CONTEXTS = [
-        lambda lnk, title: f" Przeczytaj też: {lnk}.",
-        lambda lnk, title: f" Polecamy powiązany artykuł: {lnk}.",
-        lambda lnk, title: f" Więcej o tym w artykule: {lnk}.",
-        lambda lnk, title: f" Powiązane informacje: {lnk}.",
-    ]
-    import random as _r
+    # Sort posts by relevance to current topic first
+    def _relevance(post):
+        t = (post.get("title", "") + " " + post.get("keyword", "")).lower()
+        return len(topic_words & set(re.findall(r'\w{3,}', t)))
 
-    for post in published_posts[:8]:
-        if injected >= 3:
+    candidates = sorted(published_posts[:20], key=_relevance, reverse=True)
+
+    for post in candidates:
+        if injected >= max_links:
             break
         url = post.get("url") or post.get("wp_post_url", "")
         title = post.get("title", "") or post.get("keyword", "")
         if not url or not title or url in used_urls:
             continue
 
-        # Match on keyword/title words
-        title_words = set(re.findall(r'\w{4,}', title.lower()))
+        title_words = set(re.findall(r'\w{3,}', title.lower()))
         if not title_words:
             continue
 
+        # Find best matching paragraph (skip first 1 and last 1)
         best_para = None
         best_score = 0
-        for para in paragraphs[2:-2]:
-            para_text = re.sub(r'<[^>]+>', '', para).lower()
-            if 'href=' in para:
+        for para in paragraphs[1:-1]:
+            if para in used_paras:
                 continue
-            para_words = set(re.findall(r'\w{4,}', para_text))
-            # Score = overlap with title words, bonus for topic words in paragraph
+            # Skip paragraphs that already have 2+ links
+            if para.count('href=') >= 2:
+                continue
+            para_text = re.sub(r'<[^>]+>', '', para).lower()
+            para_words = set(re.findall(r'\w{3,}', para_text))
             overlap = len(title_words & para_words)
-            topic_bonus = 1 if len(topic_words & para_words) > 2 else 0
+            topic_bonus = 2 if len(topic_words & para_words) > 3 else 0
             score = overlap + topic_bonus
             if score > best_score:
                 best_score = score
                 best_para = para
 
-        if best_para and best_score >= 1:
-            # Use keyword if available, else truncated title — with title attribute
-            kw = post.get("keyword", "")
-            if kw and len(kw.split()) <= 6:
-                anchor_text = kw
-            else:
-                anchor_words = title.split()[:5]
-                anchor_text = " ".join(anchor_words)
-            link = f'<a href="{url}" title="{title}">{anchor_text}</a>'
-            ctx = _r.choice(_INT_CONTEXTS)
-            new_para = best_para[:-4] + ctx(link, title) + "</p>"
-            html = html.replace(best_para, new_para, 1)
-            used_urls.add(url)
-            injected += 1
+        # Lower threshold — even score=0 is ok as fallback if we have few paragraphs
+        min_score = 1 if len(paragraphs) > 6 else 0
+        if best_para is None or best_score < min_score:
+            # Fallback: pick any unused paragraph without links
+            for para in paragraphs[1:-1]:
+                if para not in used_paras and para.count('href=') == 0:
+                    best_para = para
+                    break
+
+        if not best_para:
+            continue
+
+        kw = post.get("keyword", "")
+        anchor_text = kw if (kw and len(kw.split()) <= 6) else " ".join(title.split()[:5])
+        link = f'<a href="{url}" title="{title}">{anchor_text}</a>'
+        ctx = _r.choice(_INT_CONTEXTS_PL)
+        new_para = best_para[:-4] + ctx(link) + "</p>"
+        html = html.replace(best_para, new_para, 1)
+        used_urls.add(url)
+        used_paras.add(best_para)
+        injected += 1
 
     if injected:
-        logger.info(f"[Article] Injected {injected} internal links")
+        logger.info(f"[Article] Injected {injected}/{max_links} internal links (word_count={word_count})")
     return html
 
 
