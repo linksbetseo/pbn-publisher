@@ -395,9 +395,10 @@ async def generate_topical_map(
     results_parallel = await _asyncio.gather(
         client.keyword_suggestions(seed, location_code, language_code, 500),
         client.keyword_ideas(seed, location_code, language_code, 300),
+        client.related_keywords(seed, location_code, language_code, 200),
         return_exceptions=True,
     )
-    for kws, name in zip(results_parallel, ["suggestions", "ideas"]):
+    for kws, name in zip(results_parallel, ["suggestions", "ideas", "related"]):
         if isinstance(kws, Exception):
             logger.warning(f"[TopicalMap] {name} failed: {kws}")
         else:
@@ -430,16 +431,25 @@ async def generate_topical_map(
         clusters = _cluster(keywords, seed, 15, min_coherence)
         logger.info(f"[TopicalMap] retry with max_clusters=15: {len(clusters)}")
 
+    # Pillar score: volume / (KD + 1) — favours rankable keywords over raw volume
+    def _pillar_score(k):
+        vol = k.get("search_volume", 0)
+        kd = k.get("keyword_difficulty", 50)
+        coherence = k.get("coherence", 0.5)
+        return (vol / (kd + 1)) * (0.5 + coherence)
+
     # Build pillar structure
     pillars = []
     for cluster in clusters:
-        kws_sorted = sorted(
-            cluster["keywords"],
-            key=lambda x: (x.get("search_volume", 0), x.get("coherence", 0)),
-            reverse=True
-        )
-        pillar_kw = kws_sorted[0] if kws_sorted else {"keyword": cluster["anchor"], "search_volume": 0}
-        supporting = kws_sorted[1:]
+        # Separate by intent: informational keywords preferred for pillar pages
+        informational = [k for k in cluster["keywords"] if k.get("intent", "informational") in ("informational", "")]
+
+        pillar_candidates = informational if informational else cluster["keywords"]
+        pillar_candidates_sorted = sorted(pillar_candidates, key=_pillar_score, reverse=True)
+        pillar_kw = pillar_candidates_sorted[0] if pillar_candidates_sorted else {"keyword": cluster["anchor"], "search_volume": 0}
+
+        # Supporting = everything except pillar, informational first
+        supporting = [k for k in cluster["keywords"] if k["keyword"] != pillar_kw["keyword"]]
 
         # Sort supporting by: search_volume DESC, coherence DESC (high SiteRadius ones go last)
         supporting_sorted = sorted(
@@ -448,6 +458,8 @@ async def generate_topical_map(
             reverse=True
         )
 
+        # Proportional limit: at least 10, at most 30, scaled to cluster size
+        sup_limit = min(30, max(10, len(supporting)))
         pillars.append({
             "anchor": cluster["anchor"],
             "label": cluster["label"],
@@ -456,14 +468,16 @@ async def generate_topical_map(
             "pillar_difficulty": pillar_kw.get("keyword_difficulty", 0),
             "pillar_coherence": round(pillar_kw.get("coherence", 0), 3),
             "focus_score": cluster["focus_score"],
+            "pillar_intent": pillar_kw.get("intent", "informational"),
             "supporting_keywords": [
                 {
                     "keyword": k["keyword"],
                     "search_volume": k.get("search_volume", 0),
                     "keyword_difficulty": k.get("keyword_difficulty", 0),
                     "coherence": round(k.get("coherence", 0), 3),
+                    "intent": k.get("intent", "informational"),
                 }
-                for k in supporting_sorted[:20]
+                for k in supporting_sorted[:sup_limit]
             ],
             "total_volume": cluster["total_volume"],
             "avg_difficulty": cluster["avg_difficulty"],

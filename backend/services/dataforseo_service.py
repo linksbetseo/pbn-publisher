@@ -101,6 +101,7 @@ class DataForSEOClient:
                             "search_volume": ki.get("search_volume", 0) or 0,
                             "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
                             "cpc": ki.get("cpc", 0) or 0,
+                            "intent": kp.get("search_intent", "informational") or "informational",
                         })
         return keywords
 
@@ -159,5 +160,36 @@ class DataForSEOClient:
                             "search_volume": ki.get("search_volume", 0) or 0,
                             "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
                             "cpc": ki.get("cpc", 0) or 0,
+                            "intent": kp.get("search_intent", "informational") or "informational",
+                        })
+        return keywords
+
+    async def related_keywords(self, seed: str, location_code: int = 2616, language_code: str = "pl", limit: int = 200) -> list[dict]:
+        """Get semantically related keywords from DataForSEO."""
+        data = await self.request(
+            "dataforseo_labs/google/related_keywords/live",
+            [{
+                "keyword": seed,
+                "location_code": location_code,
+                "language_code": language_code,
+                "limit": limit,
+                "depth": 2,
+            }]
+        )
+        keywords = []
+        for task in data.get("tasks", []):
+            for result in task.get("result", []):
+                for item in result.get("items", []):
+                    kw = item.get("keyword_data", {})
+                    keyword_text = kw.get("keyword", "")
+                    ki = kw.get("keyword_info", {})
+                    kp = kw.get("keyword_properties", {})
+                    if keyword_text:
+                        keywords.append({
+                            "keyword": keyword_text,
+                            "search_volume": ki.get("search_volume", 0) or 0,
+                            "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
+                            "cpc": ki.get("cpc", 0) or 0,
+                            "intent": kp.get("search_intent", "informational") or "informational",
                         })
         return keywords
