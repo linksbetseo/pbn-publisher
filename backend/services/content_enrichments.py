@@ -191,8 +191,10 @@ def _build_checklist(items: list[str], title: str) -> str:
     )
 
 
-def _build_update_box(lang_pl: bool) -> str:
-    days_ago = random.randint(0, 30)
+def _build_update_box(lang_pl: bool, topic: str = "") -> str:
+    # Deterministic per topic so same article always shows same update date
+    seed = hash(topic) % 10000 if topic else random.randint(0, 9999)
+    days_ago = abs(seed) % 31
     update_date = (datetime.now() - timedelta(days=days_ago)).strftime("%d.%m.%Y")
     if lang_pl:
         text = f"🔄 Artykuł zaktualizowany: <strong>{update_date}</strong> — treść zweryfikowana i uzupełniona o najnowsze informacje."
@@ -664,7 +666,7 @@ async def enrich_article(
 
     # ── Update Box — przed pierwszą sekcją H2 ─────────────────────────────────
     if "update_box" in chosen:
-        box = _build_update_box(lang_pl)
+        box = _build_update_box(lang_pl, topic=topic)
         h2_pos = content.find("<h2")
         if h2_pos != -1:
             content = content[:h2_pos] + box + content[h2_pos:]

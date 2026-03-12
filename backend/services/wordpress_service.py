@@ -240,11 +240,6 @@ async def publish_post(
                     if tags:
                         kw_with_lsi = ",".join([keyword] + list(tags[:4]))
                     meta["rank_math_focus_keyword"] = kw_with_lsi
-                # Canonical URL
-                if post_data.get("slug") and base_url:
-                    canonical = f"{base_url}/{post_data['slug']}/"
-                    meta["_yoast_wpseo_canonical"] = canonical
-                    meta["rank_math_canonical_url"] = canonical
                 if meta:
                     post_data["meta"] = meta
 
@@ -259,6 +254,21 @@ async def publish_post(
                     data = resp.json()
                     post_url = data.get("link", "")
                     post_id = data.get("id")
+                    # Set canonical after publish — use actual WP post URL (correct scheme)
+                    if post_url and post_id and meta is not None:
+                        canonical = post_url.rstrip("/") + "/"
+                        try:
+                            await client.post(
+                                f"{base_url}/wp-json/wp/v2/posts/{post_id}",
+                                json={"meta": {
+                                    "_yoast_wpseo_canonical": canonical,
+                                    "rank_math_canonical_url": canonical,
+                                }},
+                                headers=headers,
+                                timeout=10,
+                            )
+                        except Exception:
+                            pass
                     # Ping sitemaps asynchronously (non-blocking)
                     import asyncio as _asyncio
                     _asyncio.create_task(_ping_sitemaps(base_url, site_auth))
