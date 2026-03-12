@@ -230,14 +230,19 @@ async def regenerate_image(body: RegenerateImageRequest):
     return {"image_b64": image_b64}
 
 
-def _build_image_prompt(topic: str, title: str = "") -> str:
+def _build_image_prompt(topic: str, title: str = "", provider: str = "") -> str:
     """Build a descriptive image prompt tied to the article topic."""
     subject = title if title and title.strip() else topic
+    # Z-Image renders non-Latin text poorly — explicitly forbid any text/letters/words
+    no_text = (
+        "Absolutely NO text, NO letters, NO words, NO numbers, NO captions, NO labels anywhere in the image. "
+        "Pure visual only."
+    ) if provider in ("freepik_zimage", "freepik_flux") else "No text overlays, no watermarks, no logos."
     return (
         f"High-quality professional photograph directly related to: {subject}. "
         f"The image must clearly illustrate the topic '{topic}'. "
-        f"Realistic scene, natural lighting, sharp focus, no text overlays, no watermarks, "
-        f"no logos, 16:9 landscape format, clean modern aesthetic. "
+        f"Realistic scene, natural lighting, sharp focus, {no_text} "
+        f"16:9 landscape format, clean modern aesthetic. "
         f"Do NOT show random objects unrelated to the topic."
     )
 
@@ -246,7 +251,7 @@ async def _fetch_image(topic: str, image_source: str, title: str = "") -> Option
     """Fetch image based on image_source setting. Tries primary provider, then freepik_stock fallback."""
     if image_source == "none":
         return None
-    img_prompt = _build_image_prompt(topic, title)
+    img_prompt = _build_image_prompt(topic, title, provider=image_source)
 
     # Provider chains: primary → fallback(s)
     _chains = {
