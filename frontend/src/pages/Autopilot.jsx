@@ -457,6 +457,7 @@ export default function Autopilot() {
   const [catResults, setCatResults] = useState({})
   const [cannibModal, setCannibModal] = useState(null) // { scheduleId, data } | null
   const [cannibLoading, setCannibLoading] = useState({})
+  const [siteMetrics, setSiteMetrics] = useState({})
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -515,6 +516,7 @@ export default function Autopilot() {
     setGeneratingMap(g => ({ ...g, [id]: true }))
     try {
       const res = await api.post(`/api/autopilot/schedules/${id}/generate-map`)
+      if (res.data.site_metrics) setSiteMetrics(m => ({ ...m, [id]: res.data.site_metrics }))
       setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Mapa gotowa: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz` }] }))
       await load()
     } catch (e) {
@@ -592,6 +594,32 @@ export default function Autopilot() {
       const res = await api.post(`/api/autopilot/schedules/${id}/run`, { schedule_id: id, limit })
       const { job_id } = res.data
       if (!job_id) throw new Error('Brak job_id w odpowiedzi')
+      await _pollJob(id, job_id)
+      await load()
+      if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
+    } catch (e) {
+      const err = e.response?.data?.detail || e.message || 'Błąd połączenia'
+      setRunLog(l => ({ ...l, [id]: [{ status: 'failed', keyword: '—', error: err }] }))
+    } finally {
+      setRunning(r => ({ ...r, [id]: false }))
+    }
+  }
+
+  const runAll = async (sched) => {
+    const id = sched.id
+    const total = pending_count(id)
+    if (total === '?' || total === 0) { alert('Brak pending keywords do opublikowania.'); return }
+    if (!confirm(`Opublikować WSZYSTKIE ${total} pending keywords dla ${sched.domain}?\n\nTo może potrwać długo.`)) return
+    setRunning(r => ({ ...r, [id]: true }))
+    setRunLog(l => ({ ...l, [id]: [] }))
+    try {
+      const res = await api.post(`/api/autopilot/schedules/${id}/run-all`)
+      const { job_id, total_pending, message } = res.data
+      if (!job_id) {
+        setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: message || 'Brak pending keywords' }] }))
+        return
+      }
+      setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Uruchamiam ${total_pending} keywords...` }] }))
       await _pollJob(id, job_id)
       await load()
       if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
@@ -867,6 +895,17 @@ export default function Autopilot() {
                     <span>Język: {sched.language}</span>
                     {sched.client_domain && <span>→ {sched.client_domain}</span>}
                   </div>
+                  {siteMetrics[sched.id] && (
+                    <div className="flex gap-3 mt-1 flex-wrap text-xs">
+                      <span title="SiteFocus: koncentracja semantyczna klastrów (wyżej = lepiej)" className={`px-2 py-0.5 rounded-full font-medium ${siteMetrics[sched.id].focus_rating === 'excellent' ? 'bg-green-100 text-green-700' : siteMetrics[sched.id].focus_rating === 'good' ? 'bg-blue-100 text-blue-700' : siteMetrics[sched.id].focus_rating === 'fair' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-600'}`}>
+                        Focus: {siteMetrics[sched.id].site_focus} ({siteMetrics[sched.id].focus_rating})
+                      </span>
+                      <span title="SiteRadius: dryf semantyczny od rdzenia (niżej = lepiej)" className={`px-2 py-0.5 rounded-full font-medium ${siteMetrics[sched.id].radius_rating === 'tight' ? 'bg-green-100 text-green-700' : siteMetrics[sched.id].radius_rating === 'moderate' ? 'bg-blue-100 text-blue-700' : siteMetrics[sched.id].radius_rating === 'wide' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-600'}`}>
+                        Radius: {siteMetrics[sched.id].site_radius} ({siteMetrics[sched.id].radius_rating})
+                      </span>
+                      <span className="text-gray-400">{siteMetrics[sched.id].total_articles} artykułów</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Posts per day */}
@@ -920,6 +959,14 @@ export default function Autopilot() {
                         {running[sched.id] ? (
                           <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Publikuję...</>
                         ) : `▶ Uruchom (${sched.posts_per_day})`}
+                      </button>
+                      <button
+                        onClick={() => runAll(sched)}
+                        disabled={running[sched.id]}
+                        title={`Opublikuj wszystkie pending frazy (${pending_count(sched.id)})`}
+                        className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 flex items-center gap-1"
+                      >
+                        {running[sched.id] ? '...' : `▶▶ Wszystkie (${pending_count(sched.id)})`}
                       </button>
                       {keywords[sched.id]?.some(k => k.status === 'failed') && (
                         <button

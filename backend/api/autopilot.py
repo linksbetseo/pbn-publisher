@@ -444,6 +444,7 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
         "total_keywords": total,
         "pillars": len(tmap.get("pillars", [])),
         "cannibal_flagged": cannibal_flagged,
+        "site_metrics": tmap.get("site_metrics", {}),
     }
 
 
@@ -942,6 +943,30 @@ async def run_status(schedule_id: int, job_id: str):
         from fastapi import HTTPException
         raise HTTPException(404, "Job nie istnieje")
     return job
+
+
+@router.post("/schedules/{schedule_id}/run-all")
+async def run_all_keywords(schedule_id: int, background_tasks: BackgroundTasks):
+    """
+    Opublikuj WSZYSTKIE pending keywords dla harmonogramu (ignoruje posts_per_day).
+    Zwraca job_id — odpytuj /run-status/{job_id} co 3s.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='pending'",
+            (schedule_id,)
+        ) as cur:
+            pending_count = (await cur.fetchone())[0]
+
+    if pending_count == 0:
+        return {"job_id": None, "total_pending": 0, "message": "Brak pending keywords"}
+
+    job_id = str(_uuid.uuid4())
+    body = RunNowRequest(schedule_id=schedule_id, limit=pending_count)
+    await _job_create(job_id, schedule_id)
+    background_tasks.add_task(_run_job, job_id, schedule_id, body)
+    return {"job_id": job_id, "total_pending": pending_count, "status": "running"}
 
 
 @router.post("/schedules/{schedule_id}/retry-failed")
