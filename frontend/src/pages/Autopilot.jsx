@@ -464,6 +464,7 @@ export default function Autopilot() {
     posts_per_day: 1,
     language: 'pl',
     min_volume: 10,
+    min_coherence: 0,
     client_domain: '',
     anchor_text: '',
     image_source: 'freepik_stock',
@@ -501,9 +502,10 @@ export default function Autopilot() {
         my_domain_id: Number(newForm.my_domain_id),
         posts_per_day: Number(newForm.posts_per_day),
         min_volume: Number(newForm.min_volume),
+        min_coherence: Number(newForm.min_coherence),
       })
       setShowAdd(false)
-      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, client_domain: '', anchor_text: '', image_source: 'freepik_stock', custom_prompt: '' })
+      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, min_coherence: 0, client_domain: '', anchor_text: '', image_source: 'freepik_stock', custom_prompt: '' })
       await load()
     } catch (e) {
       setAddError(e.response?.data?.detail || e.message)
@@ -721,6 +723,11 @@ export default function Autopilot() {
     await api.patch(`/api/autopilot/schedules/${id}`, { custom_prompt: val })
   }
 
+  const updateMinCoherence = async (id, val) => {
+    await api.patch(`/api/autopilot/schedules/${id}`, { min_coherence: Number(val) })
+    await load()
+  }
+
   const set = (f, v) => setNewForm(n => ({ ...n, [f]: v }))
   const fmt = (s) => s ? new Date(s).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
 
@@ -819,6 +826,18 @@ export default function Autopilot() {
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Min. wolumen frazy</label>
               <input type="number" value={newForm.min_volume} onChange={e => set('min_volume', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1" title="SiteRadius filter: odrzuca frazy zbyt odległe od seed. 0=brak filtracji, 0.1=łagodny, 0.3=umiarkowany, 0.5=surowy">
+                Min. spójność (SiteRadius) <span className="text-gray-400 font-normal">0–0.5</span>
+              </label>
+              <select value={newForm.min_coherence} onChange={e => set('min_coherence', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="0">0 — brak filtracji (max frazy)</option>
+                <option value="0.1">0.1 — łagodny (~-10% fraz)</option>
+                <option value="0.2">0.2 — lekki (~-20% fraz)</option>
+                <option value="0.3">0.3 — umiarkowany (~-30% fraz)</option>
+                <option value="0.5">0.5 — surowy (~-50% fraz)</option>
+              </select>
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Domena klienta (link w artykule)</label>
@@ -920,6 +939,22 @@ export default function Autopilot() {
                     onBlur={e => updatePpd(sched.id, e.target.value)}
                     className="w-14 border border-gray-300 rounded px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
+                </div>
+
+                {/* Min coherence */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <select
+                    defaultValue={sched.min_coherence ?? 0}
+                    onChange={e => updateMinCoherence(sched.id, e.target.value)}
+                    className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    title="SiteRadius filter: min. spójność frazy z seed keyword (0=brak, 0.5=surowy)"
+                  >
+                    <option value="0">Spójność: 0</option>
+                    <option value="0.1">Spójność: 0.1</option>
+                    <option value="0.2">Spójność: 0.2</option>
+                    <option value="0.3">Spójność: 0.3</option>
+                    <option value="0.5">Spójność: 0.5</option>
+                  </select>
                 </div>
 
                 {/* Image source */}

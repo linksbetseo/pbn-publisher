@@ -63,9 +63,10 @@ class ScheduleCreate(BaseModel):
     posts_per_day: int = 1
     language: str = "pl"
     min_volume: int = 10
+    min_coherence: float = 0.0  # SiteRadius filter: 0=off, 0.1=light, 0.3=moderate, 0.5=strict
     client_domain: str = ""
     anchor_text: str = ""
-    image_source: str = "freepik_stock"  # freepik_stock | gemini | dalle | none
+    image_source: str = "freepik_stock"
     custom_prompt: str = ""
 
 
@@ -77,6 +78,7 @@ class ScheduleUpdate(BaseModel):
     image_source: Optional[str] = None
     custom_prompt: Optional[str] = None
     min_volume: Optional[int] = None
+    min_coherence: Optional[float] = None
     language: Optional[str] = None
 
 
@@ -180,6 +182,7 @@ async def ensure_tables():
         for col, typedef in [
             ("image_source", "TEXT DEFAULT 'freepik_stock'"),
             ("custom_prompt", "TEXT DEFAULT ''"),
+            ("min_coherence", "REAL DEFAULT 0.0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE domain_schedules ADD COLUMN {col} {typedef}")
@@ -243,10 +246,10 @@ async def create_schedule(body: ScheduleCreate):
 
         cursor = await db.execute(
             """INSERT INTO domain_schedules
-               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, client_domain, anchor_text, image_source, custom_prompt)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, min_coherence, client_domain, anchor_text, image_source, custom_prompt)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (body.my_domain_id, body.seed_keyword, body.posts_per_day,
-             body.language, body.min_volume, body.client_domain, body.anchor_text,
+             body.language, body.min_volume, body.min_coherence, body.client_domain, body.anchor_text,
              body.image_source, body.custom_prompt)
         )
         schedule_id = cursor.lastrowid
@@ -273,6 +276,8 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate):
             await db.execute("UPDATE domain_schedules SET custom_prompt=? WHERE id=?", (body.custom_prompt, schedule_id))
         if body.min_volume is not None:
             await db.execute("UPDATE domain_schedules SET min_volume=? WHERE id=?", (body.min_volume, schedule_id))
+        if body.min_coherence is not None:
+            await db.execute("UPDATE domain_schedules SET min_coherence=? WHERE id=?", (body.min_coherence, schedule_id))
         if body.language is not None:
             await db.execute("UPDATE domain_schedules SET language=? WHERE id=?", (body.language, schedule_id))
         await db.commit()
@@ -349,6 +354,7 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
         dfs_login=DFS_LOGIN,
         dfs_password=DFS_PASSWORD,
         force_refresh=force_refresh,
+        min_coherence=float(sched.get("min_coherence") or 0.0),
     )
 
     # ── Cannibalization guard ────────────────────────────────────────────────
