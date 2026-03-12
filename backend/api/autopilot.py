@@ -15,7 +15,7 @@ import logging
 import os
 import random
 import uuid as _uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 import aiosqlite
@@ -24,10 +24,17 @@ from pydantic import BaseModel
 
 from config import DB_PATH
 from services.topical_map_service import generate_topical_map
-from services.openai_service import generate_article, generate_image
-from services.freepik_service import generate_image_freepik
-from services.freepik_generate_service import generate_image_zimage, generate_image_flux
+from services.openai_service import generate_article
 from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
+from api.autopilot_helpers import (
+    VARIATION_HINTS,
+    job_create as _job_create,
+    job_update as _job_update,
+    job_get as _job_get,
+    with_retry as _with_retry,
+    get_pillar_url as _get_pillar_url,
+    fetch_image as _fetch_image,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
@@ -37,23 +44,6 @@ _DAILY_SEM = asyncio.Semaphore(3)
 
 DFS_LOGIN = os.getenv("DATAFORSEO_LOGIN", "")
 DFS_PASSWORD = os.getenv("DATAFORSEO_PASSWORD", "")
-
-VARIATION_HINTS = [
-    "praktyczny poradnik krok po kroku",
-    "porównanie dostępnych opcji i rozwiązań",
-    "najczęstsze błędy i jak ich unikać",
-    "perspektywa eksperta branżowego",
-    "korzyści i zastosowania w praktyce",
-    "case study i przykłady z życia",
-    "trendy i nowości w branży",
-    "przewodnik dla początkujących",
-    "zaawansowane techniki i strategie",
-    "najważniejsze fakty i mity",
-    "jak wybrać najlepsze rozwiązanie",
-    "oszczędność czasu i pieniędzy",
-    "bezpieczeństwo i na co uważać",
-]
-
 
 # ── Models ──────────────────────────────────────────────────────────────────
 
@@ -638,111 +628,6 @@ async def sync_categories(schedule_id: int):
     return {"synced": synced, "total": len(results), "categories": results}
 
 
-async def _job_create(job_id: str, schedule_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO run_jobs (job_id, schedule_id, status, published, failed, total, results_json, done) VALUES (?,?,?,?,?,?,?,?)",
-            (job_id, schedule_id, 'running', 0, 0, 0, '[]', 0)
-        )
-        await db.commit()
-
-
-async def _job_update(job_id: str, **kwargs):
-    if 'results' in kwargs:
-        kwargs['results_json'] = _json.dumps(kwargs.pop('results'), ensure_ascii=False)
-    sets = ", ".join(f"{k}=?" for k in kwargs)
-    vals = list(kwargs.values()) + [job_id]
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(f"UPDATE run_jobs SET {sets} WHERE job_id=?", vals)
-        await db.commit()
-
-
-async def _job_get(job_id: str) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM run_jobs WHERE job_id=?", (job_id,)) as cur:
-            row = await cur.fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    d['results'] = _json.loads(d.pop('results_json', '[]'))
-    d['done'] = bool(d['done'])
-    return d
-
-
-async def _with_retry(coro_fn, max_attempts: int = 3, base_delay: float = 2.0):
-    """Retry async coroutine with exponential backoff. coro_fn is a zero-arg async callable."""
-    last_exc = None
-    for attempt in range(max_attempts):
-        try:
-            return await coro_fn()
-        except Exception as e:
-            last_exc = e
-            if attempt < max_attempts - 1:
-                wait = base_delay * (2 ** attempt)  # 2s, 4s, 8s
-                logger.warning(f"[Retry] attempt {attempt+1}/{max_attempts} failed: {e} — retrying in {wait:.0f}s")
-                await asyncio.sleep(wait)
-    raise last_exc
-
-
-async def _get_pillar_url(schedule_id: int, my_domain_id: int, pillar_anchor: str) -> tuple[str, str]:
-    """
-    Returns (pillar_wp_url, pillar_keyword) for a given pillar_anchor in a schedule.
-    Used to inject internal link from supporting articles → pillar page.
-    """
-    if not pillar_anchor:
-        return "", ""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            """SELECT wp_post_url, keyword FROM domain_keywords
-               WHERE schedule_id=? AND my_domain_id=? AND pillar_anchor=?
-                 AND keyword_type='pillar' AND status='published' AND wp_post_url!=''
-               LIMIT 1""",
-            (schedule_id, my_domain_id, pillar_anchor)
-        ) as cur:
-            row = await cur.fetchone()
-    if row:
-        return row[0], row[1]
-    return "", ""
-
-
-async def _fetch_image(image_source: str, keyword: str, title: str, img_prompt: str) -> tuple[str | None, str]:
-    """
-    Fetch image based on image_source setting.
-    Returns (base64_str_or_None, provider_name).
-    image_source: 'freepik_stock' | 'freepik_zimage' | 'freepik_flux' | 'gemini' | 'dalle' | 'none'
-    """
-    if image_source == "none":
-        return None, "none"
-
-    providers = {
-        "freepik_stock": [("freepik_stock", lambda: generate_image_freepik(keyword))],
-        "freepik_zimage": [
-            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
-            ("freepik_stock", lambda: generate_image_freepik(keyword)),
-        ],
-        "freepik_flux": [
-            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
-            ("freepik_stock", lambda: generate_image_freepik(keyword)),
-        ],
-        "dalle": [
-            ("dalle", lambda: generate_image(f"Professional illustration for article about: {title}. Clean, modern, no text.")),
-            ("freepik_stock", lambda: generate_image_freepik(keyword)),
-        ],
-    }
-    order = providers.get(image_source, providers["freepik_stock"])
-
-    for _provider, _fn in order:
-        try:
-            img = await _fn()
-            return img, _provider
-        except Exception as e:
-            logger.warning(f"[Image] {_provider} failed for '{keyword}': {e}")
-            _fetch_image._last_errors = getattr(_fetch_image, "_last_errors", {})
-            _fetch_image._last_errors[_provider] = str(e)
-    return None, "none"
-
-
 async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
     """Background task: generate and publish articles, persisting status to run_jobs table."""
     try:
@@ -882,14 +767,14 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
                             """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                               wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
+                               wp_post_url, status, keyword) VALUES (?,?,?,?,?,?,?,?)""",
                             (None, sched["client_domain"] or sched["domain"],
-                             sched["my_domain_id"], title, content, wp_url, "published")
+                             sched["my_domain_id"], title, content, wp_url, "published", keyword)
                         )
                         await db.execute(
                             """UPDATE domain_keywords SET status='published', title=?, wp_post_url=?, published_at=?
                                WHERE id=?""",
-                            (title, wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                            (title, wp_url, datetime.now(timezone.utc).isoformat(), kw_row["id"])
                         )
                         await db.commit()
                     _results.append({"status": "published", "keyword": keyword, "url": wp_url, "title": title, "image": image_provider})
@@ -929,7 +814,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                 total_pub = (await cur.fetchone())[0]
             await db.execute(
                 "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
-                (total_pub, datetime.utcnow().isoformat(), schedule_id)
+                (total_pub, datetime.now(timezone.utc).isoformat(), schedule_id)
             )
             await db.commit()
 
@@ -960,6 +845,60 @@ async def run_status(schedule_id: int, job_id: str):
         from fastapi import HTTPException
         raise HTTPException(404, "Job nie istnieje")
     return job
+
+
+@router.post("/keywords/{keyword_id}/preview")
+async def preview_keyword(keyword_id: int):
+    """
+    Generate article preview for a keyword without publishing to WP.
+    Returns the full article content for review.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM domain_keywords WHERE id=?", (keyword_id,)) as cur:
+            kw_row = await cur.fetchone()
+        if not kw_row:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Keyword nie istnieje")
+        kw_row = dict(kw_row)
+        sched = await get_schedule(db, kw_row["schedule_id"])
+    if not sched:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Harmonogram nie istnieje")
+
+    keyword = kw_row["keyword"]
+    variation = random.choice(VARIATION_HINTS)
+    location_code = 2616 if sched["language"] == "pl" else 2840
+
+    pillar_url, pillar_keyword = "", ""
+    if kw_row.get("keyword_type") == "supporting" and kw_row.get("pillar_anchor"):
+        pillar_url, pillar_keyword = await _get_pillar_url(
+            kw_row["schedule_id"], sched["my_domain_id"], kw_row["pillar_anchor"]
+        )
+
+    from services.openai_service import generate_article
+    article = await generate_article(
+        topic=keyword,
+        client_domain=sched["client_domain"] or "",
+        anchor_text=sched["anchor_text"] or keyword,
+        language=sched["language"],
+        variation_hint=variation,
+        custom_prompt=sched.get("custom_prompt", "") or "",
+        dfs_login=DFS_LOGIN,
+        dfs_password=DFS_PASSWORD,
+        location_code=location_code,
+        pillar_page_url=pillar_url,
+        pillar_page_anchor=pillar_keyword or kw_row.get("pillar_label", ""),
+    )
+
+    return {
+        "keyword": keyword,
+        "title": article["title"],
+        "content": article["content"],
+        "excerpt": article.get("excerpt", ""),
+        "lsi_tags": article.get("lsi_tags", []),
+    }
 
 
 @router.post("/schedules/{schedule_id}/run-all")
@@ -1050,8 +989,16 @@ async def _run_schedule_daily(sched: dict) -> dict:
 
         domain_fingerprints: set = set()
 
+        _first_article = True
         for kw_row in keywords:
             keyword = kw_row["keyword"]
+
+            # Anti-footprint: random delay between articles (30-180s) to avoid burst publishing
+            if not _first_article:
+                delay = random.randint(30, 180)
+                logger.info(f"[Daily] Anti-footprint delay: waiting {delay}s before next article on {sched['domain']}")
+                await asyncio.sleep(delay)
+            _first_article = False
 
             # Skip if already published on this domain (race condition guard)
             async with aiosqlite.connect(DB_PATH) as db:
@@ -1133,13 +1080,13 @@ async def _run_schedule_daily(sched: dict) -> dict:
                         published_posts.append({"title": article["title"], "keyword": keyword, "url": wp_url})
                         async with aiosqlite.connect(DB_PATH) as db:
                             await db.execute(
-                                "INSERT INTO posts (client_id, client_domain, my_domain_id, title, content, wp_post_url, status) VALUES (?,?,?,?,?,?,?)",
+                                "INSERT INTO posts (client_id, client_domain, my_domain_id, title, content, wp_post_url, status, keyword) VALUES (?,?,?,?,?,?,?,?)",
                                 (None, sched["client_domain"] or "",
-                                 sched["my_domain_id"], article["title"], article["content"], wp_url, "published")
+                                 sched["my_domain_id"], article["title"], article["content"], wp_url, "published", keyword)
                             )
                             await db.execute(
                                 "UPDATE domain_keywords SET status='published', title=?, wp_post_url=?, published_at=? WHERE id=?",
-                                (article["title"], wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                                (article["title"], wp_url, datetime.now(timezone.utc).isoformat(), kw_row["id"])
                             )
                             await db.commit()
                     else:
@@ -1165,7 +1112,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                 total_pub = (await cur.fetchone())[0]
             await db.execute(
                 "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
-                (total_pub, datetime.utcnow().isoformat(), schedule_id)
+                (total_pub, datetime.now(timezone.utc).isoformat(), schedule_id)
             )
             await db.commit()
 
@@ -1211,6 +1158,25 @@ async def run_daily_all():
         else:
             final.append(res)
 
+    # Send Telegram summary
+    try:
+        from services.telegram_service import send_telegram
+        total_pub = sum(r.get("published", 0) for r in final)
+        total_fail = sum(r.get("failed", 0) for r in final)
+        total_errors = sum(1 for r in final if r.get("error"))
+        msg = (
+            f"<b>Autopilot daily run</b>\n\n"
+            f"Schedules: <b>{len(final)}</b>\n"
+            f"Published: <b>{total_pub}</b>\n"
+        )
+        if total_fail:
+            msg += f"Failed: <b>{total_fail}</b>\n"
+        if total_errors:
+            msg += f"Errors: <b>{total_errors}</b>\n"
+        await send_telegram(msg)
+    except Exception:
+        pass
+
     return {"schedules_processed": len(final), "results": final}
 
 
@@ -1237,9 +1203,9 @@ async def autopilot_stats():
             "SELECT * FROM run_jobs WHERE done=1 ORDER BY created_at DESC LIMIT 3"
         ) as cur:
             recent_jobs = [dict(r) for r in await cur.fetchall()]
-        # Next cron run: daily 08:00 UTC
-        now = datetime.utcnow()
-        next_cron = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        # Next cron run: daily between 06:00-11:00 UTC (randomized for anti-footprint)
+        now = datetime.now(timezone.utc)
+        next_cron = now.replace(hour=8, minute=30, second=0, microsecond=0)
         if next_cron <= now:
             from datetime import timedelta
             next_cron += timedelta(days=1)
@@ -1274,6 +1240,90 @@ async def get_jobs():
         except Exception:
             job['results'] = []
     return jobs
+
+
+class ImportMapRequest(BaseModel):
+    my_domain_id: int
+    seed_keyword: str
+    pillars: list  # [{anchor, label, pillar_keyword, pillar_volume, pillar_difficulty, supporting_keywords: [{keyword, search_volume, keyword_difficulty}]}]
+    posts_per_day: int = 1
+    language: str = "pl"
+    client_domain: str = ""
+    anchor_text: str = ""
+    image_source: str = "freepik_stock"
+    custom_prompt: str = ""
+
+
+@router.post("/import-map")
+async def import_topical_map(body: ImportMapRequest):
+    """
+    Import a standalone Topical Map into an Autopilot schedule.
+    Creates the schedule + loads all keywords directly (skips DataForSEO generation).
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Check domain exists
+        async with db.execute("SELECT id FROM my_domains WHERE id = ?", (body.my_domain_id,)) as cur:
+            if not await cur.fetchone():
+                from fastapi import HTTPException
+                raise HTTPException(404, "Domena nie istnieje")
+
+        # Create schedule
+        cursor = await db.execute(
+            """INSERT INTO domain_schedules
+               (my_domain_id, seed_keyword, posts_per_day, language, client_domain, anchor_text, image_source, custom_prompt, map_generated)
+               VALUES (?,?,?,?,?,?,?,?,1)""",
+            (body.my_domain_id, body.seed_keyword, body.posts_per_day,
+             body.language, body.client_domain, body.anchor_text,
+             body.image_source, body.custom_prompt)
+        )
+        schedule_id = cursor.lastrowid
+
+        inserted = 0
+        for pillar in body.pillars:
+            anchor = pillar.get("anchor", "")
+            label = pillar.get("label", "")
+
+            # Save category
+            await db.execute(
+                """INSERT OR IGNORE INTO domain_categories
+                   (schedule_id, my_domain_id, pillar_anchor, pillar_label)
+                   VALUES (?,?,?,?)""",
+                (schedule_id, body.my_domain_id, anchor, label)
+            )
+
+            # Pillar keyword
+            pk = pillar.get("pillar_keyword", "")
+            if pk:
+                await db.execute(
+                    """INSERT INTO domain_keywords
+                       (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, status)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (schedule_id, body.my_domain_id, pk, "pillar",
+                     label, anchor, pillar.get("pillar_volume", 0), pillar.get("pillar_difficulty", 0), "pending")
+                )
+                inserted += 1
+
+            # Supporting keywords
+            for sk in pillar.get("supporting_keywords", []):
+                kw = sk.get("keyword", "")
+                if kw:
+                    await db.execute(
+                        """INSERT INTO domain_keywords
+                           (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, status)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (schedule_id, body.my_domain_id, kw, "supporting",
+                         label, anchor, sk.get("search_volume", 0), sk.get("keyword_difficulty", 0), "pending")
+                    )
+                    inserted += 1
+
+        await db.execute(
+            "UPDATE domain_schedules SET total_keywords=? WHERE id=?",
+            (inserted, schedule_id)
+        )
+        await db.commit()
+
+    return {"schedule_id": schedule_id, "inserted": inserted, "message": f"Zaimportowano {inserted} fraz do autopilota"}
 
 
 class BulkScheduleItem(BaseModel):
@@ -1545,13 +1595,13 @@ async def bulk_run_schedules(body: BulkActionRequest):
                         async with aiosqlite.connect(DB_PATH) as db:
                             await db.execute(
                                 """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                                   wp_post_url, status) VALUES (?,?,?,?,?,?,?)""",
+                                   wp_post_url, status, keyword) VALUES (?,?,?,?,?,?,?,?)""",
                                 (None, sched["client_domain"] or "",
-                                 sched["my_domain_id"], article["title"], article["content"], wp_url, "published")
+                                 sched["my_domain_id"], article["title"], article["content"], wp_url, "published", keyword)
                             )
                             await db.execute(
                                 "UPDATE domain_keywords SET status='published', title=?, wp_post_url=?, published_at=? WHERE id=?",
-                                (article["title"], wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                                (article["title"], wp_url, datetime.now(timezone.utc).isoformat(), kw_row["id"])
                             )
                             await db.commit()
                     else:
@@ -1573,7 +1623,7 @@ async def bulk_run_schedules(body: BulkActionRequest):
                     total_pub = (await cur.fetchone())[0]
                 await db.execute(
                     "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
-                    (total_pub, datetime.utcnow().isoformat(), schedule_id)
+                    (total_pub, datetime.now(timezone.utc).isoformat(), schedule_id)
                 )
                 await db.commit()
 
@@ -1660,6 +1710,63 @@ async def export_keywords_csv(schedule_id: int):
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@router.get("/logs")
+async def get_autopilot_logs():
+    """Return recent autopilot activity from domain_keywords (last 200 actions)."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT dk.id, dk.keyword, dk.status, dk.published_at, dk.wp_post_url, dk.title,
+                      ds.seed_keyword, md.domain
+               FROM domain_keywords dk
+               JOIN domain_schedules ds ON ds.id = dk.schedule_id
+               JOIN my_domains md ON md.id = ds.my_domain_id
+               WHERE dk.status IN ('published', 'failed')
+               ORDER BY dk.published_at DESC
+               LIMIT 200"""
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return rows
+
+
+@router.get("/export-csv")
+async def export_all_keywords_csv():
+    """Export ALL autopilot keywords across all schedules as CSV."""
+    from fastapi.responses import StreamingResponse
+    import csv
+    import io
+
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT dk.keyword, dk.keyword_type, dk.pillar_label, dk.search_volume,
+                      dk.keyword_difficulty, dk.status, dk.published_at, dk.wp_post_url, dk.title,
+                      ds.seed_keyword, md.domain
+               FROM domain_keywords dk
+               JOIN domain_schedules ds ON ds.id = dk.schedule_id
+               JOIN my_domains md ON md.id = ds.my_domain_id
+               ORDER BY md.domain, dk.status, dk.search_volume DESC"""
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=[
+        "domain", "seed_keyword", "keyword", "keyword_type", "pillar_label",
+        "search_volume", "keyword_difficulty", "status", "published_at", "wp_post_url", "title"
+    ])
+    writer.writeheader()
+    writer.writerows(rows)
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="autopilot_all_keywords.csv"'}
     )
 
 

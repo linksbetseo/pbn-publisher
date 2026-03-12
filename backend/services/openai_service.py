@@ -16,8 +16,11 @@ import asyncio
 import hashlib
 import json as _json
 import logging
+import os
+import random
 import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import aiosqlite
@@ -25,130 +28,51 @@ from openai import AsyncOpenAI
 
 from config import OPENAI_API_KEY, DB_PATH
 from services.content_enrichments import enrich_article
+from services.article_helpers import (
+    serp_cache_get as _serp_cache_get,
+    serp_cache_set as _serp_cache_set,
+    is_blog_url as _is_blog_url,
+    count_words as _count_words,
+    keyword_density as _keyword_density,
+    extract_lsi as _extract_lsi,
+    content_fingerprint as _content_fingerprint,
+    markdown_to_html as _markdown_to_html,
+    strip_markdown_remnants as _strip_markdown_remnants,
+)
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 logger = logging.getLogger(__name__)
 
-_SERP_CACHE_TTL = 86400  # 24 hours — stored in SQLite serp_cache table
+# Default GPT model — can be overridden via GPT_MODEL env var or DB settings
+GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
+
+# In-memory cache for GPT model (avoids DB query on every GPT call)
+_gpt_model_cache: dict = {"model": None, "ts": 0}
+_GPT_MODEL_CACHE_TTL = 120  # seconds
 
 
-_SERP_CACHE_TABLE_CREATED = False
-
-async def _ensure_serp_cache_table() -> None:
-    """Create serp_cache table once per process lifecycle."""
-    global _SERP_CACHE_TABLE_CREATED
-    if _SERP_CACHE_TABLE_CREATED:
-        return
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "CREATE TABLE IF NOT EXISTS serp_cache (cache_key TEXT PRIMARY KEY, data_json TEXT, expires_at REAL)"
-            )
-            await db.commit()
-        _SERP_CACHE_TABLE_CREATED = True
-    except Exception as e:
-        logger.warning(f"[SERP] Cache table init failed: {e}")
-
-
-async def _serp_cache_get(key: str) -> Optional[dict]:
-    await _ensure_serp_cache_table()
+async def get_gpt_model() -> str:
+    """Read GPT model from DB settings table, fall back to env var / default. Cached 2min."""
+    now = time.time()
+    if _gpt_model_cache["model"] and (now - _gpt_model_cache["ts"]) < _GPT_MODEL_CACHE_TTL:
+        return _gpt_model_cache["model"]
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                "SELECT data_json FROM serp_cache WHERE cache_key=? AND expires_at > ?",
-                (key, time.time())
+                "SELECT value FROM settings WHERE key = 'gpt_model'"
             ) as cur:
                 row = await cur.fetchone()
-        if row:
-            return _json.loads(row[0])
+                if row and row[0]:
+                    _gpt_model_cache["model"] = row[0]
+                    _gpt_model_cache["ts"] = now
+                    return row[0]
     except Exception:
         pass
-    return None
+    return GPT_MODEL
 
 
-async def _serp_cache_set(key: str, data: dict) -> None:
-    await _ensure_serp_cache_table()
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO serp_cache (cache_key, data_json, expires_at) VALUES (?,?,?)",
-                (key, _json.dumps(data, ensure_ascii=False), time.time() + _SERP_CACHE_TTL)
-            )
-            await db.commit()
-    except Exception as e:
-        logger.warning(f"[SERP] Cache write failed: {e}")
-
-_BLOG_SKIP = re.compile(
-    r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|tiktok\.com"
-    r"|wikipedia\.org|reddit\.com|pinterest\.com|allegro\.pl|amazon\.|ebay\."
-    r"|olx\.pl|ceneo\.pl|linkedin\.com|quora\.com|wykop\.pl|money\.pl"
-    r"|bankier\.pl|wp\.pl|onet\.pl|interia\.pl|gazeta\.pl|tvn24\.pl"
-    r"|polsatnews\.pl|rmf24\.pl|trojmiasto\.pl|gratka\.pl|otodom\.pl"
-    r"|otomoto\.pl|morele\.net|x-kom\.pl|mediaexpert\.pl)",
-    re.IGNORECASE,
-)
-
-
-def _is_blog_url(url: str) -> bool:
-    return not _BLOG_SKIP.search(url)
-
-
-def _count_words(text: str) -> int:
-    return len(re.findall(r'\w+', text))
-
-
-def _keyword_density(text: str, keyword: str) -> float:
-    words = _count_words(text)
-    if not words:
-        return 0.0
-    count = len(re.findall(re.escape(keyword.lower()), text.lower()))
-    return round((count * len(keyword.split())) / words * 100, 2)
-
-
-def _extract_lsi(text: str, keyword: str, top_n: int = 20) -> list[str]:
-    """Extract most frequent non-stopword unigrams + bigrams from text."""
-    STOPWORDS = {
-        "i", "w", "z", "na", "do", "po", "o", "a", "się", "nie", "jak", "co",
-        "czy", "że", "to", "jest", "są", "dla", "przez", "przy", "za", "od",
-        "ile", "ten", "ta", "te", "tego", "tej", "być", "mieć", "też", "już",
-        "the", "is", "in", "of", "and", "to", "a", "for", "with", "that", "this",
-        "it", "are", "was", "be", "as", "at", "by", "an", "or", "but", "not",
-        "have", "from", "on", "your", "can", "we", "our", "you", "they", "their",
-    }
-    kw_words = set(keyword.lower().split())
-    words = re.findall(r'\b[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]{3,}\b', text.lower())
-    freq: dict[str, int] = {}
-    # Unigrams
-    for w in words:
-        if w not in STOPWORDS and w not in kw_words and len(w) >= 4:
-            freq[w] = freq.get(w, 0) + 1
-    # Bigrams — two consecutive non-stopword words
-    for i in range(len(words) - 1):
-        w1, w2 = words[i], words[i + 1]
-        if (w1 not in STOPWORDS and w2 not in STOPWORDS
-                and w1 not in kw_words and w2 not in kw_words
-                and len(w1) >= 3 and len(w2) >= 3):
-            bigram = f"{w1} {w2}"
-            freq[bigram] = freq.get(bigram, 0) + 1
-    # Return mix: top unigrams + top bigrams, interleaved
-    unigrams = [(w, c) for w, c in freq.items() if " " not in w]
-    bigrams = [(w, c) for w, c in freq.items() if " " in w]
-    top_uni = [w for w, _ in sorted(unigrams, key=lambda x: -x[1])[:top_n // 2 + 5]]
-    top_bi = [w for w, _ in sorted(bigrams, key=lambda x: -x[1])[:top_n // 2]]
-    combined = top_uni + top_bi
-    return combined[:top_n]
-
-
-def _content_fingerprint(content: str) -> str:
-    """Fingerprint from start + middle of article for better dedup detection."""
-    words = re.findall(r'\w+', content.lower())
-    total = len(words)
-    # Take 100 words from start + 100 words from middle
-    start = words[:100]
-    mid_start = total // 3
-    middle = words[mid_start:mid_start + 100]
-    combined = start + middle
-    return hashlib.md5(" ".join(combined).encode()).hexdigest()
+# Functions _is_blog_url, _count_words, _keyword_density, _extract_lsi,
+# _content_fingerprint now imported from services.article_helpers
 
 
 async def _fetch_serp_content(
@@ -174,26 +98,30 @@ async def _fetch_serp_content(
         return cached
 
     try:
+        import httpx
         from services.dataforseo_service import DataForSEOClient
         dfs = DataForSEOClient(dfs_login, dfs_password)
 
-        serp_raw = await dfs.serp_top10_full(topic, location_code, language_code)
-        serp = serp_raw.get("organic", [])
-        paa_questions = serp_raw.get("paa", [])
+        # Reuse single httpx connection for all DataForSEO requests (SERP + 3 page_content)
+        async with httpx.AsyncClient(timeout=60) as _dfs_client:
+            serp_raw = await dfs.serp_top10_full(topic, location_code, language_code, _client=_dfs_client)
+            serp = serp_raw.get("organic", [])
+            paa_questions = serp_raw.get("paa", [])
 
-        blog_urls = [r["url"] for r in serp if r.get("url") and _is_blog_url(r["url"])][:3]
+            blog_urls = [r["url"] for r in serp if r.get("url") and _is_blog_url(r["url"])][:3]
 
-        if not blog_urls:
-            logger.warning("[SERP] No blog URLs found")
-            return empty
+            if not blog_urls:
+                logger.warning("[SERP] No blog URLs found")
+                return empty
 
-        logger.info(f"[SERP] Parsing {len(blog_urls)} URLs, PAA={len(paa_questions)}")
+            logger.info(f"[SERP] Parsing {len(blog_urls)} URLs, PAA={len(paa_questions)}")
 
-        parts = []
-        word_counts = []
-        densities = []
-        all_text = ""
-        contents = await asyncio.gather(*[dfs.page_content(url) for url in blog_urls], return_exceptions=True)
+            parts = []
+            word_counts = []
+            densities = []
+            all_text = ""
+            contents = await asyncio.gather(*[dfs.page_content(url, _client=_dfs_client) for url in blog_urls], return_exceptions=True)
+
         for url, content in zip(blog_urls, contents):
             if isinstance(content, Exception) or not content:
                 continue
@@ -225,68 +153,13 @@ async def _fetch_serp_content(
         return empty
 
 
-def _markdown_to_html(text: str) -> str:
-    """Convert markdown to HTML. Safe to call on mixed markdown+HTML content."""
-    # Convert markdown tables to HTML
-    def _convert_table(m: re.Match) -> str:
-        rows = [r.strip() for r in m.group(0).strip().split("\n") if r.strip()]
-        html = "<table>\n"
-        for i, row in enumerate(rows):
-            if re.match(r"^[\s|:-]+$", row):
-                continue  # skip separator row
-            cells = [c.strip() for c in row.strip("|").split("|")]
-            tag = "th" if i == 0 else "td"
-            html += "<tr>" + "".join(f"<{tag}>{c}</{tag}>" for c in cells) + "</tr>\n"
-        html += "</table>"
-        return html
 
-    text = re.sub(r"(\|.+\|\n)+", _convert_table, text)
-    text = re.sub(r"^#### (.+)$", r"<h4>\1</h4>", text, flags=re.MULTILINE)
-    text = re.sub(r"^### (.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
-    text = re.sub(r"^## (.+)$", r"<h2>\1</h2>", text, flags=re.MULTILINE)
-    text = re.sub(r"^# (.+)$", r"<h1>\1</h1>", text, flags=re.MULTILINE)
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
-    text = re.sub(r"(?m)^[-*] (.+)$", r"<li>\1</li>", text)
-    text = re.sub(r"(<li>.*?</li>)+", lambda m: f"<ul>{m.group(0)}</ul>", text, flags=re.DOTALL)
-    text = re.sub(r"(?m)^\d+\. (.+)$", r"<li>\1</li>", text)
-    lines = text.split("\n")
-    result = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        result.append(line if line.startswith("<") else f"<p>{line}</p>")
-    return "\n".join(result)
+# Functions _markdown_to_html, _strip_markdown_remnants now imported from services.article_helpers
 
 
-def _strip_markdown_remnants(html: str) -> str:
-    """
-    Remove leftover markdown syntax from HTML content that GPT mixed in.
-    Called on every GPT output AFTER markdown_to_html to catch mixed content.
-    """
-    # Remove ```html ... ``` and ``` ... ``` code fences
-    html = re.sub(r"```(?:html|HTML)?\s*", "", html)
-    html = re.sub(r"```\s*$", "", html, flags=re.MULTILINE)
-    # Convert ## headers — catch both line-start and inside <p> tags (GPT sometimes wraps heading in <p>)
-    html = re.sub(r"(?m)^\s*####\s+(.+)$", r"<h4>\1</h4>", html)
-    html = re.sub(r"(?m)^\s*###\s+(.+)$", r"<h3>\1</h3>", html)
-    html = re.sub(r"(?m)^\s*##\s+(.+)$", r"<h2>\1</h2>", html)
-    html = re.sub(r"(?m)^\s*#\s+(.+)$", r"<h1>\1</h1>", html)
-    # Also catch ## inside <p>...</p> blocks (GPT wraps heading in paragraph)
-    html = re.sub(r"<p>\s*####\s+(.+?)\s*</p>", r"<h4>\1</h4>", html, flags=re.DOTALL)
-    html = re.sub(r"<p>\s*###\s+(.+?)\s*</p>", r"<h3>\1</h3>", html, flags=re.DOTALL)
-    html = re.sub(r"<p>\s*##\s+(.+?)\s*</p>", r"<h2>\1</h2>", html, flags=re.DOTALL)
-    html = re.sub(r"<p>\s*#\s+(.+?)\s*</p>", r"<h2>\1</h2>", html, flags=re.DOTALL)
-    # Bold/italic inside HTML
-    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
-    html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
-    # Single backtick code
-    html = re.sub(r"`([^`]+?)`", r"<code>\1</code>", html)
-    return html.strip()
-
-
-async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = "gpt-4o-mini") -> str:
+async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = None) -> str:
+    if model is None:
+        model = await get_gpt_model()
     for attempt in range(3):
         try:
             response = await client.chat.completions.create(
@@ -308,130 +181,50 @@ async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int
     return ""  # unreachable
 
 
-def _extract_faq_entities(faq_html: str) -> list:
-    """Extract Q&A pairs from FAQ HTML. Returns list of schema Question objects."""
-    entities = []
-    # Primary: h3 followed by p
-    questions = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', faq_html, re.DOTALL | re.IGNORECASE)
-    for q, a in questions[:8]:
-        q_clean = re.sub(r'<[^>]+>', '', q).strip()
-        a_clean = re.sub(r'<[^>]+>', '', a).strip()
-        if q_clean and a_clean and len(a_clean) > 20:
-            entities.append({"@type": "Question", "name": q_clean,
-                             "acceptedAnswer": {"@type": "Answer", "text": a_clean}})
-    # Fallback: h3 + any block
-    if not entities:
-        qs = re.findall(r'<h3[^>]*>(.*?)</h3>(.*?)(?=<h3|</div>|$)', faq_html, re.DOTALL | re.IGNORECASE)
-        for q, a_block in qs[:8]:
-            q_clean = re.sub(r'<[^>]+>', '', q).strip()
-            a_clean = re.sub(r'<[^>]+>', ' ', a_block).strip()
-            a_clean = re.sub(r'\s+', ' ', a_clean).strip()
-            if q_clean and a_clean and len(a_clean) > 20:
-                entities.append({"@type": "Question", "name": q_clean,
-                                 "acceptedAnswer": {"@type": "Answer", "text": a_clean[:500]}})
-    return entities
 
-
-def _build_combined_schema(
-    title: str,
-    topic: str,
-    excerpt: str,
-    faq_html: str,
-    sections: list,
-    word_count: int = 0,
-    domain: str = "",
-    language: str = "pl",
-) -> str:
+def _fix_heading_hierarchy(html: str) -> str:
     """
-    Build single @graph JSON-LD with Article + FAQPage + BreadcrumbList.
-    One <script> block is better for Google rich results than multiple separate ones.
+    Post-process HTML to fix heading hierarchy issues from GPT output.
+    Rules:
+    - H2 can appear after H1 or another H2/H3
+    - H3 must be preceded by H2 (no orphan H3 before first H2)
+    - H4 must be preceded by H3
+    - No skipped levels (H1 → H3 without H2)
+    Fixes by promoting headings to the correct level.
     """
-    import json
-    from datetime import datetime
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Find all heading tags with their positions
+    heading_pattern = re.compile(r'<(h[1-6])([^>]*)>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
+    matches = list(heading_pattern.finditer(html))
+    if not matches:
+        return html
 
-    # Publisher name from domain
-    publisher_name = "Redakcja"
-    base_url = ""
-    if domain:
-        clean_d = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
-        publisher_name = clean_d.replace("www.", "").split(".")[0].capitalize()
-        base_url = f"https://{clean_d}"
+    replacements = []  # (start, end, old_tag, new_tag)
+    last_level = 1  # assume H1 exists (title)
 
-    article_id = f"{base_url}/#article" if base_url else "#article"
-    webpage_id = f"{base_url}/" if base_url else "#webpage"
-    faq_id = f"{base_url}/#faq" if base_url else "#faq"
+    for m in matches:
+        tag = m.group(1).lower()
+        level = int(tag[1])
+        attrs = m.group(2)
+        content = m.group(3)
 
-    graph = []
+        # Fix: heading level skips more than 1 level down from last
+        if level > last_level + 1:
+            new_level = last_level + 1
+            new_tag = f"h{new_level}"
+            replacements.append((m.start(), m.end(), m.group(0),
+                                 f"<{new_tag}{attrs}>{content}</{new_tag}>"))
+            last_level = new_level
+        else:
+            last_level = level
 
-    # WebPage node
-    graph.append({
-        "@type": "WebPage",
-        "@id": webpage_id,
-        "url": webpage_id,
-        "name": title,
-        "description": excerpt[:300] if excerpt else "",
-        "inLanguage": language,
-    })
+    # Apply replacements in reverse order to preserve positions
+    result = html
+    for start, end, old, new in reversed(replacements):
+        result = result[:start] + new + result[end:]
 
-    # Article node — deterministic author per topic (consistent across republish/refresh)
-    _author_names = [
-        "Anna Kowalska", "Piotr Wiśniewski", "Katarzyna Nowak",
-        "Marek Zieliński", "Agnieszka Wróbel", "Tomasz Jabłoński",
-    ]
-    _author_seed = abs(hash(topic)) % len(_author_names) if topic else 0
-    author_name = _author_names[_author_seed]
-    article_node = {
-        "@type": "Article",
-        "@id": article_id,
-        "headline": title[:110],
-        "description": excerpt[:300] if excerpt else "",
-        "keywords": topic,
-        "datePublished": now,
-        "dateModified": now,
-        "inLanguage": language,
-        "author": {
-            "@type": "Person",
-            "name": author_name,
-            "url": base_url or None,
-        },
-        "publisher": {"@type": "Organization", "name": publisher_name, "url": base_url or None},
-        "mainEntityOfPage": {"@id": webpage_id},
-    }
-    if base_url:
-        article_node["image"] = {
-            "@type": "ImageObject",
-            "url": f"{base_url}/wp-content/uploads/featured.jpg",
-            "width": 1200,
-            "height": 630,
-        }
-    if word_count:
-        article_node["wordCount"] = word_count
-    graph.append(article_node)
+    return result
 
-    # BreadcrumbList
-    if base_url and topic:
-        graph.append({
-            "@type": "BreadcrumbList",
-            "itemListElement": [
-                {"@type": "ListItem", "position": 1, "name": "Strona główna" if language == "pl" else "Home", "item": base_url + "/"},
-                {"@type": "ListItem", "position": 2, "name": title},
-            ],
-        })
 
-    # FAQPage node (only if we have Q&A pairs)
-    faq_entities = _extract_faq_entities(faq_html)
-    if faq_entities:
-        graph.append({
-            "@type": "FAQPage",
-            "@id": faq_id,
-            "mainEntity": faq_entities,
-        })
-        # Cross-link Article → FAQPage
-        article_node["mentions"] = {"@id": faq_id}
-
-    schema = {"@context": "https://schema.org", "@graph": graph}
-    return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
 
 
 def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
@@ -468,8 +261,6 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
             lambda lnk: f" Also check out {lnk}.",
             lambda lnk: f" This topic is covered in depth at {lnk}.",
         ]
-    import random as _r
-
     for i, link in enumerate(links):
         href_match = re.search(r'href=["\']([^"\']+)["\']', link)
         if not href_match:
@@ -495,7 +286,7 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
         para = paragraphs[target_idx] if target_idx < para_count else None
         # Skip paragraphs that already have links
         if para and 'href=' not in para and link not in html:
-            ctx = _r.choice(_LINK_CONTEXTS)
+            ctx = random.choice(_LINK_CONTEXTS)
             new_para = para[:-4] + ctx(link) + "</p>"
             html = html.replace(para, new_para, 1)
     return html
@@ -521,8 +312,6 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str, l
 
     topic_words = set(re.findall(r'\w{3,}', topic.lower()))
 
-    import random as _r
-
     _INT_CONTEXTS_PL = [
         lambda lnk: f" Więcej na ten temat znajdziesz w artykule: {lnk}.",
         lambda lnk: f" Przeczytaj też: {lnk}.",
@@ -540,6 +329,13 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str, l
         lambda lnk: f" Find out more: {lnk}.",
     ]
     _int_contexts = _INT_CONTEXTS_PL if language == "pl" else _INT_CONTEXTS_EN
+
+    # Pre-extract word sets for all inner paragraphs (avoids repeated regex in inner loop)
+    para_word_sets = {}
+    inner_indices = list(range(1, len(paragraphs) - 1))
+    for idx in inner_indices:
+        para_text = re.sub(r'<[^>]+>', '', paragraphs[idx]).lower()
+        para_word_sets[idx] = set(re.findall(r'\w{3,}', para_text))
 
     injected = 0
     used_urls: set = set()
@@ -567,14 +363,14 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str, l
         # Find best matching paragraph (skip first 1 and last 1)
         best_para = None
         best_score = 0
-        for para in paragraphs[1:-1]:
+        for idx in inner_indices:
+            para = paragraphs[idx]
             if para in used_paras:
                 continue
             # Skip paragraphs that already have 2+ links
             if para.count('href=') >= 2:
                 continue
-            para_text = re.sub(r'<[^>]+>', '', para).lower()
-            para_words = set(re.findall(r'\w{3,}', para_text))
+            para_words = para_word_sets[idx]
             overlap = len(title_words & para_words)
             topic_bonus = 2 if len(topic_words & para_words) > 3 else 0
             score = overlap + topic_bonus
@@ -597,7 +393,7 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str, l
         kw = post.get("keyword", "")
         anchor_text = kw if (kw and len(kw.split()) <= 6) else " ".join(title.split()[:5])
         link = f'<a href="{url}" title="{title}">{anchor_text}</a>'
-        ctx = _r.choice(_int_contexts)
+        ctx = random.choice(_int_contexts)
         new_para = best_para[:-4] + ctx(link) + "</p>"
         html = html.replace(best_para, new_para, 1)
         used_urls.add(url)
@@ -620,8 +416,6 @@ def _rotate_anchor(anchor_text: str, client_domain: str, language: str = "pl") -
     Distribution: 35% exact match, 20% brand/naked URL, 25% partial/topic, 20% generic
     Uses os.urandom for true randomness (not deterministic hash).
     """
-    import random as _rand
-    import os
     # Use os.urandom for non-deterministic rotation per article
     bucket = int.from_bytes(os.urandom(1), "big") % 100
     if bucket < 35:
@@ -638,7 +432,7 @@ def _rotate_anchor(anchor_text: str, client_domain: str, language: str = "pl") -
     else:
         # Generic
         generics = _ANCHOR_GENERIC_PL if language == "pl" else _ANCHOR_GENERIC_EN
-        return _rand.choice(generics)
+        return random.choice(generics)
 
 
 async def generate_article(
@@ -661,6 +455,11 @@ async def generate_article(
     pillar_page_url: str = "",  # PBN inter-link: supporting → pillar
     pillar_page_anchor: str = "",  # anchor text for pillar link
 ) -> dict:
+    _t0 = time.time()
+
+    # Resolve GPT model once for entire article generation (avoids 8+ cache lookups)
+    _resolved_model = await get_gpt_model()
+
     def clean_url(url: str) -> str:
         url = url.strip()
         if not url.startswith("http://") and not url.startswith("https://"):
@@ -685,16 +484,14 @@ async def generate_article(
     if pillar_page_url and pillar_page_anchor:
         anchors_info += f', <a href="{clean_url(pillar_page_url)}">{pillar_page_anchor}</a>'
 
-    import random as _random
-    from datetime import datetime as _dt
-    _current_year = _dt.utcnow().year
+    _current_year = datetime.now(timezone.utc).year
     variation = f" Kąt tematyczny: {variation_hint}." if variation_hint else ""
     custom_block = f"\nDodatkowe wymagania: {custom_prompt}" if custom_prompt else ""
     lang_pl = language == "pl"
 
     # ── Layout variant (30% faq_top, 20% tldr, 25% short_answer, 25% standard) ──
     if layout_variant is None:
-        _rv = _random.random()
+        _rv = random.random()
         layout_variant = "faq_top" if _rv < 0.30 else ("tldr" if _rv < 0.50 else ("short_answer" if _rv < 0.75 else "standard"))
 
     # ── STEP 1: SERP + competitor analysis ───────────────────────────────────
@@ -718,20 +515,24 @@ async def generate_article(
     if lang_pl:
         intent_user = (
             f"Dla frazy: '{topic}'{variation}\n"
-            f"Podaj krótko (max 3 zdania):\n"
+            f"Podaj krótko (max 5 zdań):\n"
             f"1. Główna intencja wyszukiwania\n"
             f"2. Cluster tematyczny\n"
-            f"3. Kluczowe encje i tematy pokrewne{serp_block}"
+            f"3. Kluczowe encje nazwane (marki, firmy, produkty, osoby, miejsca, instytucje, normy/standardy)\n"
+            f"4. Powiązane encje z Google Knowledge Graph (podaj 5-8 konkretnych nazw własnych){serp_block}"
         )
     else:
         intent_user = (
             f"For keyword: '{topic}'{variation}\n"
-            f"Briefly (max 3 sentences):\n"
-            f"1. Search intent\n2. Topic cluster\n3. Key entities{serp_block}"
+            f"Briefly (max 5 sentences):\n"
+            f"1. Search intent\n"
+            f"2. Topic cluster\n"
+            f"3. Key named entities (brands, companies, products, people, places, institutions, standards)\n"
+            f"4. Related Google Knowledge Graph entities (list 5-8 specific proper nouns){serp_block}"
         )
     intent_analysis = await _gpt(
         "Jesteś ekspertem SEO." if lang_pl else "You are an SEO expert.",
-        intent_user, temperature=0.3, max_tokens=400
+        intent_user, temperature=0.3, max_tokens=400, model=_resolved_model
     )
     logger.info(f"[Article] Intent: {intent_analysis[:80]}")
 
@@ -754,7 +555,7 @@ async def generate_article(
     outline_raw = await _gpt(
         "Jesteś ekspertem SEO tworzącym struktury artykułów. Nagłówki H2 oddzielone '<<<<'." if lang_pl
         else "You are an SEO expert. H2 headings separated by '<<<<'.",
-        outline_user, temperature=0.5, max_tokens=500
+        outline_user, temperature=0.5, max_tokens=500, model=_resolved_model
     )
     sections = [s.strip() for s in outline_raw.split("<<<<") if s.strip()]
     if not sections:
@@ -790,7 +591,7 @@ async def generate_article(
         )
     title = await _gpt(
         "Jesteś copywriterem SEO." if lang_pl else "You are an SEO copywriter.",
-        title_user, temperature=0.8, max_tokens=100
+        title_user, temperature=0.8, max_tokens=100, model=_resolved_model
     )
     title = title.strip('"\'').strip()
     logger.info(f"[Article] Title: {title}")
@@ -835,7 +636,7 @@ async def generate_article(
             f"Use '{topic}' {intro_kw_count}x naturally.{lsi_block}\n"
             f"Only HTML <p> and <strong>, no headings. OK to use <ul>/<li> if appropriate.{custom_block}"
         )
-    intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=700)
+    intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=700, model=_resolved_model)
     if not intro_html.strip().startswith("<"):
         intro_html = _markdown_to_html(intro_html)
     intro_html = _strip_markdown_remnants(intro_html)
@@ -856,6 +657,9 @@ async def generate_article(
             "- Dodaj <strong> dla najważniejszych terminów i faktów\n"
             "- Pisz konkretnie — dane, liczby, przykłady, porady praktyczne\n"
             "- Bez powtarzania wstępu ani zakończenia artykułu\n"
+            "- ENCJE: Używaj konkretnych nazw własnych (marki, firmy, produkty, osoby, miejsca, normy, "
+            "instytucje) zamiast ogólników. Google NLP rozpoznaje encje — im więcej trafnych nazw "
+            "własnych powiązanych z tematem, tym lepszy topical authority.\n"
             "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # na początku linii. "
             "NIE używaj **tekst** ani *tekst*. TYLKO czysty HTML — tagi <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>."
         )
@@ -868,6 +672,9 @@ async def generate_article(
             "- Add <strong> for key terms and important facts\n"
             "- Be specific — data, numbers, examples, practical tips\n"
             "- Don't repeat intro or conclusion\n"
+            "- ENTITIES: Use specific proper nouns (brands, companies, products, people, places, standards, "
+            "institutions) instead of generic terms. Google NLP recognizes entities — more relevant "
+            "proper nouns related to the topic means better topical authority.\n"
             "STRICT: NO markdown. Never use ## or ### or # at line start. "
             "Never use **text** or *text*. ONLY pure HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>."
         )
@@ -898,7 +705,7 @@ async def generate_article(
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
                     f"Write expertly: specific facts, numbers, examples. Avoid vague generalities.{custom_block}"
                 )
-            sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=1100)
+            sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=1100, model=_resolved_model)
             if not sec_html.strip().startswith("<"):
                 sec_html = _markdown_to_html(sec_html)
             sec_html = _strip_markdown_remnants(sec_html)
@@ -910,8 +717,10 @@ async def generate_article(
         _generate_section(i, heading) for i, heading in enumerate(sections)
     ]))
 
-    # ── STEP 7: Conclusion ────────────────────────────────────────────────────
-    # Rotate conclusion H2 heading — anti-footprint
+    # ── STEPS 7-9: Conclusion + FAQ + Excerpt (PARALLEL — independent calls) ──
+    # These 3 GPT calls don't depend on each other, running in parallel saves ~4-6s
+
+    # Prepare prompts for all 3 before launching
     _concl_headings_pl = [
         "Podsumowanie", "Wnioski końcowe", "Co warto zapamiętać?",
         "Najważniejsze informacje", "Kluczowe wnioski", "Na zakończenie",
@@ -920,7 +729,7 @@ async def generate_article(
         "Summary", "Final Thoughts", "Key Takeaways",
         "What to Remember", "In Conclusion", "Wrapping Up",
     ]
-    _concl_h2 = _random.choice(_concl_headings_pl if lang_pl else _concl_headings_en)
+    _concl_h2 = random.choice(_concl_headings_pl if lang_pl else _concl_headings_en)
     if lang_pl:
         conclusion_user = (
             f"Napisz zakończenie artykułu '{title}' (keyword: '{topic}').\n"
@@ -943,32 +752,20 @@ async def generate_article(
             f"- Para 3 (optional): CTA or question for readers\n"
             f"Use '{topic}' 1-2x. Specific conclusions, not generalities."
         )
-    _concl_system_pl = (
+    _concl_system = (
         "Jesteś ekspertem SEO. Piszesz zakończenie artykułu w HTML.\n"
         "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # ani **tekst**. "
         "TYLKO tagi HTML: <h2>, <p>, <ul>, <li>, <strong>."
-    )
-    _concl_system_en = (
+    ) if lang_pl else (
         "You are an SEO expert. Write article conclusion in HTML.\n"
         "STRICT: NO markdown. Never use ## or ### or # or **text**. "
         "ONLY HTML tags: <h2>, <p>, <ul>, <li>, <strong>."
     )
-    conclusion_html = await _gpt(
-        _concl_system_pl if lang_pl else _concl_system_en,
-        conclusion_user, temperature=0.7, max_tokens=600
-    )
-    if not conclusion_html.strip().startswith("<"):
-        conclusion_html = _markdown_to_html(conclusion_html)
-    conclusion_html = _strip_markdown_remnants(conclusion_html)
 
-    # ── STEP 8: FAQ ───────────────────────────────────────────────────────────
     paa_block = ""
     if paa_questions:
-        paa_block = "\nPytania z Google PAA (użyj tych jako baza):\n" + "\n".join(f"- {q}" for q in paa_questions[:6])
-    paa_block_en = ""
-    if paa_questions:
-        paa_block_en = "\nReal Google PAA questions (use as base):\n" + "\n".join(f"- {q}" for q in paa_questions[:6])
-
+        paa_block = ("\nPytania z Google PAA (użyj tych jako baza):\n" if lang_pl
+                     else "\nReal Google PAA questions (use as base):\n") + "\n".join(f"- {q}" for q in paa_questions[:6])
     _faq_headings_pl = [
         "Najczęściej zadawane pytania (FAQ)",
         "Pytania i odpowiedzi",
@@ -983,8 +780,7 @@ async def generate_article(
         "Common Questions Answered",
         "People Also Ask",
     ]
-    _faq_h2 = _random.choice(_faq_headings_pl if lang_pl else _faq_headings_en)
-
+    _faq_h2 = random.choice(_faq_headings_pl if lang_pl else _faq_headings_en)
     if lang_pl:
         faq_user = (
             f"Stwórz sekcję FAQ dla artykułu o '{topic}'.\n"
@@ -1004,21 +800,15 @@ async def generate_article(
             f"- 8 questions and answers\n"
             f"- First question = definition/explanation of '{topic}'\n"
             f"- Answers: 2-4 sentences, specific, no filler\n"
-            f"- Mix: informational + practical + comparative questions{paa_block_en}\n"
+            f"- Mix: informational + practical + comparative questions{paa_block}\n"
             f"HTML: <h2>{_faq_h2}</h2>\n"
             f"Each pair: <h3>Question?</h3><p>Answer.</p>\n"
             f"STRICT: NO markdown. ONLY HTML."
         )
-    faq_html = await _gpt(
+    _faq_system = (
         "Jesteś ekspertem SEO. Tworzysz FAQ zoptymalizowane pod featured snippets, AI Overview i PAA (People Also Ask)." if lang_pl
-        else "You are an SEO expert creating FAQ optimized for featured snippets, AI Overview, and PAA (People Also Ask).",
-        faq_user, temperature=0.6, max_tokens=1400
+        else "You are an SEO expert creating FAQ optimized for featured snippets, AI Overview, and PAA (People Also Ask)."
     )
-    if not faq_html.strip().startswith("<"):
-        faq_html = _markdown_to_html(faq_html)
-    faq_html = _strip_markdown_remnants(faq_html)
-
-    # ── STEP 9: Excerpt ───────────────────────────────────────────────────────
     if lang_pl:
         excerpt_user = (
             f"Napisz meta description dla artykułu '{title}' o '{topic}'.\n"
@@ -1031,12 +821,32 @@ async def generate_article(
             f"REQUIREMENTS: max 155 chars, no HTML, includes '{topic}', ends with CTA (e.g. 'Learn more', 'Find out', 'Read now').\n"
             f"Only the meta description text, nothing else."
         )
-    excerpt = await _gpt(
-        "Jesteś SEO copywriterem." if lang_pl else "You are an SEO copywriter.",
-        excerpt_user, temperature=0.5, max_tokens=80
+
+    # Launch all 3 in parallel
+    conclusion_raw, faq_raw, excerpt_raw = await asyncio.gather(
+        _gpt(_concl_system, conclusion_user, temperature=0.7, max_tokens=600, model=_resolved_model),
+        _gpt(_faq_system, faq_user, temperature=0.6, max_tokens=1400, model=_resolved_model),
+        _gpt(
+            "Jesteś SEO copywriterem." if lang_pl else "You are an SEO copywriter.",
+            excerpt_user, temperature=0.5, max_tokens=80, model=_resolved_model
+        ),
     )
-    excerpt = excerpt.strip('"\'').strip()
-    logger.info("[Article] Excerpt done")
+
+    # Post-process conclusion
+    conclusion_html = conclusion_raw
+    if not conclusion_html.strip().startswith("<"):
+        conclusion_html = _markdown_to_html(conclusion_html)
+    conclusion_html = _strip_markdown_remnants(conclusion_html)
+
+    # Post-process FAQ
+    faq_html = faq_raw
+    if not faq_html.strip().startswith("<"):
+        faq_html = _markdown_to_html(faq_html)
+    faq_html = _strip_markdown_remnants(faq_html)
+
+    # Post-process excerpt
+    excerpt = excerpt_raw.strip('"\'').strip()
+    logger.info("[Article] Conclusion + FAQ + Excerpt done (parallel)")
 
     # ── STEP 10: Assemble — apply layout variant ──────────────────────────────
     # NOTE: No <h1> in content — WordPress theme renders post title as H1 already.
@@ -1059,8 +869,7 @@ async def generate_article(
         # "Krótka odpowiedź" box — good for featured snippets (25%)
         sa_label = "Krótka odpowiedź" if lang_pl else "Quick Answer"
         sa_intro = intro_html[:400] if intro_html else ""
-        import re as _re
-        sa_text = _re.sub(r'<[^>]+>', '', sa_intro).strip()[:250]
+        sa_text = re.sub(r'<[^>]+>', '', sa_intro).strip()[:250]
         sa_box = (
             f'<div style="background:#f0fdf4;border:1px solid #86efac;padding:16px 20px;'
             f'margin:16px 0 24px;border-radius:8px;">'
@@ -1089,6 +898,9 @@ async def generate_article(
     # Final strip again after enrichment (GPT content in enrichments may also have ##)
     content = _strip_markdown_remnants(content)
 
+    # Fix heading hierarchy (H3 before H2, skipped levels, etc.)
+    content = _fix_heading_hierarchy(content)
+
     # Deduplicate anchor links
     seen_hrefs: set = set()
 
@@ -1104,19 +916,9 @@ async def generate_article(
 
     content = re.sub(r'<a\s[^>]*?>.*?</a>', _dedup_link, content, flags=re.DOTALL | re.IGNORECASE)
 
-    # Combined @graph schema: Article + FAQPage + BreadcrumbList in one <script>
-    combined_schema = _build_combined_schema(
-        title=title,
-        topic=topic,
-        excerpt=excerpt,
-        faq_html=faq_html,
-        sections=sections,
-        word_count=_count_words(content),
-        domain=client_domain,
-        language=language,
-    )
-    if combined_schema:
-        content += f"\n\n{combined_schema}"
+    # Schema.org JSON-LD removed from post content — Yoast/RankMath generate their own
+    # schema and having it in post_content creates duplicates. SEO meta is passed via
+    # WP REST API (Yoast/RankMath meta fields) in wordpress_service.py.
 
     # Dedup fingerprint
     fingerprint = _content_fingerprint(content)
@@ -1125,7 +927,13 @@ async def generate_article(
     if domain_fingerprints is not None:
         domain_fingerprints.add(fingerprint)
 
-    logger.info(f"[Article] Done — '{title}' | {len(sections)} sekcji | {_count_words(content)} słów | fp={fingerprint[:8]}")
+    word_count = _count_words(content)
+    _elapsed = round(time.time() - _t0, 1)
+    logger.info(f"[Article] Done — '{title}' | {len(sections)} sekcji | {word_count} słów | fp={fingerprint[:8]} | {_elapsed}s")
+
+    # A8: Minimum article length validation
+    if word_count < 600:
+        logger.warning(f"[Article] Short article ({word_count} words) for '{topic}' — may indicate GPT truncation")
 
     return {
         "title": title,
@@ -1133,12 +941,14 @@ async def generate_article(
         "excerpt": excerpt,
         "fingerprint": fingerprint,
         "lsi_tags": lsi_terms[:5],  # top 5 LSI terms for WP tags
+        "word_count": word_count,
     }
 
 
 async def describe_image_and_generate(image_b64: str, topic: str) -> str:
+    _model = await get_gpt_model()
     vision_response = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=_model,
         messages=[{"role": "user", "content": [
             {"type": "text", "text": f"Opisz krótko co widać na tym screenshocie (max 2 zdania). Kontekst: '{topic}'."},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},

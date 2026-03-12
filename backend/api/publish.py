@@ -103,6 +103,8 @@ class GenerateRequest(BaseModel):
     variation_hint: str = ""
     pillar_page_url: str = ""
     pillar_page_anchor: str = ""
+    tone_of_voice: str = "ekspert"
+    use_serp_scrape: bool = True
 
 
 class RegenerateImageRequest(BaseModel):
@@ -128,21 +130,62 @@ class PublishRequest(BaseModel):
     language: str = "pl"
     unique_per_domain: bool = True
     batch_tag: str = ""
-    image_source: str = "none"  # none | gemini | freepik_stock | dalle
+    image_source: str = "none"  # none | gemini | freepik_stock | freepik_zimage | freepik_flux | dalle
+    drip_delay: bool = True  # anti-footprint: random delays between domains
+
+
+def _drip_delay_range(domain_count: int) -> tuple[int, int]:
+    """Return (min_seconds, max_seconds) delay range based on number of domains."""
+    if domain_count <= 5:
+        return (20, 60)
+    elif domain_count <= 15:
+        return (45, 120)
+    else:
+        return (60, 180)
+
+
+@router.get("/check-duplicate")
+async def check_duplicate(topic: str, domain_id: int):
+    """Check if a keyword/topic has already been published to a specific domain."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT id, title, wp_post_url, created_at FROM posts
+               WHERE my_domain_id = ? AND LOWER(title) LIKE ? AND status = 'published'
+               ORDER BY created_at DESC LIMIT 5""",
+            (domain_id, f"%{topic.lower()[:50]}%"),
+        ) as cur:
+            rows = await cur.fetchall()
+    if rows:
+        return {
+            "duplicate": True,
+            "matches": [{"id": r[0], "title": r[1], "url": r[2], "date": r[3]} for r in rows],
+        }
+    return {"duplicate": False, "matches": []}
 
 
 @router.post("/generate")
 async def generate_content(body: GenerateRequest):
+    # Build custom_prompt incorporating tone_of_voice
+    effective_prompt = body.custom_prompt or ""
+    tone_map = {
+        "ekspert": "Pisz w tonie eksperckim, autorytatywnym.",
+        "przyjazny": "Pisz w tonie przyjaznym, doradczym.",
+        "formalny": "Pisz w tonie formalnym, biznesowym.",
+        "poradnikowy": "Pisz w tonie poradnikowym, krok po kroku.",
+    }
+    if body.tone_of_voice and body.tone_of_voice in tone_map:
+        effective_prompt = f"{tone_map[body.tone_of_voice]} {effective_prompt}".strip()
+
     article = await generate_article(
         body.topic, body.client_domain, body.anchor_text, body.language,
         anchor_text2=body.anchor_text2, anchor_url2=body.anchor_url2,
         anchor_text3=body.anchor_text3, anchor_url3=body.anchor_url3,
-        custom_prompt=body.custom_prompt,
+        custom_prompt=effective_prompt,
         variation_hint=body.variation_hint,
         pillar_page_url=body.pillar_page_url,
         pillar_page_anchor=body.pillar_page_anchor,
-        dfs_login=DFS_LOGIN,
-        dfs_password=DFS_PASSWORD,
+        dfs_login=DFS_LOGIN if body.use_serp_scrape else "",
+        dfs_password=DFS_PASSWORD if body.use_serp_scrape else "",
     )
     image_b64 = None
     image_provider = "none"
@@ -200,46 +243,40 @@ def _build_image_prompt(topic: str, title: str = "") -> str:
 
 
 async def _fetch_image(topic: str, image_source: str, title: str = "") -> Optional[str]:
-    """Fetch image based on image_source setting."""
+    """Fetch image based on image_source setting. Tries primary provider, then freepik_stock fallback."""
     if image_source == "none":
         return None
     img_prompt = _build_image_prompt(topic, title)
-    if image_source == "freepik_zimage":
+
+    # Provider chains: primary → fallback(s)
+    _chains = {
+        "freepik_zimage": [
+            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
+            ("freepik_stock", lambda: generate_image_freepik(topic)),
+        ],
+        "freepik_flux": [
+            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
+            ("freepik_stock", lambda: generate_image_freepik(topic)),
+        ],
+        "freepik_stock": [
+            ("freepik_stock", lambda: generate_image_freepik(topic)),
+        ],
+        "dalle": [
+            ("dalle", lambda: generate_image(f"Professional illustration for article about: {topic}. Clean, no text, no watermarks.")),
+            ("freepik_stock", lambda: generate_image_freepik(topic)),
+        ],
+        "gemini": [
+            ("gemini", lambda: generate_image_gemini(img_prompt)),
+            ("freepik_stock", lambda: generate_image_freepik(topic)),
+        ],
+    }
+    chain = _chains.get(image_source, _chains.get("freepik_stock", []))
+
+    for provider_name, provider_fn in chain:
         try:
-            return await generate_image_zimage(img_prompt)
+            return await provider_fn()
         except Exception as e:
-            logger.warning(f"Freepik Z-Image failed: {e}")
-            try:
-                return await generate_image_freepik(topic)
-            except Exception:
-                return None
-    elif image_source == "freepik_flux":
-        try:
-            return await generate_image_flux(img_prompt)
-        except Exception as e:
-            logger.warning(f"Freepik Flux failed: {e}")
-            try:
-                return await generate_image_freepik(topic)
-            except Exception:
-                return None
-    elif image_source == "freepik_stock":
-        try:
-            return await generate_image_freepik(topic)
-        except Exception as e:
-            logger.warning(f"Freepik stock failed: {e}")
-            return None
-    elif image_source == "dalle":
-        try:
-            return await generate_image(f"Professional illustration for article about: {topic}. Clean, no text, no watermarks.")
-        except Exception as e:
-            logger.warning(f"DALL-E image failed: {e}")
-            return None
-    elif image_source == "gemini":
-        try:
-            return await generate_image_gemini(img_prompt)
-        except Exception as e:
-            logger.warning(f"Gemini image failed: {e}")
-            return None
+            logger.warning(f"[Image] {provider_name} failed for '{topic}': {e}")
     return None
 
 
@@ -266,7 +303,10 @@ async def publish_posts(body: PublishRequest):
     # Accumulate DB rows to insert in a single batch at the end
     db_rows = []  # (client_id, client_domain, domain_id, title, content, wp_url, status, batch_tag)
 
-    for dom in domains:
+    use_drip = body.drip_delay and len(domains) > 2
+    drip_min, drip_max = _drip_delay_range(len(domains))
+
+    for idx, dom in enumerate(domains):
         d = dict(dom)
         try:
             if body.unique_per_domain and body.topic:
@@ -277,6 +317,20 @@ async def publish_posts(body: PublishRequest):
                 variation = random.choice(available)
                 used_variations.append(variation)
 
+                # Fetch published posts for this domain (interlinking)
+                _published_posts = []
+                try:
+                    async with aiosqlite.connect(DB_PATH) as _db:
+                        async with _db.execute(
+                            """SELECT title, COALESCE(NULLIF(keyword,''), title) AS keyword, wp_post_url AS url FROM posts
+                               WHERE my_domain_id = ? AND status = 'published' AND wp_post_url != ''
+                               ORDER BY created_at DESC LIMIT 30""",
+                            (d["id"],)
+                        ) as _cur:
+                            _published_posts = [{"title": r[0] or "", "keyword": r[1] or "", "url": r[2]} for r in await _cur.fetchall()]
+                except Exception as e:
+                    logger.warning(f"[PUBLISH] Failed to fetch published posts for interlinking on domain {d['id']}: {e}")
+
                 article = await generate_article(
                     body.topic, body.client_domain, body.anchor_text, body.language,
                     anchor_text2=body.anchor_text2, anchor_url2=body.anchor_url2,
@@ -285,6 +339,7 @@ async def publish_posts(body: PublishRequest):
                     variation_hint=variation,
                     dfs_login=DFS_LOGIN,
                     dfs_password=DFS_PASSWORD,
+                    published_posts=_published_posts,
                 )
                 title = article["title"]
                 content = article["content"]
@@ -323,7 +378,7 @@ async def publish_posts(body: PublishRequest):
             else:
                 failed_count += 1
 
-            db_rows.append((body.client_id, body.client_domain, d["id"], title, content, wp_url, status, body.batch_tag))
+            db_rows.append((body.client_id, body.client_domain, d["id"], title, content, wp_url, status, body.batch_tag, body.topic or ""))
             results.append({
                 "domain": d["domain"],
                 "url": wp_url,
@@ -332,15 +387,21 @@ async def publish_posts(body: PublishRequest):
             })
         except Exception as e:
             failed_count += 1
-            db_rows.append((body.client_id, body.client_domain, d["id"], body.title, body.content, "", "failed", body.batch_tag))
+            db_rows.append((body.client_id, body.client_domain, d["id"], body.title, body.content, "", "failed", body.batch_tag, body.topic or ""))
             results.append({"domain": d["domain"], "url": "", "status": "failed", "error": str(e)})
+
+        # Drip delay between domains (anti-footprint)
+        if use_drip and idx < len(domains) - 1:
+            delay = random.randint(drip_min, drip_max)
+            logger.info(f"[DRIP] Waiting {delay}s before next domain ({idx + 2}/{len(domains)})")
+            await asyncio.sleep(delay)
 
     # Single DB write for all domains — much faster than one connection per domain
     if db_rows:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.executemany(
                 """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                   wp_post_url, status, batch_tag) VALUES (?,?,?,?,?,?,?,?)""",
+                   wp_post_url, status, batch_tag, keyword) VALUES (?,?,?,?,?,?,?,?,?)""",
                 db_rows,
             )
             await db.commit()
@@ -365,6 +426,20 @@ async def _process_one_domain(
     """Generate article + publish to one domain. Returns (sse_item, db_row)."""
     try:
         if body.unique_per_domain and body.topic:
+            # Fetch published posts for interlinking
+            _published_posts = []
+            try:
+                async with aiosqlite.connect(DB_PATH) as _db:
+                    async with _db.execute(
+                        """SELECT title, COALESCE(NULLIF(keyword,''), title) AS keyword, wp_post_url AS url FROM posts
+                           WHERE my_domain_id = ? AND status = 'published' AND wp_post_url != ''
+                           ORDER BY created_at DESC LIMIT 30""",
+                        (d["id"],)
+                    ) as _cur:
+                        _published_posts = [{"title": r[0] or "", "keyword": r[1] or "", "url": r[2]} for r in await _cur.fetchall()]
+            except Exception as e:
+                logger.warning(f"[PUBLISH-ASYNC] Failed to fetch published posts for domain {d['id']}: {e}")
+
             async with _PUBLISH_SEM:
                 article = await asyncio.wait_for(
                     generate_article(
@@ -375,6 +450,7 @@ async def _process_one_domain(
                         variation_hint=variation,
                         dfs_login=DFS_LOGIN,
                         dfs_password=DFS_PASSWORD,
+                        published_posts=_published_posts,
                     ),
                     timeout=_ARTICLE_TIMEOUT,
                 )
@@ -410,20 +486,20 @@ async def _process_one_domain(
         status = "published" if result.get("success") else "failed"
         wp_url = result.get("url", "")
         item = {"domain": d["domain"], "url": wp_url, "status": status, "error": result.get("error")}
-        db_row = (body.client_id, body.client_domain, d["id"], title, content, wp_url, status, body.batch_tag)
+        db_row = (body.client_id, body.client_domain, d["id"], title, content, wp_url, status, body.batch_tag, body.topic or "")
         return item, db_row
     except asyncio.TimeoutError:
         item = {"domain": d["domain"], "url": "", "status": "failed", "error": "Timeout (>5 min)"}
-        db_row = (body.client_id, body.client_domain, d["id"], body.title, body.content, "", "failed", body.batch_tag)
+        db_row = (body.client_id, body.client_domain, d["id"], body.title, body.content, "", "failed", body.batch_tag, body.topic or "")
         return item, db_row
     except Exception as e:
         item = {"domain": d["domain"], "url": "", "status": "failed", "error": str(e)}
-        db_row = (body.client_id, body.client_domain, d["id"], body.title, body.content, "", "failed", body.batch_tag)
+        db_row = (body.client_id, body.client_domain, d["id"], body.title, body.content, "", "failed", body.batch_tag, body.topic or "")
         return item, db_row
 
 
 async def _run_publish_job(job_id: str, body: "PublishRequest", domains: list):
-    """Background task: publish to all domains concurrently (max 3 at a time)."""
+    """Background task: publish to all domains sequentially with drip delays (anti-footprint)."""
     variation_pool = VARIATION_HINTS_PL if body.language == "pl" else VARIATION_HINTS_EN
     # Pre-assign unique variations to each domain
     variations = []
@@ -437,27 +513,58 @@ async def _run_publish_job(job_id: str, body: "PublishRequest", domains: list):
         used.append(v)
         variations.append(v)
 
-    async def _task(d, variation):
+    use_drip = body.drip_delay and len(domains) > 2
+    drip_min, drip_max = _drip_delay_range(len(domains))
+    db_rows = []
+
+    for idx, (d, variation) in enumerate(zip(domains, variations)):
         if job_id not in _publish_jobs:
-            return None
+            break
+
         item, db_row = await _process_one_domain(d, body, variation, job_id)
         _job_append(job_id, item, item["status"])
-        return db_row
+        db_rows.append(db_row)
 
-    tasks = [_task(d, v) for d, v in zip(domains, variations)]
-    db_rows_maybe = await asyncio.gather(*tasks)
-    db_rows = [r for r in db_rows_maybe if r is not None]
+        # Drip delay between domains (anti-footprint)
+        if use_drip and idx < len(domains) - 1:
+            delay = random.randint(drip_min, drip_max)
+            logger.info(f"[DRIP] job={job_id[:8]} waiting {delay}s before domain {idx + 2}/{len(domains)}")
+            # Store drip info so SSE can report it
+            if job_id in _publish_jobs:
+                _publish_jobs[job_id]["drip_wait"] = delay
+            await asyncio.sleep(delay)
+            if job_id in _publish_jobs:
+                _publish_jobs[job_id].pop("drip_wait", None)
 
     if db_rows:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.executemany(
                 """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
-                   wp_post_url, status, batch_tag) VALUES (?,?,?,?,?,?,?,?)""",
+                   wp_post_url, status, batch_tag, keyword) VALUES (?,?,?,?,?,?,?,?,?)""",
                 db_rows,
             )
             await db.commit()
 
     _job_finish(job_id)
+
+    # Send Telegram notification with publish summary
+    try:
+        from services.telegram_service import send_telegram
+        job = _publish_jobs.get(job_id, {})
+        pub_count = job.get("published", 0)
+        fail_count = job.get("failed", 0)
+        total = job.get("total", 0)
+        topic_label = body.topic[:60] if body.topic else "manual"
+        msg = (
+            f"<b>PBN Publish done</b>\n\n"
+            f"Topic: {topic_label}\n"
+            f"Published: <b>{pub_count}/{total}</b>\n"
+        )
+        if fail_count:
+            msg += f"Failed: <b>{fail_count}</b>\n"
+        await send_telegram(msg)
+    except Exception:
+        pass
 
 
 @router.post("/post-async")
@@ -498,7 +605,8 @@ async def publish_progress_sse(job_id: str, request: Request):
             if job is None:
                 yield f"data: {_json.dumps({'error': 'Job not found'})}\n\n"
                 return
-            if job["done"] != last_done:
+            drip_wait = job.get("drip_wait")
+            if job["done"] != last_done or drip_wait:
                 last_done = job["done"]
                 latest = job["results"][-1] if job["results"] else None
                 payload = {
@@ -509,6 +617,8 @@ async def publish_progress_sse(job_id: str, request: Request):
                     "latest": latest,
                     "finished": job["finished"],
                 }
+                if drip_wait:
+                    payload["drip_wait"] = drip_wait
                 yield f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
             if job["finished"]:
                 # Clean up after a short delay to allow client to read final event
@@ -525,3 +635,44 @@ async def publish_progress_sse(job_id: str, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── #12 Sitemap ping after publication ────────────────────────────────────────
+
+@router.post("/ping-sitemap")
+async def ping_sitemap(body: dict):
+    """Ping Google & Bing with sitemap URL after publication."""
+    import httpx
+    domain = body.get("domain", "")
+    if not domain:
+        return {"error": "No domain"}
+    sitemap_url = f"https://{domain}/sitemap.xml" if not domain.startswith("http") else f"{domain}/sitemap.xml"
+    results = {}
+    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+        for name, url in [
+            ("google", f"https://www.google.com/ping?sitemap={sitemap_url}"),
+            ("bing", f"https://www.bing.com/ping?sitemap={sitemap_url}"),
+        ]:
+            try:
+                r = await client.get(url)
+                results[name] = {"status": r.status_code, "ok": r.status_code < 400}
+            except Exception as e:
+                results[name] = {"status": 0, "ok": False, "error": str(e)}
+    return {"domain": domain, "sitemap": sitemap_url, "results": results}
+
+
+# ── #11 Interlinking — get other published posts on same domain ───────────────
+
+@router.get("/domain-posts/{domain_id}")
+async def get_domain_posts(domain_id: int, limit: int = 20):
+    """Return published posts on a domain for interlinking suggestions."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, title, wp_post_url, created_at
+               FROM posts WHERE my_domain_id = ? AND status = 'published' AND wp_post_url != ''
+               ORDER BY created_at DESC LIMIT ?""",
+            (domain_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]

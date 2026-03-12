@@ -326,7 +326,7 @@ async def run_weekly_snapshot():
 
     total = len(rows)
     logger.info(f"[HealthCron] Starting snapshot for {total} domains")
-    snapped_at = datetime.utcnow().isoformat()
+    snapped_at = datetime.now(timezone.utc).isoformat()
 
     # Create progress record
     async with aiosqlite.connect(DB_PATH) as db:
@@ -372,7 +372,7 @@ async def run_weekly_snapshot():
         )
         await db.execute(
             "UPDATE domain_health_snapshot_progress SET done=?, finished=1, finished_at=? WHERE id=?",
-            (total, datetime.utcnow().isoformat(), progress_id)
+            (total, datetime.now(timezone.utc).isoformat(), progress_id)
         )
         await db.commit()
 
@@ -571,7 +571,7 @@ async def run_quick_snapshot():
 
     total = len(rows)
     logger.info(f"[HealthQuick] Starting quick snapshot for {total} domains")
-    snapped_at = datetime.utcnow().isoformat()
+    snapped_at = datetime.now(timezone.utc).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -648,7 +648,7 @@ async def run_quick_snapshot():
         )
         await db.execute(
             "UPDATE domain_health_snapshot_progress SET done=?, finished=1, finished_at=? WHERE id=?",
-            (total, datetime.utcnow().isoformat(), progress_id)
+            (total, datetime.now(timezone.utc).isoformat(), progress_id)
         )
         await db.commit()
 
@@ -705,7 +705,7 @@ async def export_health_csv():
     writer.writeheader()
     writer.writerows(rows)
     output.seek(0)
-    filename = f"domain_health_{datetime.utcnow().strftime('%Y%m%d')}.csv"
+    filename = f"domain_health_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
@@ -730,3 +730,60 @@ async def single_domain_health(domain_id: int):
         from fastapi import HTTPException
         raise HTTPException(404, "Domain not found")
     return await _domain_health_safe(dict(row))
+
+
+@router.post("/{domain_id}/test-wp")
+async def test_wp_connection(domain_id: int):
+    """Test WordPress REST API connection for a single domain. Returns detailed error info."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, domain, wp_login, wp_pass,
+                      COALESCE(http_user,'') as http_user,
+                      COALESCE(http_pass,'') as http_pass
+               FROM my_domains WHERE id = ?""",
+            (domain_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Domain not found")
+    d = dict(row)
+    domain = d["domain"].rstrip("/")
+    if not domain.startswith("http"):
+        domain = "https://" + domain
+    from services.crypto_service import get_plain_password
+    plain_pass = get_plain_password(d['wp_pass'])
+    wp_creds = base64.b64encode(f"{d['wp_login']}:{plain_pass}".encode()).decode()
+    headers = {"Authorization": f"Basic {wp_creds}"}
+    if d.get("http_user"):
+        # httpx handles http auth via auth param
+        pass
+    try:
+        auth = None
+        if d.get("http_user"):
+            auth = httpx.BasicAuth(d["http_user"], d["http_pass"])
+        async with httpx.AsyncClient(timeout=15, verify=False, auth=auth) as client:
+            # Test 1: REST API reachable
+            resp = await client.get(f"{domain}/wp-json/wp/v2/posts?per_page=1&_fields=id,title", headers=headers)
+            if resp.status_code == 200:
+                posts = resp.json()
+                return {
+                    "ok": True,
+                    "domain": d["domain"],
+                    "status_code": 200,
+                    "posts_found": len(posts),
+                    "message": f"WP REST API dziala poprawnie. Znaleziono {len(posts)} post(ow).",
+                }
+            elif resp.status_code == 401:
+                return {"ok": False, "domain": d["domain"], "status_code": 401, "message": "Bledne dane logowania WP (401 Unauthorized)"}
+            elif resp.status_code == 403:
+                return {"ok": False, "domain": d["domain"], "status_code": 403, "message": "Brak dostepu do REST API (403 Forbidden). Sprawdz htpasswd lub wtyczke bezpieczenstwa."}
+            else:
+                return {"ok": False, "domain": d["domain"], "status_code": resp.status_code, "message": f"WP REST API zwrocilo {resp.status_code}: {resp.text[:200]}"}
+    except httpx.ConnectTimeout:
+        return {"ok": False, "domain": d["domain"], "status_code": 0, "message": "Timeout polaczenia (domena nie odpowiada)"}
+    except httpx.ConnectError as e:
+        return {"ok": False, "domain": d["domain"], "status_code": 0, "message": f"Blad polaczenia: {str(e)[:200]}"}
+    except Exception as e:
+        return {"ok": False, "domain": d["domain"], "status_code": 0, "message": f"Blad: {str(e)[:200]}"}

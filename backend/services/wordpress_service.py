@@ -1,12 +1,26 @@
 import base64
+import logging
 import re
 import unicodedata
 from typing import Optional
 import httpx
 
+logger = logging.getLogger(__name__)
+
+# NOTE: verify=False is used for WP connections because many PBN domains use
+# self-signed or misconfigured SSL. This is intentional for this use case.
+logger.info("[WP] SSL verification disabled for WordPress connections (verify=False).")
+
+
+def _get_plain_pass(wp_pass: str) -> str:
+    """Transparently decrypt wp_pass if it is Fernet-encrypted, otherwise return as-is."""
+    from services.crypto_service import get_plain_password
+    return get_plain_password(wp_pass)
+
 
 def _auth_header(wp_login: str, wp_pass: str) -> str:
-    token = base64.b64encode(f"{wp_login}:{wp_pass}".encode()).decode()
+    plain = _get_plain_pass(wp_pass)
+    token = base64.b64encode(f"{wp_login}:{plain}".encode()).decode()
     return f"Basic {token}"
 
 
@@ -121,7 +135,9 @@ async def _upload_image(
         timeout=60,
     )
     if resp.status_code in (200, 201):
-        media_id = resp.json().get("id")
+        media_json = resp.json()
+        media_id = media_json.get("id")
+        source_url = media_json.get("source_url", "")
         # Set alt text, title, caption for SEO
         if media_id and alt_text:
             try:
@@ -133,24 +149,56 @@ async def _upload_image(
                 )
             except Exception:
                 pass
-        return media_id
-    return None
+        return media_id, source_url
+    return None, ""
 
 
-async def _ping_sitemaps(base_url: str, site_auth) -> None:
-    """Ping Google and Bing with updated sitemap after publishing."""
-    sitemap_url = f"{base_url}/sitemap.xml"
-    ping_urls = [
-        f"https://www.google.com/ping?sitemap={sitemap_url}",
-        f"https://www.bing.com/ping?sitemap={sitemap_url}",
-    ]
+async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
+    """Notify search engines about new/updated content via IndexNow + Bing sitemap ping."""
     try:
         async with httpx.AsyncClient(timeout=8, follow_redirects=True) as ping_client:
-            for url in ping_urls:
+            # IndexNow — instant indexing for Bing, Yandex, Seznam, Naver
+            if post_url:
+                clean_domain = base_url.replace("https://", "").replace("http://", "").rstrip("/")
+                indexnow_key = clean_domain.replace(".", "")[:32]
+                # Validate key file exists on domain (required by IndexNow protocol)
+                key_file_url = f"{base_url}/{indexnow_key}.txt"
+                key_file_ok = False
                 try:
-                    await ping_client.get(url)
+                    kf_resp = await ping_client.get(key_file_url)
+                    key_file_ok = kf_resp.status_code == 200 and indexnow_key in (kf_resp.text or "")
                 except Exception:
                     pass
+                if not key_file_ok:
+                    logger.warning(
+                        f"[IndexNow] Key file missing or invalid at {key_file_url} — "
+                        f"create a file '{indexnow_key}.txt' containing '{indexnow_key}' in WP root"
+                    )
+                indexnow_payload = {
+                    "host": clean_domain,
+                    "key": indexnow_key,
+                    "urlList": [post_url],
+                }
+                for endpoint in [
+                    "https://api.indexnow.org/indexnow",
+                    "https://www.bing.com/indexnow",
+                ]:
+                    try:
+                        resp = await ping_client.post(
+                            endpoint,
+                            json=indexnow_payload,
+                            headers={"Content-Type": "application/json"},
+                        )
+                        if resp.status_code in (200, 202):
+                            logger.info(f"[IndexNow] Submitted {post_url} to {endpoint}")
+                    except Exception:
+                        pass
+            # Bing sitemap ping (still supported)
+            sitemap_url = f"{base_url}/sitemap.xml"
+            try:
+                await ping_client.get(f"https://www.bing.com/ping?sitemap={sitemap_url}")
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -181,6 +229,13 @@ async def publish_post(
     alt_text = keyword or title
     image_filename = f"{slug[:50]}.jpg" if slug else "featured.jpg"
 
+    # Excerpt fallback — strip HTML from content intro if excerpt is empty/bad
+    if not excerpt or len(excerpt.strip()) < 20:
+        _plain = re.sub(r'<[^>]+>', ' ', content or "")
+        _plain = re.sub(r'\s+', ' ', _plain).strip()
+        if _plain:
+            excerpt = _plain[:155].rsplit(' ', 1)[0] + "..."
+
     urls_to_try = _base_url(domain)
 
     last_error = None
@@ -188,15 +243,16 @@ async def publish_post(
         for base_url in urls_to_try:
             try:
                 media_id = None
+                og_image_url = ""
                 if image_b64:
                     try:
-                        media_id = await _upload_image(
+                        media_id, og_image_url = await _upload_image(
                             client, base_url, auth, image_b64,
                             filename=image_filename,
                             alt_text=alt_text,
                         )
                     except Exception as img_err:
-                        print(f"Image upload failed for {base_url}: {img_err}")
+                        logger.warning(f"Image upload failed for {base_url}: {img_err}")
 
                 post_data = {
                     "title": title,
@@ -240,15 +296,33 @@ async def publish_post(
                     if tags:
                         kw_with_lsi = ",".join([keyword] + list(tags[:4]))
                     meta["rank_math_focus_keyword"] = kw_with_lsi
+                # OG image from uploaded featured image
+                if og_image_url:
+                    meta["_yoast_wpseo_opengraph-image"] = og_image_url
+                    meta["rank_math_facebook_image"] = og_image_url
+                    meta["_yoast_wpseo_twitter-image"] = og_image_url
                 if meta:
                     post_data["meta"] = meta
 
-                resp = await client.post(
-                    f"{base_url}/wp-json/wp/v2/posts",
-                    json=post_data,
-                    headers=headers,
-                    timeout=30,
-                )
+                # Retry up to 2 times on timeout
+                resp = None
+                for _attempt in range(2):
+                    try:
+                        resp = await client.post(
+                            f"{base_url}/wp-json/wp/v2/posts",
+                            json=post_data,
+                            headers=headers,
+                            timeout=30,
+                        )
+                        break
+                    except httpx.ReadTimeout:
+                        if _attempt == 0:
+                            import asyncio as _asyncio
+                            await _asyncio.sleep(3)
+                            continue
+                        raise
+                if resp is None:
+                    continue
 
                 if resp.status_code in (200, 201):
                     data = resp.json()
@@ -271,7 +345,7 @@ async def publish_post(
                             pass
                     # Ping sitemaps asynchronously (non-blocking)
                     import asyncio as _asyncio
-                    _asyncio.create_task(_ping_sitemaps(base_url, site_auth))
+                    _asyncio.create_task(_ping_sitemaps(base_url, site_auth, post_url=post_url))
                     return {
                         "success": True,
                         "url": post_url,

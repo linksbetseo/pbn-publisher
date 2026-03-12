@@ -55,23 +55,35 @@ _EXPERT_PERSONAS_EN = [
     ("Laura Thompson", "industry consultant and trainer"),
 ]
 
-# ── Style CSS inline ───────────────────────────────────────────────────────────
-_STYLE_TAKEAWAYS   = 'style="background:#f0f7ff;border-left:4px solid #1a73e8;padding:16px 20px;margin:24px 0;border-radius:0 8px 8px 0;"'
-_STYLE_PRO_TIP     = 'style="background:#fff8e1;border-left:4px solid #f9a825;padding:14px 18px;margin:20px 0;border-radius:0 8px 8px 0;"'
-_STYLE_BLOCKQUOTE  = 'style="background:#f8f9fa;border-left:4px solid #34a853;padding:16px 20px;margin:24px 0;font-style:italic;border-radius:0 8px 8px 0;"'
-_STYLE_UPDATE      = 'style="background:#e8f5e9;border:1px solid #a5d6a7;padding:10px 16px;margin:0 0 24px 0;border-radius:6px;font-size:0.9em;color:#2e7d32;"'
-_STYLE_STATS       = 'style="background:#fafafa;border:1px solid #e0e0e0;padding:20px;margin:24px 0;border-radius:8px;"'
-_STYLE_TABLE       = 'style="width:100%;border-collapse:collapse;margin:20px 0;"'
-_STYLE_TH          = 'style="background:#1a73e8;color:#fff;padding:10px 14px;text-align:left;"'
-_STYLE_TD          = 'style="padding:10px 14px;border-bottom:1px solid #e0e0e0;"'
-_STYLE_TR_ALT      = 'style="background:#f8f9fa;"'
-_STYLE_CHECKLIST   = 'style="background:#fff;border:1px solid #e0e0e0;padding:20px;margin:24px 0;border-radius:8px;"'
-_STYLE_WARNING     = 'style="background:#fff3e0;border-left:4px solid #e65100;padding:14px 18px;margin:20px 0;border-radius:0 8px 8px 0;"'
-_STYLE_QUICK_ANS   = 'style="background:#e8f5e9;border:2px solid #43a047;padding:16px 20px;margin:24px 0;border-radius:8px;"'
-_STYLE_DID_KNOW    = 'style="background:#f3e5f5;border-left:4px solid #7b1fa2;padding:14px 18px;margin:20px 0;border-radius:0 8px 8px 0;"'
-_STYLE_TIME        = 'style="background:#e3f2fd;border:1px solid #90caf9;padding:12px 18px;margin:20px 0;border-radius:8px;display:flex;gap:24px;flex-wrap:wrap;"'
-_STYLE_CASE        = 'style="background:#fafafa;border:1px solid #e0e0e0;border-top:4px solid #1a73e8;padding:20px;margin:24px 0;border-radius:0 0 8px 8px;"'
-_STYLE_ACTION      = 'style="background:#e8f5e9;border-left:4px solid #43a047;padding:16px 20px;margin:24px 0;border-radius:0 8px 8px 0;"'
+# ── Anti-footprint CSS variation ──────────────────────────────────────────────
+def _vary(base: int, delta: int = 3) -> int:
+    """Add small random variation to px values for anti-footprint."""
+    return base + random.randint(-delta, delta)
+
+# Base styles — used via _s() which adds small random px variations per article
+_STYLES = {
+    "takeaways":  lambda: f'style="background:#f0f7ff;border-left:4px solid #1a73e8;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "pro_tip":    lambda: f'style="background:#fff8e1;border-left:4px solid #f9a825;padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "blockquote": lambda: f'style="background:#f8f9fa;border-left:4px solid #34a853;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;font-style:italic;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "update":     lambda: f'style="background:#e8f5e9;border:1px solid #a5d6a7;padding:{_vary(10)}px {_vary(16)}px;margin:0 0 {_vary(24)}px 0;border-radius:{_vary(6)}px;font-size:0.9em;color:#2e7d32;"',
+    "stats":      lambda: f'style="background:#fafafa;border:1px solid #e0e0e0;padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
+    "table":      lambda: f'style="width:100%;border-collapse:collapse;margin:{_vary(20)}px 0;"',
+    "th":         lambda: f'style="background:#1a73e8;color:#fff;padding:{_vary(10)}px {_vary(14)}px;text-align:left;"',
+    "td":         lambda: f'style="padding:{_vary(10)}px {_vary(14)}px;border-bottom:1px solid #e0e0e0;"',
+    "tr_alt":     lambda: 'style="background:#f8f9fa;"',
+    "checklist":  lambda: f'style="background:#fff;border:1px solid #e0e0e0;padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
+    "warning":    lambda: f'style="background:#fff3e0;border-left:4px solid #e65100;padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "quick_ans":  lambda: f'style="background:#e8f5e9;border:2px solid #43a047;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
+    "did_know":   lambda: f'style="background:#f3e5f5;border-left:4px solid #7b1fa2;padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "time":       lambda: f'style="background:#e3f2fd;border:1px solid #90caf9;padding:{_vary(12)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:{_vary(8)}px;display:flex;gap:{_vary(24)}px;flex-wrap:wrap;"',
+    "case":       lambda: f'style="background:#fafafa;border:1px solid #e0e0e0;border-top:4px solid #1a73e8;padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 0 {_vary(8)}px {_vary(8)}px;"',
+    "action":     lambda: f'style="background:#e8f5e9;border-left:4px solid #43a047;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+}
+
+def _s(name: str) -> str:
+    """Get a style with anti-footprint variation."""
+    return _STYLES[name]()
+
 
 
 # ── Generatory elementów (pure HTML) ──────────────────────────────────────────
@@ -83,7 +95,7 @@ def _build_toc(sections: list[str], lang_pl: bool) -> str:
         anchor = re.sub(r"[^a-z0-9]+", "-", section.lower().strip())[:50]
         items += f'<li><a href="#{anchor}" style="color:#1a73e8;text-decoration:none;">{section}</a></li>\n'
     return (
-        f'<nav {_STYLE_STATS}>\n'
+        f'<nav {_s("stats")}>\n'
         f'<strong style="display:block;margin-bottom:10px;">{heading}</strong>\n'
         f'<ol style="margin:0;padding-left:20px;">\n{items}</ol>\n'
         f'</nav>\n'
@@ -111,7 +123,7 @@ def _build_key_takeaways(points: list[str], lang_pl: bool) -> str:
     sub = "Po przeczytaniu tego artykułu dowiesz się:" if lang_pl else "After reading this article you will know:"
     items = "".join(f"<li>{p}</li>\n" for p in points)
     return (
-        f'<div {_STYLE_TAKEAWAYS}>\n'
+        f'<div {_s("takeaways")}>\n'
         f'<strong style="font-size:1.05em;">✓ {heading}</strong>\n'
         f'<p style="margin:8px 0 4px;color:#555;">{sub}</p>\n'
         f'<ul style="margin:0;padding-left:20px;">\n{items}</ul>\n'
@@ -121,7 +133,7 @@ def _build_key_takeaways(points: list[str], lang_pl: bool) -> str:
 
 def _build_expert_quote(quote: str, name: str, role: str) -> str:
     return (
-        f'<blockquote {_STYLE_BLOCKQUOTE}>\n'
+        f'<blockquote {_s("blockquote")}>\n'
         f'<p style="margin:0 0 10px;">"{quote}"</p>\n'
         f'<footer style="font-size:0.9em;font-style:normal;color:#555;">'
         f'— <strong>{name}</strong>, {role}</footer>\n'
@@ -130,7 +142,7 @@ def _build_expert_quote(quote: str, name: str, role: str) -> str:
 
 
 def _build_pro_tip(tip: str, lang_pl: bool) -> str:
-    return f'<div {_STYLE_PRO_TIP}>\n<strong>💡 Pro Tip:</strong> {tip}\n</div>\n'
+    return f'<div {_s("pro_tip")}>\n<strong>💡 Pro Tip:</strong> {tip}\n</div>\n'
 
 
 def _build_stats_block(stats: list[tuple[str, str]], lang_pl: bool) -> str:
@@ -143,7 +155,7 @@ def _build_stats_block(stats: list[tuple[str, str]], lang_pl: bool) -> str:
             f'<span style="color:#555;">{desc}</span>'
             f'</div>\n'
         )
-    return f'<div {_STYLE_STATS}>\n<strong style="display:block;margin-bottom:12px;">{heading}</strong>\n{rows}</div>\n'
+    return f'<div {_s("stats")}>\n<strong style="display:block;margin-bottom:12px;">{heading}</strong>\n{rows}</div>\n'
 
 
 def _build_comparison_table(rows: list[dict], lang_pl: bool) -> str:
@@ -153,22 +165,22 @@ def _build_comparison_table(rows: list[dict], lang_pl: bool) -> str:
     h_rating = "Ocena" if lang_pl else "Rating"
     heading  = "Porównanie opcji" if lang_pl else "Options Comparison"
     header = (
-        f'<tr><th {_STYLE_TH}>{h_option}</th><th {_STYLE_TH}>{h_pros}</th>'
-        f'<th {_STYLE_TH}>{h_cons}</th><th {_STYLE_TH}>{h_rating}</th></tr>\n'
+        f'<tr><th {_s("th")}>{h_option}</th><th {_s("th")}>{h_pros}</th>'
+        f'<th {_s("th")}>{h_cons}</th><th {_s("th")}>{h_rating}</th></tr>\n'
     )
     body = ""
     for i, row in enumerate(rows):
-        alt   = f' {_STYLE_TR_ALT}' if i % 2 == 1 else ""
+        alt   = f' {_s("tr_alt")}' if i % 2 == 1 else ""
         stars = "★" * row.get("rating", 4) + "☆" * (5 - row.get("rating", 4))
         body += (
-            f'<tr{alt}><td {_STYLE_TD}><strong>{row["name"]}</strong></td>'
-            f'<td {_STYLE_TD}>{row["pros"]}</td><td {_STYLE_TD}>{row["cons"]}</td>'
-            f'<td {_STYLE_TD}>{stars}</td></tr>\n'
+            f'<tr{alt}><td {_s("td")}><strong>{row["name"]}</strong></td>'
+            f'<td {_s("td")}>{row["pros"]}</td><td {_s("td")}>{row["cons"]}</td>'
+            f'<td {_s("td")}>{stars}</td></tr>\n'
         )
     return (
         f'<h3>{heading}</h3>\n'
         f'<div style="overflow-x:auto;">'
-        f'<table {_STYLE_TABLE}><thead>{header}</thead><tbody>{body}</tbody></table>'
+        f'<table {_s("table")}><thead>{header}</thead><tbody>{body}</tbody></table>'
         f'</div>\n'
     )
 
@@ -184,7 +196,7 @@ def _build_checklist(items: list[str], title: str) -> str:
             f'<span>{item}</span></label></li>\n'
         )
     return (
-        f'<div {_STYLE_CHECKLIST}>\n'
+        f'<div {_s("checklist")}>\n'
         f'<strong style="display:block;margin-bottom:12px;">✅ {title}</strong>\n'
         f'<ul style="margin:0;padding:0;">\n{checks}</ul>\n'
         f'</div>\n'
@@ -200,7 +212,7 @@ def _build_update_box(lang_pl: bool, topic: str = "") -> str:
         text = f"🔄 Artykuł zaktualizowany: <strong>{update_date}</strong> — treść zweryfikowana i uzupełniona o najnowsze informacje."
     else:
         text = f"🔄 Last updated: <strong>{update_date}</strong> — content verified and updated with the latest information."
-    return f'<div {_STYLE_UPDATE}>{text}</div>\n'
+    return f'<div {_s("update")}>{text}</div>\n'
 
 
 def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
@@ -208,11 +220,11 @@ def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
         return ""
     heading = "Źródła i dodatkowe informacje" if lang_pl else "Sources & Further Reading"
     items = "".join(
-        f'<li><a href="{url}" rel="nofollow noopener noreferrer" target="_blank">{url}</a></li>\n'
+        f'<li><a href="{url}" rel="noopener noreferrer" target="_blank">{url}</a></li>\n'
         for url in urls[:3]
     )
     return (
-        f'<div {_STYLE_STATS}>\n'
+        f'<div {_s("stats")}>\n'
         f'<strong style="display:block;margin-bottom:10px;">📚 {heading}</strong>\n'
         f'<ul style="margin:0;padding-left:20px;">\n{items}</ul>\n'
         f'</div>\n'
@@ -221,7 +233,7 @@ def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
 
 def _build_warning_box(text: str, lang_pl: bool) -> str:
     label = "⚠️ Częsty błąd" if lang_pl else "⚠️ Common Mistake"
-    return f'<div {_STYLE_WARNING}>\n<strong>{label}:</strong> {text}\n</div>\n'
+    return f'<div {_s("warning")}>\n<strong>{label}:</strong> {text}\n</div>\n'
 
 
 def _build_step_by_step(steps: list[str], title: str, lang_pl: bool = True) -> str:
@@ -233,7 +245,7 @@ def _build_step_by_step(steps: list[str], title: str, lang_pl: bool = True) -> s
             f'<strong style="color:#1a73e8;">{step_label} {i}:</strong> {step}</li>\n'
         )
     return (
-        f'<div {_STYLE_CHECKLIST}>\n'
+        f'<div {_s("checklist")}>\n'
         f'<strong style="display:block;margin-bottom:12px;">📋 {title}</strong>\n'
         f'<ol style="margin:0;padding-left:24px;">\n{items}</ol>\n'
         f'</div>\n'
@@ -243,7 +255,7 @@ def _build_step_by_step(steps: list[str], title: str, lang_pl: bool = True) -> s
 def _build_quick_answer(answer: str, lang_pl: bool) -> str:
     label = "⚡ Szybka odpowiedź" if lang_pl else "⚡ Quick Answer"
     return (
-        f'<div {_STYLE_QUICK_ANS}>\n'
+        f'<div {_s("quick_ans")}>\n'
         f'<strong style="display:block;margin-bottom:8px;">{label}</strong>\n'
         f'<p style="margin:0;">{answer}</p>\n'
         f'</div>\n'
@@ -255,19 +267,19 @@ def _build_cost_table(rows: list[dict], lang_pl: bool) -> str:
     h_cost   = "Koszt" if lang_pl else "Cost"
     h_note   = "Uwagi" if lang_pl else "Notes"
     heading  = "💰 Przegląd kosztów" if lang_pl else "💰 Cost Overview"
-    header = f'<tr><th {_STYLE_TH}>{h_item}</th><th {_STYLE_TH}>{h_cost}</th><th {_STYLE_TH}>{h_note}</th></tr>\n'
+    header = f'<tr><th {_s("th")}>{h_item}</th><th {_s("th")}>{h_cost}</th><th {_s("th")}>{h_note}</th></tr>\n'
     body = ""
     for i, row in enumerate(rows):
-        alt = f' {_STYLE_TR_ALT}' if i % 2 == 1 else ""
+        alt = f' {_s("tr_alt")}' if i % 2 == 1 else ""
         body += (
-            f'<tr{alt}><td {_STYLE_TD}><strong>{row.get("item","")}</strong></td>'
-            f'<td {_STYLE_TD}>{row.get("cost","")}</td>'
-            f'<td {_STYLE_TD}>{row.get("note","")}</td></tr>\n'
+            f'<tr{alt}><td {_s("td")}><strong>{row.get("item","")}</strong></td>'
+            f'<td {_s("td")}>{row.get("cost","")}</td>'
+            f'<td {_s("td")}>{row.get("note","")}</td></tr>\n'
         )
     return (
         f'<h3>{heading}</h3>\n'
         f'<div style="overflow-x:auto;">'
-        f'<table {_STYLE_TABLE}><thead>{header}</thead><tbody>{body}</tbody></table>'
+        f'<table {_s("table")}><thead>{header}</thead><tbody>{body}</tbody></table>'
         f'</div>\n'
     )
 
@@ -285,7 +297,7 @@ def _build_faq_mini(pairs: list[dict], lang_pl: bool) -> str:
             f'</div>\n'
         )
     return (
-        f'<div {_STYLE_STATS}>\n'
+        f'<div {_s("stats")}>\n'
         f'<strong style="display:block;margin-bottom:12px;">{heading}</strong>\n'
         f'{items}'
         f'</div>\n'
@@ -294,7 +306,7 @@ def _build_faq_mini(pairs: list[dict], lang_pl: bool) -> str:
 
 def _build_did_you_know(fact: str, lang_pl: bool) -> str:
     label = "🧠 Czy wiesz, że..." if lang_pl else "🧠 Did You Know?"
-    return f'<div {_STYLE_DID_KNOW}>\n<strong>{label}</strong><p style="margin:8px 0 0;">{fact}</p>\n</div>\n'
+    return f'<div {_s("did_know")}>\n<strong>{label}</strong><p style="margin:8px 0 0;">{fact}</p>\n</div>\n'
 
 
 def _build_tools_list(tools: list[dict], lang_pl: bool) -> str:
@@ -305,7 +317,7 @@ def _build_tools_list(tools: list[dict], lang_pl: bool) -> str:
         desc = tool.get("desc", "")
         items += f'<li style="margin:6px 0;"><strong>{name}</strong> — {desc}</li>\n'
     return (
-        f'<div {_STYLE_STATS}>\n'
+        f'<div {_s("stats")}>\n'
         f'<strong style="display:block;margin-bottom:10px;">{heading}</strong>\n'
         f'<ul style="margin:0;padding-left:20px;">\n{items}</ul>\n'
         f'</div>\n'
@@ -316,7 +328,7 @@ def _build_time_estimate(time_str: str, difficulty: str, lang_pl: bool) -> str:
     t_label = "⏱️ Czas realizacji" if lang_pl else "⏱️ Time Required"
     d_label = "📈 Poziom trudności" if lang_pl else "📈 Difficulty Level"
     return (
-        f'<div {_STYLE_TIME}>\n'
+        f'<div {_s("time")}>\n'
         f'<div><strong>{t_label}:</strong> {time_str}</div>\n'
         f'<div><strong>{d_label}:</strong> {difficulty}</div>\n'
         f'</div>\n'
@@ -326,7 +338,7 @@ def _build_time_estimate(time_str: str, difficulty: str, lang_pl: bool) -> str:
 def _build_case_study(title: str, body: str, result: str, lang_pl: bool) -> str:
     r_label = "Wynik" if lang_pl else "Result"
     return (
-        f'<div {_STYLE_CASE}>\n'
+        f'<div {_s("case")}>\n'
         f'<strong style="display:block;font-size:1.05em;margin-bottom:8px;">📌 Case Study: {title}</strong>\n'
         f'<p style="margin:0 0 8px;">{body}</p>\n'
         f'<p style="margin:0;"><strong>{r_label}:</strong> {result}</p>\n'
@@ -338,15 +350,15 @@ def _build_summary_table(rows: list[dict], lang_pl: bool) -> str:
     h_when   = "Kiedy wybrać" if lang_pl else "When to Choose"
     h_why    = "Dlaczego" if lang_pl else "Why"
     heading  = "📋 Kiedy wybrać jakie rozwiązanie?" if lang_pl else "📋 Which Solution to Choose?"
-    header = f'<tr><th {_STYLE_TH}>{h_when}</th><th {_STYLE_TH}>{h_why}</th></tr>\n'
+    header = f'<tr><th {_s("th")}>{h_when}</th><th {_s("th")}>{h_why}</th></tr>\n'
     body = ""
     for i, row in enumerate(rows):
-        alt = f' {_STYLE_TR_ALT}' if i % 2 == 1 else ""
-        body += f'<tr{alt}><td {_STYLE_TD}><strong>{row.get("when","")}</strong></td><td {_STYLE_TD}>{row.get("why","")}</td></tr>\n'
+        alt = f' {_s("tr_alt")}' if i % 2 == 1 else ""
+        body += f'<tr{alt}><td {_s("td")}><strong>{row.get("when","")}</strong></td><td {_s("td")}>{row.get("why","")}</td></tr>\n'
     return (
         f'<h3>{heading}</h3>\n'
         f'<div style="overflow-x:auto;">'
-        f'<table {_STYLE_TABLE}><thead>{header}</thead><tbody>{body}</tbody></table>'
+        f'<table {_s("table")}><thead>{header}</thead><tbody>{body}</tbody></table>'
         f'</div>\n'
     )
 
@@ -355,7 +367,7 @@ def _build_action_steps(steps: list[str], lang_pl: bool) -> str:
     heading = "🚀 Co zrobić teraz?" if lang_pl else "🚀 Next Steps"
     items = "".join(f'<li style="margin:6px 0;">{s}</li>\n' for s in steps)
     return (
-        f'<div {_STYLE_ACTION}>\n'
+        f'<div {_s("action")}>\n'
         f'<strong style="display:block;margin-bottom:10px;">{heading}</strong>\n'
         f'<ol style="margin:0;padding-left:20px;">\n{items}</ol>\n'
         f'</div>\n'
@@ -365,6 +377,9 @@ def _build_action_steps(steps: list[str], lang_pl: bool) -> str:
 # ── GPT-generowane dane ────────────────────────────────────────────────────────
 
 async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> dict:
+    # Use dynamic model from settings (same as article generation)
+    from services.openai_service import get_gpt_model
+    _enrich_model = await get_gpt_model()
     try:
         if element == "expert_quote":
             persona = random.choice(_EXPERT_PERSONAS_PL if lang_pl else _EXPERT_PERSONAS_EN)
@@ -373,7 +388,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Write a short expert quote (2-3 sentences) about: '{topic}'. Specific, practical. Only the quote, no quotation marks."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.8, max_tokens=120)
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.8, max_tokens=120)
             return {"quote": resp.choices[0].message.content.strip().strip('"\''), "name": persona[0], "role": persona[1]}
 
         elif element == "key_takeaways":
@@ -382,7 +397,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 4 key takeaways from an article about '{topic}'. Each: 1 sentence max 15 words. One line = one point, no numbers."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=150)
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=150)
             points = [p.strip("- •*").strip() for p in resp.choices[0].message.content.strip().split("\n") if p.strip()][:4]
             return {"points": points}
 
@@ -392,7 +407,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 2 practical Pro Tips about '{topic}'. Each: 1-2 sentences, specific advice. Each on separate line, no numbers."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=150)
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=150)
             tips = [t.strip("- •*").strip() for t in resp.choices[0].message.content.strip().split("\n") if t.strip()][:2]
             return {"tips": tips}
 
@@ -402,7 +417,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 4 specific statistics/numerical facts about '{topic}'. JSON format: {{\"stats\": [[\"value\", \"description\"], ...]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=200, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=200, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             stats = []
             for s in raw.get("stats", [])[:4]:
@@ -418,7 +433,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Create comparison table of 3 options/methods for '{topic}'. JSON: list of {{\"name\": str, \"pros\": str, \"cons\": str, \"rating\": int(1-5)}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             rows = raw if isinstance(raw, list) else raw.get("rows", raw.get("options", raw.get("comparison", [])))
             return {"rows": rows[:3]}
@@ -429,7 +444,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Create practical checklist for '{topic}' (6-8 items). JSON: {{\"title\": str, \"items\": [str, ...]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title", "Checklist"), "items": raw.get("items", [])[:8]}
 
@@ -439,7 +454,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 1 most common mistake or pitfall related to '{topic}'. Max 2 sentences, specific."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.6, max_tokens=100)
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.6, max_tokens=100)
             return {"text": resp.choices[0].message.content.strip()}
 
         elif element == "step_by_step":
@@ -448,7 +463,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 5-6 steps to accomplish the task related to '{topic}'. JSON: {{\"title\": str, \"steps\": [str, ...]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title", "Jak to zrobić krok po kroku"), "steps": raw.get("steps", [])[:6]}
 
@@ -458,7 +473,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Write a short, direct answer (2-3 sentences) to 'What is {topic} and how does it work?'. Specific, no preamble."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=120)
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=120)
             return {"answer": resp.choices[0].message.content.strip()}
 
         elif element == "cost_table":
@@ -467,7 +482,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give cost table for '{topic}' (3-4 items). JSON: {{\"rows\": [{{\"item\": str, \"cost\": str, \"note\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=250, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"rows": raw.get("rows", [])[:4]}
 
@@ -477,7 +492,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 3 most common questions with short answers about '{topic}'. JSON: {{\"pairs\": [{{\"q\": str, \"a\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"pairs": raw.get("pairs", [])[:3]}
 
@@ -487,7 +502,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 1 surprising fact about '{topic}'. Max 2 sentences, something most people don't know."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=100)
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=100)
             return {"fact": resp.choices[0].message.content.strip()}
 
         elif element == "tools_list":
@@ -496,7 +511,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 4-5 specific tools or resources useful for '{topic}'. JSON: {{\"tools\": [{{\"name\": str, \"desc\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"tools": raw.get("tools", [])[:5]}
 
@@ -506,7 +521,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"For topic '{topic}' give estimated time and difficulty level. JSON: {{\"time\": str, \"difficulty\": str}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=80, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=80, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"time": raw.get("time",""), "difficulty": raw.get("difficulty","")}
 
@@ -516,7 +531,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Write a short case study related to '{topic}'. JSON: {{\"title\": str, \"body\": str (2 sentences), \"result\": str (1 sentence)}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=200, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=200, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title",""), "body": raw.get("body",""), "result": raw.get("result","")}
 
@@ -526,7 +541,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Create 'when to choose what' table for '{topic}' (3-4 rows). JSON: {{\"rows\": [{{\"when\": str, \"why\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"rows": raw.get("rows", [])[:4]}
 
@@ -536,7 +551,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 4-5 concrete 'next steps' after reading about '{topic}'. JSON: {{\"steps\": [str]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=200, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=200, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             return {"steps": raw.get("steps", [])[:5]}
 
@@ -597,7 +612,7 @@ async def enrich_article(
     # GPT elements pool (exclude guaranteed and source_citations which needs serp_urls)
     GPT_POOL = [e for e in ALL_ELEMENTS if e not in {"update_box", "toc", "source_citations"}]
 
-    gpt_picks = random.sample(GPT_POOL, 2)
+    gpt_picks = random.sample(GPT_POOL, min(3, len(GPT_POOL)))
     chosen = GUARANTEED + gpt_picks
     if serp_urls:
         chosen.append("source_citations")

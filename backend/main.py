@@ -1,7 +1,8 @@
 import csv
+import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 import aiosqlite
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
@@ -11,7 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from config import DB_PATH, CSV_PATH
-from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health, dashboard
+from services.crypto_service import encrypt_password, is_encrypted, get_plain_password
+from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health, dashboard, analytics, deindex, notifications
+
+logger = logging.getLogger(__name__)
 
 APP_USER = os.getenv("APP_USER", "admin")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
@@ -72,7 +76,7 @@ async def import_csv_domains(db: aiosqlite.Connection):
 
     csv_path = CSV_PATH
     if not os.path.exists(csv_path):
-        print(f"CSV not found at {csv_path}, skipping import.")
+        logger.info(f"CSV not found at {csv_path}, skipping import.")
         return
 
     rows_inserted = 0
@@ -86,15 +90,16 @@ async def import_csv_domains(db: aiosqlite.Connection):
                 wp_pass = (row.get("Haslo Aplikacji") or "").strip()
                 if not domain:
                     continue
+                encrypted_pass = encrypt_password(wp_pass)
                 await db.execute(
                     "INSERT INTO my_domains (domain, wp_login, wp_pass, server, active) VALUES (?, ?, ?, ?, 1)",
-                    (domain, wp_login, wp_pass, server),
+                    (domain, wp_login, encrypted_pass, server),
                 )
                 rows_inserted += 1
         await db.commit()
-        print(f"Imported {rows_inserted} domains from CSV.")
+        logger.info(f"Imported {rows_inserted} domains from CSV.")
     except Exception as e:
-        print(f"CSV import error: {e}")
+        logger.error(f"CSV import error: {e}")
 
 
 async def _weekly_cron():
@@ -102,7 +107,7 @@ async def _weekly_cron():
     import asyncio as _asyncio
     from datetime import timedelta
     while True:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         # Next Monday 03:00 UTC
         days_ahead = (7 - now.weekday()) % 7 or 7
         next_run = (now + timedelta(days=days_ahead)).replace(hour=3, minute=0, second=0, microsecond=0)
@@ -111,28 +116,39 @@ async def _weekly_cron():
         try:
             from api.health import run_weekly_snapshot
             count = await run_weekly_snapshot()
-            print(f"[WeeklyCron] Health snapshot done: {count} domains")
+            logger.info(f"[WeeklyCron] Health snapshot done: {count} domains")
         except Exception as e:
-            print(f"[WeeklyCron] Error: {e}")
+            logger.error(f"[WeeklyCron] Error: {e}", exc_info=True)
 
 
 async def _daily_autopilot_cron():
-    """Run autopilot for all active schedules every day at 08:00 UTC."""
+    """Run autopilot for all active schedules daily at a random time between 06:00-11:45 UTC.
+
+    Anti-footprint: each day picks a random base hour (6-10) and adds 0-45 min jitter
+    so that the cron never fires at the exact same time.
+    """
     import asyncio as _asyncio
+    import random as _random
     from datetime import timedelta
     from api.autopilot import run_daily_all
     while True:
-        now = datetime.utcnow()
-        next_run = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc)
+        # Pick random hour 6-10 (inclusive) + random jitter 0-45 minutes
+        rand_hour = _random.randint(6, 10)
+        rand_minute = _random.randint(0, 45)
+        next_run = now.replace(hour=rand_hour, minute=rand_minute, second=0, microsecond=0)
         if next_run <= now:
             next_run += timedelta(days=1)
+            # Re-roll for the new day
+            next_run = next_run.replace(hour=_random.randint(6, 10), minute=_random.randint(0, 45))
         wait_sec = (next_run - now).total_seconds()
+        logger.info(f"[DailyCron] Next autopilot run scheduled at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
         await _asyncio.sleep(wait_sec)
         try:
             await run_daily_all()
-            print(f"[DailyCron] Autopilot triggered at {datetime.utcnow().isoformat()}")
+            logger.info(f"[DailyCron] Autopilot triggered at {datetime.now(timezone.utc).isoformat()}")
         except Exception as e:
-            print(f"[DailyCron] Error: {e}")
+            logger.error(f"[DailyCron] Error: {e}", exc_info=True)
 
 
 async def _date_modified_refresh_cron():
@@ -145,13 +161,13 @@ async def _date_modified_refresh_cron():
 
     # Run every Sunday at 04:00 UTC
     while True:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         days_ahead = (6 - now.weekday()) % 7 or 7  # next Sunday
         next_run = (now + timedelta(days=days_ahead)).replace(hour=4, minute=0, second=0, microsecond=0)
         wait_sec = max(0, (next_run - now).total_seconds())
         await _asyncio.sleep(wait_sec)
         try:
-            cutoff = (datetime.utcnow() - timedelta(days=180)).isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
             async with _aiosqlite.connect(DB_PATH) as db:
                 db.row_factory = _aiosqlite.Row
                 async with db.execute(
@@ -177,55 +193,77 @@ async def _date_modified_refresh_cron():
                     posts_manual = [dict(r) for r in await cur.fetchall()]
             all_posts = posts + posts_manual
 
-            async def _refresh_wp_post(post: dict, table: str) -> bool:
+            async def _refresh_wp_post(hc: _httpx.AsyncClient, post: dict, table: str) -> bool:
                 try:
                     url = post["wp_post_url"]
                     domain = post["domain"].rstrip("/")
                     if not domain.startswith("http"):
                         domain = "https://" + domain
-                    creds = _b64.b64encode(f"{post['wp_login']}:{post['wp_pass']}".encode()).decode()
+                    plain_pass = get_plain_password(post['wp_pass'])
+                    creds = _b64.b64encode(f"{post['wp_login']}:{plain_pass}".encode()).decode()
                     headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
-                    now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
                     slug = url.rstrip("/").split("/")[-1]
-                    async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
-                        search_resp = await hc.get(
-                            f"{domain}/wp-json/wp/v2/posts",
-                            params={"slug": slug, "_fields": "id"},
-                            headers=headers
-                        )
+                    search_resp = await hc.get(
+                        f"{domain}/wp-json/wp/v2/posts",
+                        params={"slug": slug, "_fields": "id"},
+                        headers=headers
+                    )
                     if search_resp.status_code == 200:
                         found = search_resp.json()
                         if found:
                             wp_id = found[0]["id"]
-                            async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
-                                patch_resp = await hc.post(
-                                    f"{domain}/wp-json/wp/v2/posts/{wp_id}",
-                                    json={"date": now_str, "date_gmt": now_str, "modified": now_str},
-                                    headers=headers
-                                )
+                            patch_resp = await hc.post(
+                                f"{domain}/wp-json/wp/v2/posts/{wp_id}",
+                                json={"date": now_str, "date_gmt": now_str, "modified": now_str},
+                                headers=headers
+                            )
                             if patch_resp.status_code in (200, 201):
                                 update_col = "published_at" if table == "domain_keywords" else "created_at"
                                 async with _aiosqlite.connect(DB_PATH) as db:
                                     await db.execute(
                                         f"UPDATE {table} SET {update_col}=? WHERE id=?",
-                                        (datetime.utcnow().isoformat(), post["id"])
+                                        (datetime.now(timezone.utc).isoformat(), post["id"])
                                     )
                                     await db.commit()
                                 return True
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[DateModifiedCron] Failed to refresh {post.get('wp_post_url', '?')}: {e}")
                 return False
 
             refreshed = 0
-            for post in posts:
-                if await _refresh_wp_post(post, "domain_keywords"):
-                    refreshed += 1
-            for post in posts_manual:
-                if await _refresh_wp_post(post, "posts"):
-                    refreshed += 1
-            print(f"[DateModifiedCron] Refreshed {refreshed}/{len(all_posts)} posts")
+            async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
+                for post in posts:
+                    if await _refresh_wp_post(hc, post, "domain_keywords"):
+                        refreshed += 1
+                for post in posts_manual:
+                    if await _refresh_wp_post(hc, post, "posts"):
+                        refreshed += 1
+            logger.info(f"[DateModifiedCron] Refreshed {refreshed}/{len(all_posts)} posts")
         except Exception as e:
-            print(f"[DateModifiedCron] Error: {e}")
+            logger.error(f"[DateModifiedCron] Error: {e}", exc_info=True)
+
+
+async def _weekly_deindex_cron():
+    """Run deindex scan every Wednesday at 05:00 UTC."""
+    import asyncio as _asyncio
+    from datetime import timedelta
+    while True:
+        now = datetime.now(timezone.utc)
+        # Next Wednesday (weekday 2) at 05:00 UTC
+        days_ahead = (2 - now.weekday()) % 7 or 7
+        next_run = (now + timedelta(days=days_ahead)).replace(hour=5, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=7)
+        wait_sec = max(0, (next_run - now).total_seconds())
+        logger.info(f"[DeindexCron] Next scan at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
+        await _asyncio.sleep(wait_sec)
+        try:
+            from api.deindex import run_deindex_scan
+            result = await run_deindex_scan()
+            logger.info(f"[DeindexCron] Scan done: {result['total_checked']} checked, {result['dead']} dead")
+        except Exception as e:
+            logger.error(f"[DeindexCron] Error: {e}", exc_info=True)
 
 
 @asynccontextmanager
@@ -261,6 +299,12 @@ async def lifespan(app: FastAPI):
                 await db.commit()
             except Exception:
                 pass
+        # Migration: keyword column in posts (for interlinking)
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN keyword TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass  # column already exists
         # DB indexes for autopilot performance
         try:
             await db.executescript("""
@@ -280,10 +324,59 @@ async def lifespan(app: FastAPI):
             await db.commit()
         except Exception:
             pass
+        # Migration: encrypt plaintext wp_pass values with Fernet
+        try:
+            async with db.execute(
+                "SELECT id, wp_pass FROM my_domains WHERE wp_pass != '' AND wp_pass IS NOT NULL"
+            ) as cursor:
+                all_rows = await cursor.fetchall()
+            encrypted_count = 0
+            for row_id, wp_pass_val in all_rows:
+                if not is_encrypted(wp_pass_val):
+                    enc = encrypt_password(wp_pass_val)
+                    await db.execute(
+                        "UPDATE my_domains SET wp_pass = ? WHERE id = ?",
+                        (enc, row_id),
+                    )
+                    encrypted_count += 1
+            if encrypted_count > 0:
+                await db.commit()
+                logger.info(f"[Migration] Encrypted {encrypted_count} plaintext WordPress passwords.")
+        except Exception as e:
+            logger.error(f"[Migration] Password encryption error: {e}")
+        # Create deindex_checks table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS deindex_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER,
+                url TEXT NOT NULL,
+                domain TEXT,
+                status_code INTEGER,
+                is_alive INTEGER DEFAULT 1,
+                checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_deindex_checked ON deindex_checks(checked_at)"
+        )
+        # Create settings table (for Telegram config etc.)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        await db.commit()
         # Clean up expired SERP cache entries on startup
         try:
             import time as _time
             await db.execute("DELETE FROM serp_cache WHERE expires_at < ?", (_time.time(),))
+            await db.commit()
+        except Exception:
+            pass  # table may not exist yet on first run
+        # Clean up expired topical map cache entries
+        try:
+            await db.execute("DELETE FROM topical_map_cache WHERE expires_at < ?", (_time.time(),))
             await db.commit()
         except Exception:
             pass  # table may not exist yet on first run
@@ -292,10 +385,12 @@ async def lifespan(app: FastAPI):
     cron_task = _asyncio.create_task(_weekly_cron())
     daily_task = _asyncio.create_task(_daily_autopilot_cron())
     date_mod_task = _asyncio.create_task(_date_modified_refresh_cron())
+    deindex_task = _asyncio.create_task(_weekly_deindex_cron())
     yield
     cron_task.cancel()
     daily_task.cancel()
     date_mod_task.cancel()
+    deindex_task.cancel()
 
 
 app = FastAPI(title="PBN Publisher API", version="1.0.0", lifespan=lifespan)
@@ -308,6 +403,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Simple rate limiter — per IP, max 60 requests per minute for API endpoints
+import time as _time
+_rate_limit_store: dict[str, list[float]] = {}
+_RATE_LIMIT_WINDOW = 60  # seconds
+_RATE_LIMIT_MAX = 60  # requests per window
+_rate_limit_last_cleanup = _time.time()
+# Stricter limits for expensive endpoints (article generation, publishing)
+_RATE_LIMIT_STRICT = {"/api/publish": 10, "/api/content-writer/generate": 10, "/api/autopilot/run": 5}
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    global _rate_limit_last_cleanup
+    path = request.url.path
+    if not path.startswith("/api"):
+        return await call_next(request)
+    client_ip = request.client.host if request.client else "unknown"
+    now = _time.time()
+    # Periodic cleanup of stale IPs (every 5 minutes)
+    if now - _rate_limit_last_cleanup > 300:
+        _rate_limit_last_cleanup = now
+        stale_ips = [ip for ip, hits in _rate_limit_store.items() if not hits or hits[-1] < now - _RATE_LIMIT_WINDOW]
+        for ip in stale_ips:
+            _rate_limit_store.pop(ip, None)
+    hits = _rate_limit_store.get(client_ip, [])
+    # Remove old entries
+    hits = [t for t in hits if t > now - _RATE_LIMIT_WINDOW]
+    # Per-endpoint strict limit for expensive operations
+    max_req = _RATE_LIMIT_MAX
+    for prefix, limit in _RATE_LIMIT_STRICT.items():
+        if path.startswith(prefix):
+            max_req = limit
+            break
+    if len(hits) >= max_req:
+        return Response(
+            content=f'{{"detail":"Too many requests. Max {max_req}/min."}}',
+            status_code=429,
+            media_type="application/json",
+        )
+    hits.append(now)
+    _rate_limit_store[client_ip] = hits
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -365,6 +504,9 @@ app.include_router(content_writer.router)
 app.include_router(autopilot.router)
 app.include_router(health.router)
 app.include_router(dashboard.router)
+app.include_router(analytics.router)
+app.include_router(deindex.router)
+app.include_router(notifications.router)
 
 
 @app.get("/health")

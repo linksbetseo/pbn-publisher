@@ -26,6 +26,8 @@ api.interceptors.response.use(
   err => Promise.reject(err)
 )
 
+export default api
+
 export function setAuthCredentials(user, password) {
   const token = btoa(`${user}:${password}`)
   localStorage.setItem('pbn_auth_token', token)
@@ -83,45 +85,27 @@ export const bulkPublish = {
 
 export const publish = {
   generate: (data) => api.post('/api/publish/generate', data),
+  checkDuplicate: (topic, domainId) => api.get('/api/publish/check-duplicate', { params: { topic, domain_id: domainId } }),
+  pingSitemap: (data) => api.post('/api/publish/ping-sitemap', data),
+  domainPosts: (domainId, limit = 20) => api.get(`/api/publish/domain-posts/${domainId}`, { params: { limit } }),
 }
 
 export const history = {
   list: (params = {}) => api.get('/api/history', { params }),
   stats: () => api.get('/api/history/stats'),
   delete: (id) => api.delete(`/api/history/${id}`),
+  deleteBatch: (batchTag) => api.delete(`/api/history/batch/${encodeURIComponent(batchTag)}`),
   listBatchTags: () => api.get('/api/history/batches'),
   preview: (id) => api.get(`/api/history/${id}/preview`),
   domainStats: () => api.get('/api/history/domain-stats'),
   retryPost: (id) => api.post(`/api/history/${id}/retry-status`),
+  retryAllFailed: () => api.post('/api/history/retry-all-failed'),
+  failedCount: () => api.get('/api/history/failed-count'),
 }
 
 export const dashboard = {
   stats: () => api.get('/api/dashboard/stats').then(r => r.data),
 }
-
-export const dashboardLegacy = {
-  // Kept for reference — replaced by /api/dashboard/stats
-  stats: async () => {
-    const today = new Date().toISOString().slice(0, 10)
-    const [domainsRes, historyStatsRes, todayRes, clientsRes, autopilotRes] = await Promise.all([
-      api.get('/api/domains'),
-      api.get('/api/history/stats'),
-      api.get('/api/history', { params: { limit: 1, offset: 0, status: 'published', date_from: today } }),
-      api.get('/api/clients'),
-      api.get('/api/autopilot/stats').catch(() => ({ data: {} })),
-    ])
-    return {
-      total_domains: domainsRes.data.length,
-      total_clients: clientsRes.data.length,
-      total_published: historyStatsRes.data.published || 0,
-      posts_today: todayRes.data.total || 0,
-      pending_keywords: autopilotRes.data.pending_keywords || 0,
-      active_schedules: autopilotRes.data.active_schedules || 0,
-    }
-  }
-}
-
-export default api
 
 export const topicalMap = {
   generate: (data) => api.post('/api/topical-map', data),
@@ -129,4 +113,24 @@ export const topicalMap = {
 
 export const contentWriter = {
   generate: (data) => api.post('/api/content-writer/generate', data),
+  serpCacheInfo: (keyword) => api.get('/api/content-writer/serp-cache-info', { params: { keyword } }),
+  sendToAutopilot: (data) => api.post('/api/content-writer/send-to-autopilot', data),
+}
+
+export const analytics = {
+  anchorDiversity: (clientDomain) => api.get('/api/analytics/anchor-diversity', { params: { client_domain: clientDomain } }),
+  linkVelocity: () => api.get('/api/analytics/link-velocity'),
+  contentUniqueness: (domainId) => api.get('/api/analytics/content-uniqueness', { params: { my_domain_id: domainId } }),
+}
+
+export const deindex = {
+  scan: () => api.post('/api/deindex/scan'),
+  results: () => api.get('/api/deindex/results'),
+}
+
+export const notifications = {
+  telegramTest: () => api.get('/api/notifications/telegram-test'),
+  getSettings: () => api.get('/api/notifications/settings'),
+  saveTelegram: (data) => api.post('/api/notifications/telegram-config', data),
+  saveGptModel: (model) => api.post('/api/notifications/gpt-model', { model }),
 }

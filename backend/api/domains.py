@@ -3,6 +3,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from typing import Optional, List
 from config import DB_PATH
+from services.crypto_service import encrypt_password
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 
@@ -106,11 +107,12 @@ async def batch_import(body: BatchImportRequest):
             if existing:
                 skipped += 1
                 continue
+            encrypted_pass = encrypt_password(wp_pass)
             await db.execute(
                 """INSERT INTO my_domains
                    (domain, wp_login, wp_pass, server, active, http_user, http_pass, batch_tag, project_id)
                    VALUES (?,?,?,?,1,'','',?,?)""",
-                (domain, wp_login, wp_pass, server, body.batch_tag, body.project_id),
+                (domain, wp_login, encrypted_pass, server, body.batch_tag, body.project_id),
             )
             inserted += 1
         await db.commit()
@@ -136,9 +138,10 @@ async def bulk_import_domains(items: List[DomainImportItem]):
             if item.domain in existing_set:
                 skipped += 1
                 continue
+            encrypted_pass = encrypt_password(item.wp_pass)
             await db.execute(
                 "INSERT INTO my_domains (domain, wp_login, wp_pass, server, active, wp_ok, http_user, http_pass) VALUES (?,?,?,?,?,?,?,?)",
-                (item.domain, item.wp_login, item.wp_pass, item.server, item.active, item.wp_ok,
+                (item.domain, item.wp_login, encrypted_pass, item.server, item.active, item.wp_ok,
                  item.http_user or "", item.http_pass or ""),
             )
             inserted += 1

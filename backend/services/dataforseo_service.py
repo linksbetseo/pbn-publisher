@@ -20,10 +20,15 @@ class DataForSEOClient:
         self.headers = {
             "Authorization": f"Basic {creds}",
             "Content-Type": "application/json",
+            "User-Agent": "PBN-Publisher/1.0",
         }
 
-    async def request(self, endpoint: str, payload: list) -> dict:
+    async def request(self, endpoint: str, payload: list, _client: httpx.AsyncClient = None) -> dict:
         url = f"{self.BASE_URL}/{endpoint}"
+        if _client:
+            resp = await _client.post(url, json=payload, headers=self.headers)
+            resp.raise_for_status()
+            return resp.json()
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(url, json=payload, headers=self.headers)
             resp.raise_for_status()
@@ -54,7 +59,7 @@ class DataForSEOClient:
                         })
         return results[:10]
 
-    async def page_content(self, url: str) -> str:
+    async def page_content(self, url: str, _client: httpx.AsyncClient = None) -> str:
         """Fetch page content via DataForSEO on_page."""
         try:
             data = await self.request(
@@ -64,7 +69,8 @@ class DataForSEOClient:
                     "enable_javascript": False,
                     "load_resources": False,
                     "enable_browser_rendering": False,
-                }]
+                }],
+                _client=_client,
             )
             for task in data.get("tasks", []):
                 for result in task.get("result", []):
@@ -105,7 +111,7 @@ class DataForSEOClient:
                         })
         return keywords
 
-    async def serp_top10_full(self, keyword: str, location_code: int = 2616, language_code: str = "pl") -> dict:
+    async def serp_top10_full(self, keyword: str, location_code: int = 2616, language_code: str = "pl", _client: httpx.AsyncClient = None) -> dict:
         """Fetch SERP with both organic results and PAA (People Also Ask) questions."""
         data = await self.request(
             "serp/google/organic/live/advanced",
@@ -115,7 +121,8 @@ class DataForSEOClient:
                 "language_code": language_code,
                 "device": "desktop",
                 "depth": 10,
-            }]
+            }],
+            _client=_client,
         )
         organic = []
         paa = []

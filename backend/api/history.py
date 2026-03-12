@@ -84,7 +84,15 @@ async def list_history(
         async with db.execute(count_query, params[:-2]) as cursor:
             total = (await cursor.fetchone())[0]
 
-    return {"total": total, "offset": offset, "limit": limit, "posts": [dict(r) for r in rows]}
+    import re as _re
+    posts_out = []
+    for r in rows:
+        d = dict(r)
+        # Compute word count from content (strip HTML tags)
+        plain = _re.sub(r'<[^>]+>', ' ', d.get("content") or "")
+        d["word_count"] = len(plain.split())
+        posts_out.append(d)
+    return {"total": total, "offset": offset, "limit": limit, "posts": posts_out}
 
 
 @router.get("/batches")
@@ -172,6 +180,54 @@ async def delete_post(post_id: int):
     return {"deleted": post_id}
 
 
+@router.post("/retry-all-failed")
+async def retry_all_failed():
+    """Re-publish ALL failed posts to WordPress."""
+    from services.wordpress_service import publish_post as _wp_publish
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT p.*, md.domain, md.wp_login, md.wp_pass,
+                      COALESCE(md.http_user,'') as http_user,
+                      COALESCE(md.http_pass,'') as http_pass
+               FROM posts p
+               LEFT JOIN my_domains md ON md.id = p.my_domain_id
+               WHERE p.status = 'failed' AND md.domain IS NOT NULL AND md.wp_login IS NOT NULL
+               LIMIT 100"""
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    if not rows:
+        return {"retried": 0, "succeeded": 0, "failed": 0, "message": "Brak postów do ponowienia"}
+    succeeded = 0
+    failed = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        for post in rows:
+            try:
+                result = await _wp_publish(
+                    domain=post["domain"],
+                    wp_login=post["wp_login"],
+                    wp_pass=post["wp_pass"],
+                    title=post["title"],
+                    content=post["content"],
+                    keyword=post["title"],
+                    http_user=post.get("http_user", ""),
+                    http_pass=post.get("http_pass", ""),
+                )
+                if result.get("success"):
+                    wp_url = result.get("url", "")
+                    await db.execute(
+                        "UPDATE posts SET status='published', wp_post_url=? WHERE id=?",
+                        (wp_url, post["id"])
+                    )
+                    await db.commit()
+                    succeeded += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+    return {"retried": len(rows), "succeeded": succeeded, "failed": failed}
+
+
 @router.post("/{post_id}/retry-status")
 async def retry_failed_keyword(post_id: int):
     """Re-publish a failed/pending post to WordPress using the stored content."""
@@ -220,3 +276,12 @@ async def retry_failed_keyword(post_id: int):
         return {"updated": post_id, "status": "published", "url": wp_url}
     else:
         raise HTTPException(502, result.get("error", "WP publish failed"))
+
+
+@router.get("/failed-count")
+async def failed_count():
+    """Return count of failed posts (for sidebar badge)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM posts WHERE status='failed'") as cur:
+            count = (await cur.fetchone())[0]
+    return {"count": count}

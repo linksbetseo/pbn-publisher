@@ -13,7 +13,8 @@ from config import OPENAI_API_KEY
 from services.dataforseo_service import DataForSEOClient
 from services.content_enrichments import enrich_article
 # Reuse SERP cache from openai_service to avoid duplicate DataForSEO calls
-from services.openai_service import _serp_cache_get, _serp_cache_set, _build_combined_schema
+from services.article_helpers import serp_cache_get as _serp_cache_get, serp_cache_set as _serp_cache_set
+from services.openai_service import get_gpt_model, _fix_heading_hierarchy
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ async def generate_seo_article(
     dfs_login: str = "",
     dfs_password: str = "",
     use_serp_scrape: bool = True,
+    on_step=None,
 ) -> dict:
     """
     Generate SEO article with:
@@ -135,7 +137,10 @@ async def generate_seo_article(
             url = "https://" + url
         return url
 
+    _step = on_step or (lambda *a: None)
+
     # Fetch SERP data
+    _step(1, "serp", "Analiza SERP top10...")
     serp_context = ""
     paa_questions = []
     serp_urls = []
@@ -216,6 +221,7 @@ WYMAGANIA TECHNICZNE SEO:
 7. Podsumowanie z <ul> kluczowych wniosków
 8. Łączna długość: 1800-2500 słów
 9. '{keyword}' naturalnie 1-2% density
+10. ENCJE NLP: Używaj konkretnych nazw własnych (marki, firmy, produkty, osoby, miejsca, normy, instytucje) powiązanych z tematem. Google NLP rozpoznaje encje — im więcej trafnych nazw własnych, tym lepszy topical authority. Unikaj ogólników typu "eksperci twierdzą" — podaj KTO konkretnie.
 
 LINKOWANIE:
 - Umieść DOKŁADNIE RAZ link do klienta: {main_anchor}
@@ -254,6 +260,7 @@ SEO REQUIREMENTS:
 7. Summary with <ul> of key takeaways
 8. Total length: 1800-2500 words
 9. '{keyword}' naturally at 1-2% density
+10. NLP ENTITIES: Use specific proper nouns (brands, companies, products, people, places, standards, institutions) related to the topic. Google NLP recognizes entities — more relevant proper nouns means better topical authority. Avoid vague phrases like "experts say" — name WHO specifically.
 
 LINKS:
 - Place EXACTLY ONCE: {main_anchor}
@@ -270,10 +277,12 @@ Return JSON with:
 - "tags": list of 5 WP tags (short LSI phrases related to '{keyword}')
 JSON only, no markdown."""
 
+    _step(2, "gpt", "Generowanie artykulu (GPT)...")
+    _active_model = await get_gpt_model()
     for attempt in range(3):
         try:
             response = await client_ai.chat.completions.create(
-                model="gpt-4o-mini",
+                model=_active_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -310,22 +319,12 @@ JSON only, no markdown."""
         return m.group(0)
     content = re.sub(r"<a\s[^>]+>.*?</a>", dedup_link, content, flags=re.DOTALL)
 
-    # ── Schema.org JSON-LD (full @graph: WebPage + Article + BreadcrumbList + FAQPage) ──
+    # Schema.org JSON-LD removed — Yoast/RankMath generate schema automatically.
+    # Injecting JSON-LD in post_content causes duplicate schema issues.
     excerpt = data.get("meta_description", "")
     sections = [re.sub(r"<[^>]+>", "", m).strip() for m in re.findall(r"<h2[^>]*>(.*?)</h2>", content, re.DOTALL)][:8]
-    word_count = len(re.sub(r"<[^>]+>", "", content).split())
-    schema_block = _build_combined_schema(
-        title=title_out,
-        topic=keyword,
-        excerpt=excerpt,
-        faq_html=content,
-        sections=sections,
-        word_count=word_count,
-        domain=client_domain,
-        language=language,
-    )
-    content = schema_block + "\n\n" + content
 
+    _step(3, "enrichment", "Wzbogacanie tresci (TOC, FAQ)...")
     # ── Enrichments (TOC + update_box + 2 random elements) ─────────────────
     lang_pl = language == "pl"
     try:
@@ -340,6 +339,10 @@ JSON only, no markdown."""
     except Exception as e:
         logger.warning(f"[ContentWriter] Enrichment failed: {e}")
 
+    # Fix heading hierarchy (H3 before H2, skipped levels, etc.)
+    content = _fix_heading_hierarchy(content)
+
+    _step(4, "done", "Gotowe!")
     raw_tags = data.get("tags", [])
     tags_out = [t for t in raw_tags if isinstance(t, str) and t.strip()][:5]
 
