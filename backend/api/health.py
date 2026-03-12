@@ -556,6 +556,122 @@ async def trigger_snapshot(background_tasks: BackgroundTasks):
     return {"message": "Snapshot uruchomiony w tle", "already_running": False}
 
 
+async def run_quick_snapshot():
+    """Fast snapshot: DataForSEO + WP only (skip WHOIS). Runs in ~2-3 min for 100 domains."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT md.id, md.domain, md.server, md.active,
+                      COALESCE(md.http_user,'') as http_user,
+                      COALESCE(md.http_pass,'') as http_pass
+               FROM my_domains md WHERE md.active=1"""
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    total = len(rows)
+    logger.info(f"[HealthQuick] Starting quick snapshot for {total} domains")
+    snapped_at = datetime.utcnow().isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO domain_health_snapshot_progress (started_at, total, done, finished) VALUES (?,?,0,0)",
+            (snapped_at, total)
+        )
+        progress_id = cur.lastrowid
+        await db.commit()
+
+    async def _quick_check(row: dict) -> dict:
+        domain = row["domain"]
+        http_user = row.get("http_user", "") or ""
+        http_pass = row.get("http_pass", "") or ""
+        try:
+            metrics, wp_ok = await asyncio.gather(
+                _dfs_domain_metrics(domain),
+                _wp_ping(domain, http_user, http_pass),
+                return_exceptions=True,
+            )
+            if isinstance(metrics, Exception): metrics = {}
+            if isinstance(wp_ok, Exception): wp_ok = False
+            traffic = metrics.get("traffic", 0) or 0
+            keywords = metrics.get("keywords", 0) or 0
+            # Preserve existing WHOIS data from last full snapshot
+            return {"id": row["id"], "domain": domain, "traffic": traffic,
+                    "keywords": keywords, "wp_ok": bool(wp_ok), "health_score": _health_score(traffic, keywords)}
+        except Exception:
+            return {"id": row["id"], "domain": domain, "traffic": 0,
+                    "keywords": 0, "wp_ok": False, "health_score": "weak"}
+
+    results = []
+    BATCH = 15  # larger batches — no slow WHOIS
+    for i in range(0, total, BATCH):
+        batch = rows[i:i + BATCH]
+        batch_results = await asyncio.gather(*[_quick_check(r) for r in batch])
+        results.extend(batch_results)
+        done = min(i + BATCH, total)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE domain_health_snapshot_progress SET done=? WHERE id=?",
+                (done, progress_id)
+            )
+            await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Merge with existing expiry data from last snapshot
+        async with db.execute(
+            """SELECT my_domain_id, expiry_date, days_to_expiry, dr
+               FROM domain_health_snapshots
+               WHERE id IN (SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id)"""
+        ) as cur:
+            existing = {r["my_domain_id"]: dict(r) for r in await cur.fetchall()}
+
+        await db.executemany(
+            """INSERT INTO domain_health_snapshots
+               (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (r["id"], r["domain"], r["traffic"], r["keywords"],
+                 1 if r.get("wp_ok") else 0,
+                 existing.get(r["id"], {}).get("expiry_date"),
+                 existing.get(r["id"], {}).get("days_to_expiry"),
+                 _health_score(r["traffic"], r["keywords"],
+                               existing.get(r["id"], {}).get("days_to_expiry"),
+                               existing.get(r["id"], {}).get("dr")),
+                 existing.get(r["id"], {}).get("dr"),
+                 snapped_at)
+                for r in results
+            ]
+        )
+        await db.executemany(
+            "UPDATE my_domains SET wp_ok=? WHERE id=?",
+            [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
+        )
+        await db.execute(
+            "UPDATE domain_health_snapshot_progress SET done=?, finished=1, finished_at=? WHERE id=?",
+            (total, datetime.utcnow().isoformat(), progress_id)
+        )
+        await db.commit()
+
+    logger.info(f"[HealthQuick] Quick snapshot done: {len(results)} domains")
+    return len(results)
+
+
+@router.post("/snapshot-quick")
+async def trigger_quick_snapshot(background_tasks: BackgroundTasks):
+    """Fast snapshot: DataForSEO + WP only (no WHOIS). ~2-3 min for 100 domains."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT finished FROM domain_health_snapshot_progress ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+    if row and row["finished"] == 0:
+        return {"message": "Snapshot już trwa w tle", "already_running": True}
+
+    background_tasks.add_task(run_quick_snapshot)
+    return {"message": "Szybki snapshot uruchomiony (DataForSEO + WP)", "already_running": False}
+
+
 @router.get("/export-csv")
 async def export_health_csv():
     """Export latest domain health snapshot as CSV."""

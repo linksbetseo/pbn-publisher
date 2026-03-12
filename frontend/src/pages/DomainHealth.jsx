@@ -381,6 +381,22 @@ function LiveTab() {
     }
   }
 
+  const triggerQuickSnapshot = async () => {
+    if (snapping) return
+    setSnapping(true)
+    setSnapMsg('Szybki snapshot — DataForSEO + WP (~2-3 min)...')
+    try {
+      const res = await api.post('/api/health/snapshot-quick')
+      if (res.data.already_running) {
+        setSnapMsg('Snapshot już działa w tle...')
+      }
+      startPolling()
+    } catch (e) {
+      setSnapMsg('Błąd: ' + (e.response?.data?.detail || e.message))
+      setSnapping(false)
+    }
+  }
+
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortKey(key); setSortDir('desc') }
@@ -482,13 +498,22 @@ function LiveTab() {
             ↓ CSV
           </button>
           <button
+            onClick={triggerQuickSnapshot}
+            disabled={snapping}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-60 transition-colors"
+            title="Szybki snapshot: DataForSEO + WP (bez WHOIS, ~2-3 min)"
+          >
+            {snapping ? <><span className="animate-spin inline-block">⟳</span> W toku...</> : '⚡ Szybki snapshot'}
+          </button>
+          <button
             onClick={triggerSnapshot}
             disabled={snapping}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors"
+            title="Pełny snapshot: WHOIS + DataForSEO + WP + DR (~10-15 min)"
           >
             {snapping
               ? <><span className="animate-spin inline-block">⟳</span> W toku...</>
-              : '📸 Odśwież wszystkie'}
+              : '📸 Pełny snapshot'}
           </button>
         </div>
       </div>
