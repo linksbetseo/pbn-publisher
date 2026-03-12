@@ -869,9 +869,9 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                              sched["my_domain_id"], title, content, wp_url, "published")
                         )
                         await db.execute(
-                            """UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=?
+                            """UPDATE domain_keywords SET status='published', title=?, wp_post_url=?, published_at=?
                                WHERE id=?""",
-                            (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                            (title, wp_url, datetime.utcnow().isoformat(), kw_row["id"])
                         )
                         await db.commit()
                     _results.append({"status": "published", "keyword": keyword, "url": wp_url, "title": title, "image": image_provider})
@@ -1508,8 +1508,8 @@ async def bulk_run_schedules(body: BulkActionRequest):
                                  sched["my_domain_id"], article["title"], article["content"], wp_url, "published")
                             )
                             await db.execute(
-                                "UPDATE domain_keywords SET status='published', wp_post_url=?, published_at=? WHERE id=?",
-                                (wp_url, datetime.utcnow().isoformat(), kw_row["id"])
+                                "UPDATE domain_keywords SET status='published', title=?, wp_post_url=?, published_at=? WHERE id=?",
+                                (article["title"], wp_url, datetime.utcnow().isoformat(), kw_row["id"])
                             )
                             await db.commit()
                     else:

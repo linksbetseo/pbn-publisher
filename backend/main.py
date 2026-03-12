@@ -164,10 +164,7 @@ async def _date_modified_refresh_cron():
                     (cutoff,)
                 ) as cur:
                     posts = [dict(r) for r in await cur.fetchall()]
-
-            # Also pick up manual publisher posts from `posts` table
-            async with _aiosqlite.connect(DB_PATH) as db:
-                db.row_factory = _aiosqlite.Row
+                # Also pick up manual publisher posts from `posts` table (same connection)
                 async with db.execute(
                     """SELECT p.id, p.wp_post_url, md.domain, md.wp_login, md.wp_pass
                        FROM posts p

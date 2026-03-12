@@ -180,7 +180,10 @@ async def list_domains(
         params.append(batch_tag)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    query = f"SELECT * FROM my_domains {where} ORDER BY server, domain"
+    query = (
+        f"SELECT id, domain, server, active, wp_ok, http_user, batch_tag, project_id "
+        f"FROM my_domains {where} ORDER BY server, domain"
+    )
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

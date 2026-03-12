@@ -374,13 +374,13 @@ def _build_combined_schema(
         "inLanguage": language,
     })
 
-    # Article node
-    import random as _schema_rand
+    # Article node — deterministic author per topic (consistent across republish/refresh)
     _author_names = [
         "Anna Kowalska", "Piotr Wiśniewski", "Katarzyna Nowak",
         "Marek Zieliński", "Agnieszka Wróbel", "Tomasz Jabłoński",
     ]
-    author_name = _schema_rand.choice(_author_names)
+    _author_seed = abs(hash(topic)) % len(_author_names) if topic else 0
+    author_name = _author_names[_author_seed]
     article_node = {
         "@type": "Article",
         "@id": article_id,

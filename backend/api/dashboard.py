@@ -19,48 +19,61 @@ async def dashboard_stats():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
-        # Basic counts
-        async with db.execute("SELECT COUNT(*) FROM my_domains WHERE active=1") as cur:
-            total_domains = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM my_domains WHERE wp_ok=1") as cur:
-            wp_ok_domains = (await cur.fetchone())[0]
+        # Batch 1: core counts in a single query
+        async with db.execute(
+            """SELECT
+                SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) as total_domains,
+                SUM(CASE WHEN wp_ok=1 THEN 1 ELSE 0 END) as wp_ok_domains
+               FROM my_domains"""
+        ) as cur:
+            row = await cur.fetchone()
+            total_domains = row["total_domains"] or 0
+            wp_ok_domains = row["wp_ok_domains"] or 0
+
         async with db.execute("SELECT COUNT(*) FROM clients") as cur:
             total_clients = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM posts WHERE status='published'") as cur:
-            total_published = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM posts WHERE status='failed'") as cur:
-            total_failed = (await cur.fetchone())[0]
 
-        # Posts today
+        # Batch 2: post stats in a single query
         async with db.execute(
-            "SELECT COUNT(*) FROM posts WHERE DATE(created_at)=? AND status='published'", (today,)
+            """SELECT
+                SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as total_published,
+                SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as total_failed,
+                SUM(CASE WHEN status='published' AND DATE(created_at)=? THEN 1 ELSE 0 END) as posts_today,
+                SUM(CASE WHEN status='published' AND DATE(created_at)>=? THEN 1 ELSE 0 END) as posts_week,
+                SUM(CASE WHEN status='published' AND DATE(created_at)>=? THEN 1 ELSE 0 END) as posts_month
+               FROM posts""",
+            (today, week_ago, month_ago)
         ) as cur:
-            posts_today = (await cur.fetchone())[0]
-
-        # Posts this week
-        async with db.execute(
-            "SELECT COUNT(*) FROM posts WHERE DATE(created_at)>=? AND status='published'", (week_ago,)
-        ) as cur:
-            posts_week = (await cur.fetchone())[0]
-
-        # Posts this month
-        async with db.execute(
-            "SELECT COUNT(*) FROM posts WHERE DATE(created_at)>=? AND status='published'", (month_ago,)
-        ) as cur:
-            posts_month = (await cur.fetchone())[0]
+            row = await cur.fetchone()
+            total_published = row["total_published"] or 0
+            total_failed = row["total_failed"] or 0
+            posts_today = row["posts_today"] or 0
+            posts_week = row["posts_week"] or 0
+            posts_month = row["posts_month"] or 0
 
         # Autopilot stats
         try:
-            async with db.execute("SELECT COUNT(*) FROM domain_schedules WHERE active=1") as cur:
-                active_schedules = (await cur.fetchone())[0]
-            async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='pending'") as cur:
-                pending_keywords = (await cur.fetchone())[0]
-            async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='published'") as cur:
-                published_keywords = (await cur.fetchone())[0]
-            async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='failed'") as cur:
-                failed_keywords = (await cur.fetchone())[0]
-            async with db.execute("SELECT COUNT(*) FROM domain_schedules WHERE map_generated=1") as cur:
-                maps_generated = (await cur.fetchone())[0]
+            async with db.execute(
+                """SELECT
+                    SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) as active_schedules,
+                    SUM(CASE WHEN map_generated=1 THEN 1 ELSE 0 END) as maps_generated
+                   FROM domain_schedules"""
+            ) as cur:
+                row = await cur.fetchone()
+                active_schedules = row["active_schedules"] or 0
+                maps_generated = row["maps_generated"] or 0
+
+            async with db.execute(
+                """SELECT
+                    SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending_keywords,
+                    SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published_keywords,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed_keywords
+                   FROM domain_keywords"""
+            ) as cur:
+                row = await cur.fetchone()
+                pending_keywords = row["pending_keywords"] or 0
+                published_keywords = row["published_keywords"] or 0
+                failed_keywords = row["failed_keywords"] or 0
         except Exception:
             active_schedules = pending_keywords = published_keywords = failed_keywords = maps_generated = 0
 
