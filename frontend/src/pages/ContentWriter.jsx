@@ -253,6 +253,28 @@ export default function ContentWriter() {
                       <p className="text-sm text-gray-700 bg-gray-50 px-3 py-2 rounded">{result.meta_description}</p>
                     </div>
                   )}
+                  {(result.category || (result.tags && result.tags.length > 0)) && (
+                    <div className="pt-2 border-t border-gray-100">
+                      <label className="text-xs font-medium text-gray-500 uppercase block mb-2">Tagi i kategoria WP</label>
+                      <div className="flex flex-wrap gap-2 items-center">
+                        {result.category && (
+                          <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-semibold px-2 py-1 rounded-full">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" /></svg>
+                            {result.category}
+                          </span>
+                        )}
+                        {result.tags?.map(tag => (
+                          <span key={tag} className="bg-gray-100 text-gray-700 text-xs px-2 py-1 rounded-full">{tag}</span>
+                        ))}
+                        <button
+                          onClick={() => copy([result.category, ...(result.tags || [])].filter(Boolean).join(', '), 'tags')}
+                          className="text-xs text-blue-600 hover:underline ml-auto"
+                        >
+                          {copied === 'tags' ? 'Skopiowano!' : 'Kopiuj'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

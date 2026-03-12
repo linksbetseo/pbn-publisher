@@ -193,15 +193,16 @@ async def _fetch_serp_content(
         word_counts = []
         densities = []
         all_text = ""
-        for url in blog_urls:
-            content = await dfs.page_content(url)
-            if content:
-                wc = _count_words(content)
-                dens = _keyword_density(content, topic)
-                word_counts.append(wc)
-                densities.append(dens)
-                all_text += " " + content
-                parts.append(f"--- {url} ({wc} słów, gęstość KW: {dens}%) ---\n{content[:3000]}")
+        contents = await asyncio.gather(*[dfs.page_content(url) for url in blog_urls], return_exceptions=True)
+        for url, content in zip(blog_urls, contents):
+            if isinstance(content, Exception) or not content:
+                continue
+            wc = _count_words(content)
+            dens = _keyword_density(content, topic)
+            word_counts.append(wc)
+            densities.append(dens)
+            all_text += " " + content
+            parts.append(f"--- {url} ({wc} słów, gęstość KW: {dens}%) ---\n{content[:3000]}")
 
         avg_words = int(sum(word_counts) / len(word_counts)) if word_counts else 0
         avg_density = round(sum(densities) / len(densities), 2) if densities else 0.0
@@ -374,6 +375,12 @@ def _build_combined_schema(
     })
 
     # Article node
+    import random as _schema_rand
+    _author_names = [
+        "Anna Kowalska", "Piotr Wiśniewski", "Katarzyna Nowak",
+        "Marek Zieliński", "Agnieszka Wróbel", "Tomasz Jabłoński",
+    ]
+    author_name = _schema_rand.choice(_author_names)
     article_node = {
         "@type": "Article",
         "@id": article_id,
@@ -383,10 +390,21 @@ def _build_combined_schema(
         "datePublished": now,
         "dateModified": now,
         "inLanguage": language,
-        "author": {"@type": "Organization", "name": publisher_name, "url": base_url or None},
+        "author": {
+            "@type": "Person",
+            "name": author_name,
+            "url": base_url or None,
+        },
         "publisher": {"@type": "Organization", "name": publisher_name, "url": base_url or None},
         "mainEntityOfPage": {"@id": webpage_id},
     }
+    if base_url:
+        article_node["image"] = {
+            "@type": "ImageObject",
+            "url": f"{base_url}/wp-content/uploads/featured.jpg",
+            "width": 1200,
+            "height": 630,
+        }
     if word_count:
         article_node["wordCount"] = word_count
     graph.append(article_node)
@@ -640,6 +658,8 @@ async def generate_article(
     published_posts: Optional[list] = None,  # for internal linking
     domain_fingerprints: Optional[set] = None,  # for dedup check
     layout_variant: Optional[str] = None,  # "faq_top" | "tldr" | "short_answer" | None (random)
+    pillar_page_url: str = "",  # PBN inter-link: supporting → pillar
+    pillar_page_anchor: str = "",  # anchor text for pillar link
 ) -> dict:
     def clean_url(url: str) -> str:
         url = url.strip()
@@ -661,6 +681,9 @@ async def generate_article(
         anchors_info += f', <a href="{clean_url(anchor_url2)}">{anchor_text2}</a>'
     if anchor_text3 and anchor_url3:
         anchors_info += f', <a href="{clean_url(anchor_url3)}">{anchor_text3}</a>'
+    # PBN inter-link: supporting page → pillar page (internal, no rotation)
+    if pillar_page_url and pillar_page_anchor:
+        anchors_info += f', <a href="{clean_url(pillar_page_url)}">{pillar_page_anchor}</a>'
 
     import random as _random
     from datetime import datetime as _dt

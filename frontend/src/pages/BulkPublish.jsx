@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react'
 import { bulkPublish as bulkPublishApi, projects as projectsApi } from '../api/client'
 import api from '../api/client'
-
-const INDEXER_URL =
-  'https://rocketindexer.com/api/index.php?token=544c8414cbd899cabf4816fd0800438c583b42377fff7faca8958ebbc54a88aa&endpoint=submit'
+import { useToast } from '../components/Toast'
 
 const IMAGE_SOURCES = [
   { value: 'none', label: 'Brak obrazka' },
@@ -142,6 +140,7 @@ function TabPublish() {
   const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [indexing, setIndexing] = useState({})
   const [indexResults, setIndexResults] = useState({})
+  const [indexingAll, setIndexingAll] = useState(false)
 
   useEffect(() => {
     bulkPublishApi.listBatches().then((r) => setBatches(r.data)).catch(() => {})
@@ -174,7 +173,8 @@ function TabPublish() {
     setProgress({ done: 0, total: selectedIds.length })
 
     try {
-      const resp = await api.post('/api/publish/post', {
+      // Start async job
+      const startResp = await api.post('/api/publish/post-async', {
         title: keyword,
         content: '',
         my_domain_ids: selectedIds,
@@ -190,9 +190,34 @@ function TabPublish() {
         batch_tag: selectedBatch,
         image_source: imageSource,
       })
-      const res = resp.data
-      setResults(res.results || [])
-      setProgress({ done: selectedIds.length, total: selectedIds.length })
+      const { job_id, total } = startResp.data
+      setProgress({ done: 0, total: total || selectedIds.length })
+
+      // Stream SSE progress
+      const BASE = import.meta.env.VITE_API_URL || ''
+      const token = localStorage.getItem('pbn_auth_token')
+      const url = `${BASE}/api/publish/post-progress/${job_id}`
+      const evtSource = new EventSource(url + (token ? `?_auth=${encodeURIComponent(token)}` : ''))
+
+      await new Promise((resolve) => {
+        evtSource.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data)
+            setProgress({ done: data.done, total: data.total })
+            if (data.latest) {
+              setResults(prev => [...prev, data.latest])
+            }
+            if (data.finished) {
+              evtSource.close()
+              resolve()
+            }
+          } catch {}
+        }
+        evtSource.onerror = () => {
+          evtSource.close()
+          resolve()
+        }
+      })
     } catch (e) {
       setResults([{ domain: '—', status: 'failed', error: e.message, url: '' }])
     } finally {
@@ -200,16 +225,31 @@ function TabPublish() {
     }
   }
 
+  const sendAllToIndexer = async () => {
+    const urls = results.filter(r => r.status === 'published' && r.url).map(r => r.url)
+    if (!urls.length) return
+    setIndexingAll(true)
+    try {
+      const resp = await api.post('/api/history/indexer/submit', { urls })
+      const data = resp.data
+      if (data.success) {
+        addToast(`Wysłano ${urls.length} URL-i do indexera!`, 'success')
+      } else {
+        addToast(data.message || 'Błąd API indexera', 'error')
+      }
+    } catch {
+      addToast('Błąd połączenia z indexerem', 'error')
+    } finally {
+      setIndexingAll(false)
+    }
+  }
+
   const sendToIndexer = async (url, key) => {
     setIndexing((prev) => ({ ...prev, [key]: true }))
     setIndexResults((prev) => ({ ...prev, [key]: null }))
     try {
-      const resp = await fetch(INDEXER_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls: [url] }),
-      })
-      const data = await resp.json()
+      const resp = await api.post('/api/history/indexer/submit', { urls: [url] })
+      const data = resp.data
       if (data.success) {
         setIndexResults((prev) => ({ ...prev, [key]: { ok: true, msg: 'Wysłano!' } }))
       } else {
@@ -415,7 +455,7 @@ function TabPublish() {
       {/* Results table */}
       {results.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-4 text-sm">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-4 text-sm flex-wrap">
             <span className="font-semibold text-gray-700">Wyniki publikacji</span>
             <span className="text-green-600 font-medium">
               OK: {results.filter((r) => r.status === 'published').length}
@@ -423,6 +463,15 @@ function TabPublish() {
             <span className="text-red-500 font-medium">
               Błędy: {results.filter((r) => r.status === 'failed').length}
             </span>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={sendAllToIndexer}
+                disabled={indexingAll || !results.some(r => r.status === 'published' && r.url)}
+                className="px-3 py-1.5 bg-orange-500 text-white rounded-lg text-xs font-medium hover:bg-orange-600 disabled:opacity-40"
+              >
+                {indexingAll ? 'Wysyłam...' : 'Wyślij wszystkie do Indexera'}
+              </button>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -495,6 +544,7 @@ function TabPublish() {
 }
 
 export default function BulkPublish() {
+  const addToast = useToast()
   const [tab, setTab] = useState('import')
   const [projects, setProjects] = useState([])
 

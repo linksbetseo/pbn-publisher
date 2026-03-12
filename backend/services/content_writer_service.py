@@ -10,26 +10,40 @@ import re
 from openai import AsyncOpenAI
 from config import OPENAI_API_KEY
 from services.dataforseo_service import DataForSEOClient
+# Reuse SERP cache from openai_service to avoid duplicate DataForSEO calls
+from services.openai_service import _serp_cache_get, _serp_cache_set
 
 logger = logging.getLogger(__name__)
 
 client_ai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
-async def _scrape_top10_content(keyword: str, dfs_login: str, dfs_password: str) -> list[dict]:
-    """Fetch SERP top10 and scrape content from each page."""
+async def _scrape_top10_content(keyword: str, dfs_login: str, dfs_password: str, language: str = "pl") -> list[dict]:
+    """Fetch SERP top10 and scrape content from each page. Results cached 24h."""
+    loc_code = 2616 if language == "pl" else 2840
+    cache_key = f"cw:{keyword.lower().strip()}:{loc_code}:{language}"
+    cached = await _serp_cache_get(cache_key)
+    if cached and isinstance(cached, list):
+        logger.info(f"[ContentWriter] SERP cache hit for '{keyword}'")
+        return cached
+
     dfs = DataForSEOClient(dfs_login, dfs_password)
     serp = await dfs.serp_top10(keyword)
 
+    # Scrape top 5 in parallel to save time
+    async def _fetch(url: str) -> str:
+        if not url:
+            return ""
+        return await dfs.page_content(url)
+
+    urls = [item.get("url", "") for item in serp[:5]]
+    contents = await asyncio.gather(*[_fetch(u) for u in urls], return_exceptions=True)
+
     enriched = []
-    for item in serp[:5]:  # Scrape top 5 to save API credits
+    for item, content in zip(serp[:5], contents):
         url = item.get("url", "")
-        content = ""
-        if url:
-            try:
-                content = await dfs.page_content(url)
-            except Exception as e:
-                logger.warning(f"Content fetch failed for {url}: {e}")
+        if isinstance(content, Exception) or not content:
+            content = ""
         enriched.append({
             "rank": item["rank"],
             "url": url,
@@ -37,6 +51,8 @@ async def _scrape_top10_content(keyword: str, dfs_login: str, dfs_password: str)
             "description": item.get("description", ""),
             "content_snippet": content[:2000] if content else item.get("description", ""),
         })
+
+    await _serp_cache_set(cache_key, enriched)
     return enriched
 
 
@@ -91,7 +107,7 @@ async def generate_seo_article(
     serp_context = ""
     if use_serp_scrape and dfs_login and dfs_password:
         try:
-            serp_data = await _scrape_top10_content(keyword, dfs_login, dfs_password)
+            serp_data = await _scrape_top10_content(keyword, dfs_login, dfs_password, language=language)
             serp_context = _build_serp_context(serp_data)
             logger.info(f"SERP scrape OK: {len(serp_data)} results for '{keyword}'")
         except Exception as e:
@@ -169,6 +185,8 @@ Zwróć JSON z polami:
 - "title": tytuł SEO (50-60 znaków, zawiera '{keyword}')
 - "meta_description": meta opis (150-160 znaków, CTA na końcu)
 - "content": pełny HTML artykułu
+- "category": 1 główna kategoria bloga (1-3 słowa, np. "Poradniki", "Finanse", "Zdrowie")
+- "tags": lista 5 tagów WP (krótkie frazy LSI, tematycznie powiązane z '{keyword}')
 Tylko JSON, bez markdown."""
     else:
         system_prompt = (
@@ -204,6 +222,8 @@ Return JSON with:
 - "title": SEO title (50-60 chars, contains '{keyword}')
 - "meta_description": meta description (150-160 chars, with CTA at the end)
 - "content": full HTML article
+- "category": 1 main blog category (1-3 words, e.g. "Guides", "Finance", "Health")
+- "tags": list of 5 WP tags (short LSI phrases related to '{keyword}')
 JSON only, no markdown."""
 
     for attempt in range(3):
@@ -246,8 +266,49 @@ JSON only, no markdown."""
         return m.group(0)
     content = re.sub(r"<a\s[^>]+>.*?</a>", dedup_link, content, flags=re.DOTALL)
 
+    # ── Schema.org JSON-LD ────────────────────────────────────────────────
+    faq_items = re.findall(r"<h3[^>]*>(.*?)\??</h3>\s*<p[^>]*>(.*?)</p>", content, re.DOTALL)
+    today = __import__("datetime").date.today().isoformat()
+    schema_graph = [
+        {
+            "@type": "Article",
+            "headline": title_out,
+            "description": data.get("meta_description", ""),
+            "datePublished": today,
+            "dateModified": today,
+            "inLanguage": language,
+            "author": {"@type": "Person", "name": "Redakcja"},
+        }
+    ]
+    if faq_items:
+        schema_graph.append({
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": re.sub(r"<[^>]+>", "", q).strip().rstrip("?") + "?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": re.sub(r"<[^>]+>", "", a).strip(),
+                    },
+                }
+                for q, a in faq_items[:8]
+            ],
+        })
+    schema_block = (
+        '<script type="application/ld+json">'
+        + json.dumps({"@context": "https://schema.org", "@graph": schema_graph}, ensure_ascii=False)
+        + "</script>\n\n"
+    )
+    content = schema_block + content
+
+    raw_tags = data.get("tags", [])
+    tags_out = [t for t in raw_tags if isinstance(t, str) and t.strip()][:5]
+
     return {
         "title": data.get("title", keyword),
         "meta_description": data.get("meta_description", ""),
         "content": content,
+        "category": data.get("category", ""),
+        "tags": tags_out,
     }

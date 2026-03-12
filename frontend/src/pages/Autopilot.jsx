@@ -5,6 +5,7 @@ const STATUS_COLOR = {
   pending: 'bg-yellow-100 text-yellow-700',
   published: 'bg-green-100 text-green-700',
   failed: 'bg-red-100 text-red-700',
+  cannibal_risk: 'bg-orange-100 text-orange-700',
 }
 
 const KW_TYPE_COLOR = {
@@ -32,6 +33,7 @@ function BulkTab() {
   const [minVol, setMinVol] = useState(10)
   const [clientDomain, setClientDomain] = useState('')
   const [anchorText, setAnchorText] = useState('')
+  const [customPrompt, setCustomPrompt] = useState('')
   const [runLimit, setRunLimit] = useState(1)
 
   const [csvImporting, setCsvImporting] = useState(false)
@@ -147,6 +149,7 @@ function BulkTab() {
         min_volume: Number(minVol),
         client_domain: clientDomain,
         anchor_text: anchorText,
+        custom_prompt: customPrompt,
       })
       log(`✓ Utworzono: ${res.data.created}, pominięto: ${res.data.skipped}, błędy: ${res.data.errors}`, 'ok')
       await load()
@@ -353,6 +356,13 @@ function BulkTab() {
                     placeholder="usługi prawne"
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Custom prompt (opcjonalnie)</label>
+                  <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
+                    rows={3}
+                    placeholder="Dodatkowe wskazówki dla AI, np. styl, ton, wymagania..."
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">Posty/dzień</label>
@@ -445,6 +455,8 @@ export default function Autopilot() {
   const [generatingMap, setGeneratingMap] = useState({})
   const [syncingCats, setSyncingCats] = useState({})
   const [catResults, setCatResults] = useState({})
+  const [cannibModal, setCannibModal] = useState(null) // { scheduleId, data } | null
+  const [cannibLoading, setCannibLoading] = useState({})
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -454,6 +466,7 @@ export default function Autopilot() {
     client_domain: '',
     anchor_text: '',
     image_source: 'freepik_stock',
+    custom_prompt: '',
   })
   const [addError, setAddError] = useState('')
   const [adding, setAdding] = useState(false)
@@ -489,7 +502,7 @@ export default function Autopilot() {
         min_volume: Number(newForm.min_volume),
       })
       setShowAdd(false)
-      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, client_domain: '', anchor_text: '', image_source: 'freepik_stock' })
+      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, client_domain: '', anchor_text: '', image_source: 'freepik_stock', custom_prompt: '' })
       await load()
     } catch (e) {
       setAddError(e.response?.data?.detail || e.message)
@@ -502,12 +515,24 @@ export default function Autopilot() {
     setGeneratingMap(g => ({ ...g, [id]: true }))
     try {
       const res = await api.post(`/api/autopilot/schedules/${id}/generate-map`)
-      alert(`Wygenerowano mapę: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz`)
+      setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Mapa gotowa: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz` }] }))
       await load()
     } catch (e) {
-      alert('Błąd generowania mapy: ' + (e.response?.data?.detail || e.message))
+      setRunLog(l => ({ ...l, [id]: [{ status: 'failed', keyword: '—', error: 'Błąd mapy: ' + (e.response?.data?.detail || e.message) }] }))
     } finally {
       setGeneratingMap(g => ({ ...g, [id]: false }))
+    }
+  }
+
+  const checkCannibalization = async (id) => {
+    setCannibLoading(c => ({ ...c, [id]: true }))
+    try {
+      const res = await api.get(`/api/autopilot/schedules/${id}/cannibalization`)
+      setCannibModal({ scheduleId: id, data: res.data })
+    } catch {
+      // silent
+    } finally {
+      setCannibLoading(c => ({ ...c, [id]: false }))
     }
   }
 
@@ -527,6 +552,36 @@ export default function Autopilot() {
     }
   }
 
+  const _pollJob = async (id, job_id) => {
+    let lastCount = 0
+    while (true) {
+      await new Promise(r => setTimeout(r, 3000))
+      const statusRes = await api.get(`/api/autopilot/schedules/${id}/run-status/${job_id}`)
+      const data = statusRes.data
+      const entries = data.results || []
+      if (entries.length > lastCount) {
+        setRunLog(l => ({ ...l, [id]: entries }))
+        lastCount = entries.length
+        setTimeout(() => {
+          const el = logRefs.current[id]
+          if (el) el.scrollTop = el.scrollHeight
+        }, 50)
+      }
+      if (data.done) {
+        if (data.error) {
+          setRunLog(l => ({ ...l, [id]: [...(data.results || []), { status: 'failed', keyword: '—', error: data.error }] }))
+        } else {
+          const finalEntries = data.results || []
+          if (finalEntries.length === 0 && data.message) {
+            finalEntries.push({ status: 'info', keyword: '—', error: data.message })
+          }
+          setRunLog(l => ({ ...l, [id]: [...finalEntries, { done: true, published: data.published, failed: data.failed }] }))
+        }
+        break
+      }
+    }
+  }
+
   const runNow = async (sched, limitOverride = null) => {
     const id = sched.id
     setRunning(r => ({ ...r, [id]: true }))
@@ -534,43 +589,10 @@ export default function Autopilot() {
 
     const limit = limitOverride || sched.posts_per_day
     try {
-      // Start background job
       const res = await api.post(`/api/autopilot/schedules/${id}/run`, { schedule_id: id, limit })
       const { job_id } = res.data
       if (!job_id) throw new Error('Brak job_id w odpowiedzi')
-
-      // Poll every 3s until done
-      let lastCount = 0
-      while (true) {
-        await new Promise(r => setTimeout(r, 3000))
-        const statusRes = await api.get(`/api/autopilot/schedules/${id}/run-status/${job_id}`)
-        const data = statusRes.data
-
-        // Show new results since last poll
-        const entries = data.results || []
-        if (entries.length > lastCount) {
-          setRunLog(l => ({ ...l, [id]: entries }))
-          lastCount = entries.length
-          setTimeout(() => {
-            const el = logRefs.current[id]
-            if (el) el.scrollTop = el.scrollHeight
-          }, 50)
-        }
-
-        if (data.done) {
-          if (data.error) {
-            setRunLog(l => ({ ...l, [id]: [...(data.results || []), { status: 'failed', keyword: '—', error: data.error }] }))
-          } else {
-            const finalEntries = data.results || []
-            if (finalEntries.length === 0 && data.message) {
-              finalEntries.push({ status: 'info', keyword: '—', error: data.message })
-            }
-            setRunLog(l => ({ ...l, [id]: [...finalEntries, { done: true, published: data.published, failed: data.failed }] }))
-          }
-          break
-        }
-      }
-
+      await _pollJob(id, job_id)
       await load()
       if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
     } catch (e) {
@@ -610,6 +632,28 @@ export default function Autopilot() {
     }
   }
 
+  const retryAllFailed = async (sched) => {
+    const id = sched.id
+    const failed_count = keywords[id]?.filter(k => k.status === 'failed').length || 0
+    if (failed_count === 0) { alert('Brak failed keywords do ponowienia.'); return }
+    if (!confirm(`Ponowić ${failed_count} failed keywords dla ${sched.domain}?`)) return
+    setRunning(r => ({ ...r, [id]: true }))
+    try {
+      const res = await api.post(`/api/autopilot/schedules/${id}/retry-failed`)
+      const { job_id, reset } = res.data
+      if (job_id) {
+        setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Zresetowano ${reset} failed → pending. Uruchamiam...` }] }))
+        await _pollJob(id, job_id)
+        await load()
+        if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
+      }
+    } catch (e) {
+      alert('Błąd retry-all: ' + (e.response?.data?.detail || e.message))
+    } finally {
+      setRunning(r => ({ ...r, [id]: false }))
+    }
+  }
+
   const deleteSchedule = async (id) => {
     if (!confirm('Usunąć harmonogram i wszystkie frazy?')) return
     await api.delete(`/api/autopilot/schedules/${id}`)
@@ -641,6 +685,10 @@ export default function Autopilot() {
   const updateImageSource = async (id, val) => {
     await api.patch(`/api/autopilot/schedules/${id}`, { image_source: val })
     await load()
+  }
+
+  const updateCustomPrompt = async (id, val) => {
+    await api.patch(`/api/autopilot/schedules/${id}`, { custom_prompt: val })
   }
 
   const set = (f, v) => setNewForm(n => ({ ...n, [f]: v }))
@@ -761,6 +809,13 @@ export default function Autopilot() {
                 <option value="none">🚫 Bez zdjęcia</option>
               </select>
             </div>
+            <div className="sm:col-span-2 lg:col-span-3">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Custom prompt (opcjonalnie)</label>
+              <textarea value={newForm.custom_prompt} onChange={e => set('custom_prompt', e.target.value)}
+                rows={2}
+                placeholder="Dodatkowe wskazówki dla AI — styl, ton, wymagania branżowe..."
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+            </div>
           </div>
           {addError && <p className="text-red-600 text-xs mt-2">{addError}</p>}
           <div className="flex gap-3 mt-4">
@@ -866,6 +921,16 @@ export default function Autopilot() {
                           <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Publikuję...</>
                         ) : `▶ Uruchom (${sched.posts_per_day})`}
                       </button>
+                      {keywords[sched.id]?.some(k => k.status === 'failed') && (
+                        <button
+                          onClick={() => retryAllFailed(sched)}
+                          disabled={running[sched.id]}
+                          title="Ponów wszystkie failed keywords"
+                          className="px-2 py-1.5 text-red-600 border border-red-200 rounded-lg text-xs hover:bg-red-50 disabled:opacity-50"
+                        >
+                          ↺ Retry failed
+                        </button>
+                      )}
                       <button
                         onClick={() => generateMap(sched.id)}
                         disabled={generatingMap[sched.id]}
@@ -881,6 +946,14 @@ export default function Autopilot() {
                         className="px-2 py-1.5 text-purple-600 border border-purple-200 rounded-lg text-xs hover:bg-purple-50 disabled:opacity-50"
                       >
                         {syncingCats[sched.id] ? '...' : '⚡ Kategorie WP'}
+                      </button>
+                      <button
+                        onClick={() => checkCannibalization(sched.id)}
+                        disabled={cannibLoading[sched.id]}
+                        title="Sprawdź kanibalizację fraz na tej domenie"
+                        className="px-2 py-1.5 text-orange-600 border border-orange-200 rounded-lg text-xs hover:bg-orange-50 disabled:opacity-50"
+                      >
+                        {cannibLoading[sched.id] ? '...' : '⚠ Kanibalizacja'}
                       </button>
                     </>
                   )}
@@ -964,6 +1037,17 @@ export default function Autopilot() {
               {/* Keywords panel */}
               {expandedId === sched.id && (
                 <div className="border-t border-gray-100 p-4">
+                  {/* Custom prompt for this schedule */}
+                  <div className="mb-3">
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Custom prompt (opcjonalnie)</label>
+                    <textarea
+                      defaultValue={sched.custom_prompt || ''}
+                      onBlur={e => updateCustomPrompt(sched.id, e.target.value)}
+                      rows={2}
+                      placeholder="Dodatkowe wskazówki dla AI — styl, ton, wymagania branżowe..."
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                    />
+                  </div>
                   <div className="flex items-center gap-3 mb-3 flex-wrap">
                     <h4 className="text-sm font-semibold text-gray-700">Kolejka fraz</h4>
                     {['', 'pending', 'published', 'failed'].map(s => (
@@ -1046,6 +1130,50 @@ export default function Autopilot() {
         </div>
       )}
       </>}
+
+      {/* Cannibalization modal */}
+      {cannibModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setCannibModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div>
+                <h3 className="font-bold text-gray-900">Kanibalizacja fraz</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {cannibModal.data.collision_groups} grup kolidujących · {cannibModal.data.total_keywords} fraz łącznie
+                </p>
+              </div>
+              <button onClick={() => setCannibModal(null)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+            </div>
+            <div className="overflow-y-auto flex-1 px-6 py-4 space-y-3">
+              {cannibModal.data.collisions.length === 0 ? (
+                <div className="text-center py-8 text-gray-400 text-sm">Brak wykrytych kolizji</div>
+              ) : cannibModal.data.collisions.map((group, i) => (
+                <div key={i} className="border border-orange-100 rounded-xl p-4 bg-orange-50">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-semibold text-orange-800 text-sm">"{group.stem}..."</span>
+                    <div className="flex gap-2 text-xs">
+                      <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded-full">{group.published} opublikowane</span>
+                      <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full">{group.pending} oczekujące</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    {group.keywords.map(kw => (
+                      <div key={kw.id} className="flex items-center gap-2 text-xs">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${kw.status === 'published' ? 'bg-green-500' : kw.status === 'pending' ? 'bg-yellow-400' : 'bg-gray-300'}`} />
+                        <span className="text-gray-800 font-medium flex-1 truncate">{kw.keyword}</span>
+                        <span className="text-gray-400 uppercase">{kw.type}</span>
+                        {kw.url ? (
+                          <a href={kw.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline shrink-0">↗</a>
+                        ) : <span className="text-gray-300">—</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

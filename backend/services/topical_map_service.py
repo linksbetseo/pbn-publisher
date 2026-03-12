@@ -8,14 +8,68 @@ Clustering strategy:
 - Seed "prawo pracy" + fraza "prawo pracy urlop" → differentiator = "urlop"
 - Frazy z tym samym differentiator trafiają do jednego klastra (pillar page)
 """
+import hashlib
+import json as _json
 import logging
 import re
+import time
 import unicodedata
 from collections import Counter, defaultdict
 
+import aiosqlite
+
+from config import DB_PATH
 from services.dataforseo_service import DataForSEOClient
 
 logger = logging.getLogger(__name__)
+
+_MAP_CACHE_TTL = 7 * 86400  # 7 days
+_map_cache_table_created = False
+
+
+async def _ensure_map_cache_table() -> None:
+    global _map_cache_table_created
+    if _map_cache_table_created:
+        return
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS topical_map_cache "
+                "(cache_key TEXT PRIMARY KEY, data_json TEXT, expires_at REAL)"
+            )
+            await db.commit()
+        _map_cache_table_created = True
+    except Exception as e:
+        logger.warning(f"[MapCache] table init failed: {e}")
+
+
+async def _map_cache_get(key: str):
+    await _ensure_map_cache_table()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT data_json FROM topical_map_cache WHERE cache_key=? AND expires_at > ?",
+                (key, time.time())
+            ) as cur:
+                row = await cur.fetchone()
+        if row:
+            return _json.loads(row[0])
+    except Exception:
+        pass
+    return None
+
+
+async def _map_cache_set(key: str, data: dict) -> None:
+    await _ensure_map_cache_table()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO topical_map_cache (cache_key, data_json, expires_at) VALUES (?,?,?)",
+                (key, _json.dumps(data, ensure_ascii=False), time.time() + _MAP_CACHE_TTL)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[MapCache] write failed: {e}")
 
 # Polskie stop words do ignorowania przy klastracji
 STOP_WORDS = {
@@ -173,28 +227,36 @@ async def generate_topical_map(
     max_clusters: int = 8,
     dfs_login: str = "",
     dfs_password: str = "",
+    force_refresh: bool = False,
 ) -> dict:
     """
     Generate topical map: pillar pages + supporting pages.
     Każdy pillar = osobny aspekt/temat seeda.
+    Wyniki cachowane 7 dni w SQLite (drogie DataForSEO calls).
     """
+    cache_key = hashlib.md5(f"{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}".encode()).hexdigest()
+    if not force_refresh:
+        cached = await _map_cache_get(cache_key)
+        if cached:
+            logger.info(f"[TopicalMap] Cache hit for '{seed}'")
+            return cached
+
     client = DataForSEOClient(dfs_login, dfs_password)
 
-    # Fetch keywords
+    # Fetch keywords (parallel — saves ~5-10s vs sequential)
     raw = []
-    try:
-        suggestions = await client.keyword_suggestions(seed, location_code, language_code, 500)
-        raw.extend(suggestions)
-        logger.info(f"[TopicalMap] suggestions: {len(suggestions)}")
-    except Exception as e:
-        logger.warning(f"keyword_suggestions failed: {e}")
-
-    try:
-        ideas = await client.keyword_ideas(seed, location_code, language_code, 300)
-        raw.extend(ideas)
-        logger.info(f"[TopicalMap] ideas: {len(ideas)}")
-    except Exception as e:
-        logger.warning(f"keyword_ideas failed: {e}")
+    import asyncio as _asyncio
+    results_parallel = await _asyncio.gather(
+        client.keyword_suggestions(seed, location_code, language_code, 500),
+        client.keyword_ideas(seed, location_code, language_code, 300),
+        return_exceptions=True,
+    )
+    for kws, name in zip(results_parallel, ["suggestions", "ideas"]):
+        if isinstance(kws, Exception):
+            logger.warning(f"[TopicalMap] {name} failed: {kws}")
+        else:
+            raw.extend(kws)
+            logger.info(f"[TopicalMap] {name}: {len(kws)}")
 
     if not raw:
         raise ValueError(f"Brak wyników DataForSEO dla frazy: {seed}")
@@ -272,10 +334,12 @@ async def generate_topical_map(
             })
             links.append({"source": pid, "target": sid, "strength": 1.0})
 
-    return {
+    result = {
         "seed": seed,
         "total_keywords": len(keywords),
         "pillars": pillars,
         "nodes": nodes,
         "links": links,
     }
+    await _map_cache_set(cache_key, result)
+    return result

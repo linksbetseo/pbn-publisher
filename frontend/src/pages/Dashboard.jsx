@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { dashboard, history as historyApi } from '../api/client'
 import api from '../api/client'
 
@@ -18,8 +18,8 @@ function StatCard({ label, value, color, icon }) {
   )
 }
 
-function PublicationChart({ posts }) {
-  // Build last 14 days count
+function PublicationChart({ trend30d }) {
+  // Build last 14 days from trend_30d data returned by /api/dashboard/stats
   const days = []
   for (let i = 13; i >= 0; i--) {
     const d = new Date()
@@ -28,9 +28,8 @@ function PublicationChart({ posts }) {
   }
   const counts = {}
   days.forEach(d => { counts[d] = 0 })
-  posts.forEach(p => {
-    const day = (p.created_at || '').slice(0, 10)
-    if (counts[day] !== undefined) counts[day]++
+  ;(trend30d || []).forEach(row => {
+    if (counts[row.day] !== undefined) counts[row.day] = row.count
   })
   const values = days.map(d => counts[d])
   const max = Math.max(...values, 1)
@@ -181,26 +180,90 @@ function AutopilotWidget({ autopilotStats }) {
   )
 }
 
+function TopDomainsWidget({ topDomains }) {
+  if (!topDomains || topDomains.length === 0) return null
+  const max = topDomains[0]?.count || 1
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+      <h3 className="text-base font-semibold text-gray-800 mb-4">Top domeny wg liczby artykułów</h3>
+      <div className="space-y-3">
+        {topDomains.map((d, i) => (
+          <div key={d.domain}>
+            <div className="flex justify-between text-sm mb-1">
+              <span className="text-gray-700 truncate max-w-[70%]">{d.domain}</span>
+              <span className="text-gray-500 font-medium">{d.count}</span>
+            </div>
+            <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 rounded-full"
+                style={{ width: `${Math.round((d.count / max) * 100)}%` }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function HealthWidget({ stats }) {
+  if (!stats?.health_distribution) return null
+  const h = stats.health_distribution
+  const items = [
+    { label: 'Dobra', key: 'good', color: 'bg-green-500' },
+    { label: 'Średnia', key: 'medium', color: 'bg-yellow-400' },
+    { label: 'Słaba', key: 'weak', color: 'bg-gray-300' },
+    { label: 'Krytyczna', key: 'critical', color: 'bg-red-500' },
+  ]
+  const total = Object.values(h).reduce((a, b) => a + b, 0) || 1
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold text-gray-800">Zdrowie domen PBN</h3>
+        {stats.expiring_soon > 0 && (
+          <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full font-medium">
+            ⚠ {stats.expiring_soon} wygasa wkrótce
+          </span>
+        )}
+      </div>
+      <div className="flex gap-1 h-4 rounded-full overflow-hidden mb-3">
+        {items.map(it => h[it.key] > 0 && (
+          <div
+            key={it.key}
+            className={`${it.color} transition-all`}
+            style={{ width: `${Math.round((h[it.key] || 0) / total * 100)}%` }}
+            title={`${it.label}: ${h[it.key] || 0}`}
+          />
+        ))}
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {items.map(it => (
+          <div key={it.key} className="text-center">
+            <p className="text-lg font-bold text-gray-800">{h[it.key] || 0}</p>
+            <p className="text-xs text-gray-400">{it.label}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [recentPosts, setRecentPosts] = useState([])
-  const [autopilotStats, setAutopilotStats] = useState(null)
   const [activeJobs, setActiveJobs] = useState([])
   const [loading, setLoading] = useState(true)
   const pollRef = useRef(null)
 
-  const loadAll = () => Promise.all([
+  const loadAll = useCallback(() => Promise.all([
     dashboard.stats(),
-    historyApi.list({ limit: 100, offset: 0, status: 'published' }),
-    api.get('/api/autopilot/stats').catch(() => ({ data: null })),
+    historyApi.list({ limit: 5, offset: 0, status: 'published' }),
     api.get('/api/autopilot/jobs').catch(() => ({ data: [] })),
-  ]).then(([s, p, ap, jobs]) => {
+  ]).then(([s, p, jobs]) => {
     setStats(s)
     setRecentPosts(p.data.posts || [])
-    setAutopilotStats(ap.data)
     const jobList = Array.isArray(jobs.data) ? jobs.data : (jobs.data?.jobs || [])
     setActiveJobs(jobList)
-    // Poll while there are running jobs
     const hasRunning = jobList.some(j => !j.done)
     if (hasRunning && !pollRef.current) {
       pollRef.current = setInterval(() => {
@@ -215,12 +278,12 @@ export default function Dashboard() {
         }).catch(() => {})
       }, 8000)
     }
-  }).catch(console.error)
+  }).catch(() => {}), [])
 
   useEffect(() => {
     loadAll().finally(() => setLoading(false))
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [])
+  }, [loadAll])
 
   return (
     <div className="p-8">
@@ -233,9 +296,13 @@ export default function Dashboard() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
+          {/* KPI row 1 */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-4">
             <StatCard label="Moje domeny" value={stats?.total_domains ?? 0} color="text-blue-600"
               icon={<svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>}
+            />
+            <StatCard label="WP Online" value={stats?.wp_ok_domains ?? 0} color="text-emerald-600"
+              icon={<svg className="w-6 h-6 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" /></svg>}
             />
             <StatCard label="Opublikowane" value={stats?.total_published ?? 0} color="text-green-600"
               icon={<svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>}
@@ -243,48 +310,46 @@ export default function Dashboard() {
             <StatCard label="Dziś" value={stats?.posts_today ?? 0} color="text-purple-600"
               icon={<svg className="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>}
             />
-            <StatCard label="Klienci" value={stats?.total_clients ?? 0} color="text-orange-600"
-              icon={<svg className="w-6 h-6 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>}
+            <StatCard label="Ten tydzień" value={stats?.posts_week ?? 0} color="text-indigo-600"
+              icon={<svg className="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>}
             />
+            <StatCard label="Ten miesiąc" value={stats?.posts_month ?? 0} color="text-orange-600"
+              icon={<svg className="w-6 h-6 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>}
+            />
+          </div>
+
+          {/* KPI row 2 — autopilot */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
             <StatCard label="Autopilot aktywny" value={stats?.active_schedules ?? 0} color="text-cyan-600"
               icon={<svg className="w-6 h-6 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>}
             />
             <StatCard label="Frazy w kolejce" value={stats?.pending_keywords ?? 0} color="text-yellow-600"
               icon={<svg className="w-6 h-6 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>}
             />
+            <StatCard label="Autopilot opublikowane" value={stats?.published_keywords ?? 0} color="text-teal-600"
+              icon={<svg className="w-6 h-6 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+            />
+            <StatCard label="Błędy autopilota" value={stats?.failed_keywords ?? 0} color="text-red-600"
+              icon={<svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>}
+            />
           </div>
 
-          <FailedAlert failedCount={autopilotStats?.failed_keywords} />
+          <FailedAlert failedCount={stats?.failed_keywords} />
           <ActiveJobsProgress jobs={activeJobs} />
 
           <div className="mb-8">
-            <PublicationChart posts={recentPosts} />
+            <PublicationChart trend30d={stats?.trend_30d} />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <HealthWidget stats={stats} />
+            <TopDomainsWidget topDomains={stats?.top_domains} />
           </div>
 
           <RecentPublications posts={recentPosts} />
 
           <div className="mb-8">
-            <AutopilotWidget autopilotStats={autopilotStats} />
-          </div>
-
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-            <h3 className="text-lg font-semibold text-gray-800 mb-4">Jak zacząć</h3>
-            <ol className="space-y-3">
-              {[
-                'Przejdź do <strong>Projekty</strong> i dodaj projekt, klienta oraz domeny klienta',
-                'Przejdź do <strong>Publikuj</strong>, wybierz projekt → klienta → domenę docelową',
-                'Wpisz temat artykułu i wybierz swoje domeny PBN',
-                'Wygeneruj treść i zdjęcie, a następnie opublikuj na wybranych domenach',
-                'Sprawdź wyniki w <strong>Historia</strong>',
-              ].map((step, i) => (
-                <li key={i} className="flex items-start gap-3">
-                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold">
-                    {i + 1}
-                  </span>
-                  <span className="text-gray-600 text-sm" dangerouslySetInnerHTML={{ __html: step }} />
-                </li>
-              ))}
-            </ol>
+            <AutopilotWidget autopilotStats={stats} />
           </div>
         </>
       )}

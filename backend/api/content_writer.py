@@ -1,7 +1,8 @@
 """
 Content Writer API — SEO article generation with SERP top10 analysis.
 """
-from fastapi import APIRouter
+import asyncio
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -12,6 +13,9 @@ router = APIRouter(prefix="/api/content-writer", tags=["content-writer"])
 
 DFS_LOGIN = DATAFORSEO_LOGIN
 DFS_PASSWORD = DATAFORSEO_PASSWORD
+
+# Limit concurrent article generation to avoid overloading OpenAI / DataForSEO
+_generate_sem = asyncio.Semaphore(3)
 
 
 class ContentWriterRequest(BaseModel):
@@ -35,23 +39,24 @@ class ContentWriterRequest(BaseModel):
 @router.post("/generate")
 async def generate_content(req: ContentWriterRequest):
     """Generate SEO article based on keyword + SERP top10 analysis."""
-    result = await generate_seo_article(
-        keyword=req.keyword,
-        client_domain=req.client_domain,
-        anchor_text=req.anchor_text,
-        language=req.language,
-        anchor_text2=req.anchor_text2,
-        anchor_url2=req.anchor_url2,
-        anchor_text3=req.anchor_text3,
-        anchor_url3=req.anchor_url3,
-        custom_prompt=req.custom_prompt,
-        variation_hint=req.variation_hint,
-        pillar_page_url=req.pillar_page_url,
-        pillar_page_anchor=req.pillar_page_anchor,
-        supporting_page_urls=req.supporting_page_urls,
-        tone_of_voice=req.tone_of_voice,
-        dfs_login=DFS_LOGIN,
-        dfs_password=DFS_PASSWORD,
-        use_serp_scrape=req.use_serp_scrape,
-    )
+    async with _generate_sem:
+        result = await generate_seo_article(
+            keyword=req.keyword,
+            client_domain=req.client_domain,
+            anchor_text=req.anchor_text,
+            language=req.language,
+            anchor_text2=req.anchor_text2,
+            anchor_url2=req.anchor_url2,
+            anchor_text3=req.anchor_text3,
+            anchor_url3=req.anchor_url3,
+            custom_prompt=req.custom_prompt,
+            variation_hint=req.variation_hint,
+            pillar_page_url=req.pillar_page_url,
+            pillar_page_anchor=req.pillar_page_anchor,
+            supporting_page_urls=req.supporting_page_urls,
+            tone_of_voice=req.tone_of_voice,
+            dfs_login=DFS_LOGIN,
+            dfs_password=DFS_PASSWORD,
+            use_serp_scrape=req.use_serp_scrape,
+        )
     return result

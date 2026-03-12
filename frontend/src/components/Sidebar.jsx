@@ -112,6 +112,7 @@ const navGroups = [
 
 export default function Sidebar() {
   const [expiringCount, setExpiringCount] = useState(0)
+  const [failedKeywords, setFailedKeywords] = useState(0)
 
   useEffect(() => {
     api.get('/api/health', { params: { limit: 500, offset: 0 } })
@@ -121,6 +122,9 @@ export default function Sidebar() {
         ).length
         setExpiringCount(count)
       })
+      .catch(() => {})
+    api.get('/api/autopilot/stats')
+      .then(res => setFailedKeywords(res.data.failed_keywords || 0))
       .catch(() => {})
   }, [])
 
@@ -154,6 +158,11 @@ export default function Sidebar() {
                       {expiringCount > 9 ? '9+' : expiringCount}
                     </span>
                   )}
+                  {item.to === '/autopilot' && failedKeywords > 0 && (
+                    <span className="bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                      {failedKeywords > 9 ? '9+' : failedKeywords}
+                    </span>
+                  )}
                 </NavLink>
               ))}
             </div>
@@ -161,7 +170,7 @@ export default function Sidebar() {
         ))}
       </nav>
       <div className="p-4 border-t border-slate-700">
-        <p className="text-slate-500 text-xs text-center">v2.0.0</p>
+        <p className="text-slate-500 text-xs text-center">v2.1.0</p>
       </div>
     </div>
   )

@@ -69,6 +69,9 @@ export const domains = {
   list: (params = {}) => api.get('/api/domains', { params }),
   servers: () => api.get('/api/domains/servers'),
   toggle: (id, active) => api.patch(`/api/domains/${id}`, { active }),
+  patch: (id, data) => api.patch(`/api/domains/${id}`, data),
+  delete: (id) => api.delete(`/api/domains/${id}`),
+  bulkDelete: (domainNames) => api.delete('/api/domains/bulk-delete', { data: domainNames }),
   used: (client_id) => api.get('/api/domains/used', { params: { client_id } }),
 }
 
@@ -86,26 +89,32 @@ export const history = {
   list: (params = {}) => api.get('/api/history', { params }),
   stats: () => api.get('/api/history/stats'),
   delete: (id) => api.delete(`/api/history/${id}`),
+  listBatchTags: () => api.get('/api/history/batches'),
+  preview: (id) => api.get(`/api/history/${id}/preview`),
+  domainStats: () => api.get('/api/history/domain-stats'),
+  retryPost: (id) => api.post(`/api/history/${id}/retry-status`),
 }
 
 export const dashboard = {
+  stats: () => api.get('/api/dashboard/stats').then(r => r.data),
+}
+
+export const dashboardLegacy = {
+  // Kept for reference — replaced by /api/dashboard/stats
   stats: async () => {
     const today = new Date().toISOString().slice(0, 10)
     const [domainsRes, historyStatsRes, todayRes, clientsRes, autopilotRes] = await Promise.all([
       api.get('/api/domains'),
       api.get('/api/history/stats'),
-      api.get('/api/history', { params: { limit: 500, offset: 0, status: 'published' } }),
+      api.get('/api/history', { params: { limit: 1, offset: 0, status: 'published', date_from: today } }),
       api.get('/api/clients'),
       api.get('/api/autopilot/stats').catch(() => ({ data: {} })),
     ])
-    const todayPosts = (todayRes.data.posts || []).filter(p =>
-      p.created_at && p.created_at.startsWith(today)
-    ).length
     return {
       total_domains: domainsRes.data.length,
       total_clients: clientsRes.data.length,
       total_published: historyStatsRes.data.published || 0,
-      posts_today: todayPosts,
+      posts_today: todayRes.data.total || 0,
       pending_keywords: autopilotRes.data.pending_keywords || 0,
       active_schedules: autopilotRes.data.active_schedules || 0,
     }

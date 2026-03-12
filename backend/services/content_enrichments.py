@@ -23,6 +23,7 @@ Pula 20 elementów — na długi artykuł losowane 3-4:
 19. summary_table      — tabela podsumowująca (kiedy wybrać co)
 20. action_steps       — box "Kolejne kroki / Co zrobić teraz"
 """
+import json
 import random
 import re
 import asyncio
@@ -400,7 +401,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Give 4 specific statistics/numerical facts about '{topic}'. JSON format: {{\"stats\": [[\"value\", \"description\"], ...]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=200, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             stats = []
             for s in raw.get("stats", [])[:4]:
@@ -417,7 +417,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Create comparison table of 3 options/methods for '{topic}'. JSON: list of {{\"name\": str, \"pros\": str, \"cons\": str, \"rating\": int(1-5)}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             rows = raw if isinstance(raw, list) else raw.get("rows", raw.get("options", raw.get("comparison", [])))
             return {"rows": rows[:3]}
@@ -429,7 +428,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Create practical checklist for '{topic}' (6-8 items). JSON: {{\"title\": str, \"items\": [str, ...]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title", "Checklist"), "items": raw.get("items", [])[:8]}
 
@@ -449,7 +447,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Give 5-6 steps to accomplish the task related to '{topic}'. JSON: {{\"title\": str, \"steps\": [str, ...]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title", "Jak to zrobić krok po kroku"), "steps": raw.get("steps", [])[:6]}
 
@@ -469,7 +466,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Give cost table for '{topic}' (3-4 items). JSON: {{\"rows\": [{{\"item\": str, \"cost\": str, \"note\": str}}]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=250, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"rows": raw.get("rows", [])[:4]}
 
@@ -480,7 +476,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Give 3 most common questions with short answers about '{topic}'. JSON: {{\"pairs\": [{{\"q\": str, \"a\": str}}]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"pairs": raw.get("pairs", [])[:3]}
 
@@ -500,7 +495,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Give 4-5 specific tools or resources useful for '{topic}'. JSON: {{\"tools\": [{{\"name\": str, \"desc\": str}}]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"tools": raw.get("tools", [])[:5]}
 
@@ -511,7 +505,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"For topic '{topic}' give estimated time and difficulty level. JSON: {{\"time\": str, \"difficulty\": str}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=80, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"time": raw.get("time",""), "difficulty": raw.get("difficulty","")}
 
@@ -522,7 +515,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Write a short case study related to '{topic}'. JSON: {{\"title\": str, \"body\": str (2 sentences), \"result\": str (1 sentence)}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=200, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title",""), "body": raw.get("body",""), "result": raw.get("result","")}
 
@@ -533,7 +525,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Create 'when to choose what' table for '{topic}' (3-4 rows). JSON: {{\"rows\": [{{\"when\": str, \"why\": str}}]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"rows": raw.get("rows", [])[:4]}
 
@@ -544,7 +535,6 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Give 4-5 concrete 'next steps' after reading about '{topic}'. JSON: {{\"steps\": [str]}}. JSON only."
             )
             resp = await client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=200, response_format={"type":"json_object"})
-            import json
             raw = json.loads(resp.choices[0].message.content)
             return {"steps": raw.get("steps", [])[:5]}
 
@@ -611,14 +601,21 @@ async def enrich_article(
         chosen.append("source_citations")
     logger.info(f"[Enrichment] Chosen for '{topic}': {chosen}")
 
-    # Fetch GPT data (parallel)
+    # Fetch GPT data (parallel, with one retry on failure)
     no_gpt = {"toc", "update_box", "source_citations"}
     gpt_elements = [e for e in chosen if e not in no_gpt]
-    gpt_tasks = {e: _gpt_enrichment(openai_client, topic, e, lang_pl) for e in gpt_elements}
+
+    async def _gpt_with_retry(element: str) -> dict:
+        result = await _gpt_enrichment(openai_client, topic, element, lang_pl)
+        if not result:
+            await asyncio.sleep(1)
+            result = await _gpt_enrichment(openai_client, topic, element, lang_pl)
+        return result
+
     gpt_results = {}
-    if gpt_tasks:
-        results = await asyncio.gather(*gpt_tasks.values(), return_exceptions=True)
-        for key, result in zip(gpt_tasks.keys(), results):
+    if gpt_elements:
+        results = await asyncio.gather(*[_gpt_with_retry(e) for e in gpt_elements], return_exceptions=True)
+        for key, result in zip(gpt_elements, results):
             gpt_results[key] = {} if isinstance(result, Exception) else result
 
     # Helper: find n-th </p> after h2_index-th </h2>

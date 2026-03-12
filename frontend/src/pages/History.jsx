@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { history as historyApi, clients as clientsApi } from '../api/client'
 import api from '../api/client'
+import { useToast } from '../components/Toast'
 
 const STATUS_COLORS = {
   published: 'bg-green-100 text-green-700',
@@ -9,14 +10,19 @@ const STATUS_COLORS = {
 }
 
 export default function History() {
+  const addToast = useToast()
   const [posts, setPosts] = useState([])
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
   const [clients, setClients] = useState([])
+  const [batchTags, setBatchTags] = useState([])
   const [stats, setStats] = useState({})
   const [loading, setLoading] = useState(true)
   const [clientFilter, setClientFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [batchFilter, setBatchFilter] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
   const [copied, setCopied] = useState(false)
   const [indexing, setIndexing] = useState(false)
   const [indexResult, setIndexResult] = useState(null)
@@ -27,22 +33,43 @@ export default function History() {
     const params = { limit: LIMIT, offset: newOffset }
     if (clientFilter) params.client_id = clientFilter
     if (statusFilter) params.status = statusFilter
-    const [postsRes, statsRes, clientsRes] = await Promise.all([
+    if (batchFilter) params.batch_tag = batchFilter
+    if (dateFrom) params.date_from = dateFrom
+    if (dateTo) params.date_to = dateTo
+    const [postsRes, statsRes, clientsRes, batchesRes] = await Promise.all([
       historyApi.list(params),
       historyApi.stats(),
       clientsApi.list(),
+      historyApi.listBatchTags(),
     ])
     setPosts(postsRes.data.posts || [])
     setTotal(postsRes.data.total || 0)
     setOffset(newOffset)
     setStats(statsRes.data)
     setClients(clientsRes.data)
+    setBatchTags(batchesRes.data || [])
     setLoading(false)
-  }, [clientFilter, statusFilter])
+  }, [clientFilter, statusFilter, batchFilter, dateFrom, dateTo])
 
-  useEffect(() => { load(0) }, [clientFilter, statusFilter])
+  useEffect(() => { load(0) }, [clientFilter, statusFilter, batchFilter, dateFrom, dateTo])
 
   const [retrying, setRetrying] = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [preview, setPreview] = useState(null) // { id, title, content }
+  const [previewLoading, setPreviewLoading] = useState(false)
+
+  const openPreview = async (p) => {
+    setPreview({ id: p.id, title: p.title, content: null })
+    setPreviewLoading(true)
+    try {
+      const res = await historyApi.preview(p.id)
+      setPreview({ id: p.id, title: p.title, content: res.data.content || '' })
+    } catch {
+      setPreview({ id: p.id, title: p.title, content: '<p>Brak podglądu — artykuł nie posiada zapisanej treści.</p>' })
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
 
   const deletePost = async (id) => {
     if (!confirm('Usunąć ten wpis z historii?')) return
@@ -54,9 +81,11 @@ export default function History() {
     setRetrying(id)
     try {
       await api.post(`/api/history/${id}/retry-status`)
+      addToast('Post ponownie opublikowany!', 'success')
       await load(offset)
     } catch (e) {
-      console.error(e)
+      const msg = e?.response?.data?.detail || 'Błąd ponownej publikacji'
+      addToast(msg, 'error')
     } finally {
       setRetrying(null)
     }
@@ -70,21 +99,54 @@ export default function History() {
     })
   }
 
+  const [exportingCsv, setExportingCsv] = useState(false)
+
+  const exportCsv = async () => {
+    setExportingCsv(true)
+    try {
+      // Fetch ALL records matching current filters (not just current page)
+      const params = { limit: 5000, offset: 0 }
+      if (clientFilter) params.client_id = clientFilter
+      if (statusFilter) params.status = statusFilter
+      if (batchFilter) params.batch_tag = batchFilter
+      if (dateFrom) params.date_from = dateFrom
+      if (dateTo) params.date_to = dateTo
+      const res = await historyApi.list(params)
+      const allPosts = res.data.posts || []
+      const rows = [['Data', 'Klient', 'Domena klienta', 'Moja domena', 'Tytuł', 'Status', 'URL', 'Batch']]
+      allPosts.forEach(p => {
+        rows.push([
+          p.created_at ? new Date(p.created_at).toLocaleString('pl-PL') : '',
+          p.client_name || '',
+          p.client_domain || '',
+          p.my_domain || '',
+          (p.title || '').replace(/"/g, '""'),
+          p.status || '',
+          p.wp_post_url || '',
+          p.batch_tag || '',
+        ])
+      })
+      const csv = rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n')
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `historia_${new Date().toISOString().slice(0, 10)}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      setExportingCsv(false)
+    }
+  }
+
   const submitToIndexer = async () => {
     const urls = posts.filter(p => p.wp_post_url).map(p => p.wp_post_url)
     if (urls.length === 0) return
     setIndexing(true)
     setIndexResult(null)
     try {
-      const resp = await fetch(
-        'https://rocketindexer.com/api/index.php?token=544c8414cbd899cabf4816fd0800438c583b42377fff7faca8958ebbc54a88aa&endpoint=submit',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls }),
-        }
-      )
-      const data = await resp.json()
+      const resp = await api.post('/api/history/indexer/submit', { urls })
+      const data = resp.data
       if (data.success) {
         setIndexResult({ ok: true, msg: `Wysłano ${data.data?.submitted ?? urls.length} URL-i. Pozostałe kredyty: ${data.data?.credits_remaining ?? '?'}` })
       } else {
@@ -105,6 +167,16 @@ export default function History() {
       hour: '2-digit', minute: '2-digit',
     })
   }
+
+  const q = searchQuery.toLowerCase()
+  const filteredPosts = q
+    ? posts.filter(p =>
+        (p.title || '').toLowerCase().includes(q) ||
+        (p.wp_post_url || '').toLowerCase().includes(q) ||
+        (p.client_domain || '').toLowerCase().includes(q) ||
+        (p.my_domain || '').toLowerCase().includes(q)
+      )
+    : posts
 
   return (
     <div className="p-8">
@@ -128,7 +200,14 @@ export default function History() {
       </div>
 
       {/* Filters */}
-      <div className="flex gap-3 mb-4">
+      <div className="flex gap-3 mb-4 flex-wrap">
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          placeholder="Szukaj po tytule, URL, domenie..."
+          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[220px]"
+        />
         <select
           value={clientFilter}
           onChange={(e) => setClientFilter(e.target.value)}
@@ -149,6 +228,40 @@ export default function History() {
           <option value="failed">Błędy</option>
           <option value="pending">Oczekujące</option>
         </select>
+        {batchTags.length > 0 && (
+          <select
+            value={batchFilter}
+            onChange={(e) => setBatchFilter(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+          >
+            <option value="">Wszystkie batche</option>
+            {batchTags.map(tag => (
+              <option key={tag} value={tag}>{tag}</option>
+            ))}
+          </select>
+        )}
+        <input
+          type="date"
+          value={dateFrom}
+          onChange={e => setDateFrom(e.target.value)}
+          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          title="Data od"
+        />
+        <input
+          type="date"
+          value={dateTo}
+          onChange={e => setDateTo(e.target.value)}
+          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          title="Data do"
+        />
+        {(dateFrom || dateTo) && (
+          <button
+            onClick={() => { setDateFrom(''); setDateTo('') }}
+            className="px-3 py-2 text-xs text-gray-500 hover:text-gray-800 border border-gray-200 rounded-lg"
+          >
+            Wyczyść daty
+          </button>
+        )}
         <button
           onClick={() => load(offset)}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
@@ -161,6 +274,15 @@ export default function History() {
           className="px-4 py-2 bg-gray-700 text-white rounded-lg text-sm hover:bg-gray-800 disabled:opacity-40"
         >
           {copied ? 'Skopiowano!' : `Kopiuj URL-e (${posts.filter(p => p.wp_post_url).length})`}
+        </button>
+        <button
+          onClick={exportCsv}
+          disabled={exportingCsv || posts.length === 0}
+          className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 disabled:opacity-40 flex items-center gap-2"
+        >
+          {exportingCsv ? (
+            <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Eksportowanie...</>
+          ) : 'Eksport CSV'}
         </button>
         <button
           onClick={submitToIndexer}
@@ -186,9 +308,9 @@ export default function History() {
           <div className="flex items-center justify-center h-40">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
           </div>
-        ) : posts.length === 0 ? (
+        ) : filteredPosts.length === 0 ? (
           <div className="flex items-center justify-center h-40 text-gray-400">
-            Brak wyników
+            Brak wyników{searchQuery ? ` dla "${searchQuery}"` : ''}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -206,14 +328,20 @@ export default function History() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {posts.map((p) => (
+                {filteredPosts.map((p) => (
                   <tr key={p.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(p.created_at)}</td>
                     <td className="px-4 py-3 font-medium text-gray-800">{p.client_name || '—'}</td>
                     <td className="px-4 py-3 text-gray-600 max-w-[120px] truncate">{p.client_domain}</td>
                     <td className="px-4 py-3 text-gray-600 max-w-[120px] truncate">{p.my_domain || '—'}</td>
                     <td className="px-4 py-3 text-gray-800 max-w-[200px]">
-                      <span className="truncate block" title={p.title}>{p.title}</span>
+                      <button
+                        onClick={() => openPreview(p)}
+                        className="truncate block text-left text-blue-700 hover:underline cursor-pointer"
+                        title={p.title}
+                      >
+                        {p.title}
+                      </button>
                     </td>
                     <td className="px-4 py-3">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[p.status] || 'bg-gray-100 text-gray-600'}`}>
@@ -279,6 +407,31 @@ export default function History() {
           </div>
         )}
       </div>
+      {preview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setPreview(null)}>
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col mx-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <h3 className="font-semibold text-gray-900 text-lg truncate pr-4">{preview.title}</h3>
+              <button onClick={() => setPreview(null)} className="text-gray-400 hover:text-gray-700 text-xl font-bold shrink-0">✕</button>
+            </div>
+            <div className="overflow-y-auto flex-1 px-6 py-4">
+              {previewLoading ? (
+                <div className="flex items-center justify-center h-40">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+                </div>
+              ) : (
+                <div
+                  className="text-gray-800 text-sm leading-relaxed [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mb-2 [&_p]:mb-3 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_li]:mb-1 [&_strong]:font-semibold [&_a]:text-blue-600 [&_a]:underline"
+                  dangerouslySetInnerHTML={{ __html: preview.content || '' }}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

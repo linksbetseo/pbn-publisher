@@ -105,8 +105,8 @@ function SnapshotsTab() {
     try {
       const res = await api.get('/api/health/snapshots', { params: { limit: 500 } })
       setSnapshots(res.data)
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // silent — UI shows empty state
     } finally {
       setLoading(false)
     }
@@ -119,8 +119,8 @@ function SnapshotsTab() {
     try {
       await api.post('/api/health/snapshot')
       setTimeout(load, 5000)
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // silent
     } finally {
       setSnapping(false)
     }
@@ -303,8 +303,8 @@ function LiveTab() {
     try {
       const res = await api.get(`/api/health/${domainId}`)
       setDomains(prev => prev.map(d => d.id === domainId ? { ...res.data, from_snapshot: false } : d))
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // silent
     } finally {
       setLiveChecking(prev => ({ ...prev, [domainId]: false }))
     }
@@ -320,8 +320,8 @@ function LiveTab() {
       if (res.data.snapshot_progress) {
         setProgress(res.data.snapshot_progress)
       }
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // silent
     } finally {
       setLoading(false)
     }

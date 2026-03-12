@@ -86,9 +86,12 @@ export default function Publisher() {
     setRegeneratingImage(true)
     try {
       const apiBase = import.meta.env.DEV ? 'http://localhost:8001' : ''
+      const authToken = localStorage.getItem('pbn_auth_token')
+      const imgHeaders = { 'Content-Type': 'application/json' }
+      if (authToken) imgHeaders['Authorization'] = `Basic ${authToken}`
       const res = await fetch(`${apiBase}/api/publish/regenerate-image`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: imgHeaders,
         body: JSON.stringify({ topic, static_image_b64: staticImageB64 || null }),
       })
       const data = await res.json()
@@ -142,9 +145,12 @@ export default function Publisher() {
 
     try {
       const apiBase = import.meta.env.DEV ? 'http://localhost:8001' : ''
+      const authToken = localStorage.getItem('pbn_auth_token')
+      const fetchHeaders = { 'Content-Type': 'application/json' }
+      if (authToken) fetchHeaders['Authorization'] = `Basic ${authToken}`
       const response = await fetch(`${apiBase}/api/publish/post`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: fetchHeaders,
         body: JSON.stringify(body),
       })
 

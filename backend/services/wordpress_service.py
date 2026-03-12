@@ -235,7 +235,11 @@ async def publish_post(
                     })
                 if keyword:
                     meta["_yoast_wpseo_focuskw"] = keyword
-                    meta["rank_math_focus_keyword"] = keyword
+                    # RankMath supports comma-separated focus keywords
+                    kw_with_lsi = keyword
+                    if tags:
+                        kw_with_lsi = ",".join([keyword] + list(tags[:4]))
+                    meta["rank_math_focus_keyword"] = kw_with_lsi
                 # Canonical URL
                 if post_data.get("slug") and base_url:
                     canonical = f"{base_url}/{post_data['slug']}/"
@@ -281,21 +285,34 @@ async def _get_or_create_tags(
     auth: str,
     tag_names: list[str],
 ) -> list[int]:
-    """Get or create WP tags, return list of IDs."""
-    ids = []
+    """Get or create WP tags, return list of IDs. Uses one bulk GET to minimize API calls."""
+    if not tag_names:
+        return []
+    tags = tag_names[:5]
     headers = {"Authorization": auth, "Content-Type": "application/json"}
-    for name in tag_names[:5]:
-        slug = _keyword_to_slug(name)
+    slugs = [_keyword_to_slug(n) for n in tags]
+
+    # Single GET for all slugs at once
+    existing: dict[str, int] = {}
+    try:
+        resp = await client.get(
+            f"{base_url}/wp-json/wp/v2/tags",
+            params={"slug": ",".join(slugs), "per_page": 10},
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            for t in resp.json():
+                existing[t.get("slug", "")] = t["id"]
+    except Exception:
+        pass
+
+    ids = []
+    for name, slug in zip(tags, slugs):
+        if slug in existing:
+            ids.append(existing[slug])
+            continue
         try:
-            resp = await client.get(
-                f"{base_url}/wp-json/wp/v2/tags",
-                params={"slug": slug, "per_page": 1},
-                headers=headers,
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json():
-                ids.append(resp.json()[0]["id"])
-                continue
             resp2 = await client.post(
                 f"{base_url}/wp-json/wp/v2/tags",
                 json={"name": name, "slug": slug},

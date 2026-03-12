@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from config import DB_PATH, CSV_PATH
-from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health
+from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health, dashboard
 
 APP_USER = os.getenv("APP_USER", "admin")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
@@ -165,12 +165,23 @@ async def _date_modified_refresh_cron():
                 ) as cur:
                     posts = [dict(r) for r in await cur.fetchall()]
 
-            refreshed = 0
-            for post in posts:
+            # Also pick up manual publisher posts from `posts` table
+            async with _aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = _aiosqlite.Row
+                async with db.execute(
+                    """SELECT p.id, p.wp_post_url, md.domain, md.wp_login, md.wp_pass
+                       FROM posts p
+                       JOIN my_domains md ON md.id = p.my_domain_id
+                       WHERE p.status='published' AND p.wp_post_url IS NOT NULL AND p.wp_post_url!=''
+                         AND (p.created_at IS NULL OR p.created_at < ?)
+                       LIMIT 50""",
+                    (cutoff,)
+                ) as cur:
+                    posts_manual = [dict(r) for r in await cur.fetchall()]
+            all_posts = posts + posts_manual
+
+            async def _refresh_wp_post(post: dict, table: str) -> bool:
                 try:
-                    # Extract WP post ID from URL
-                    import re as _re
-                    # Try WP REST API: PATCH /wp-json/wp/v2/posts/{id}
                     url = post["wp_post_url"]
                     domain = post["domain"].rstrip("/")
                     if not domain.startswith("http"):
@@ -178,7 +189,6 @@ async def _date_modified_refresh_cron():
                     creds = _b64.b64encode(f"{post['wp_login']}:{post['wp_pass']}".encode()).decode()
                     headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
                     now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-                    # Try to find post ID via search by URL
                     slug = url.rstrip("/").split("/")[-1]
                     async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
                         search_resp = await hc.get(
@@ -193,20 +203,30 @@ async def _date_modified_refresh_cron():
                             async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
                                 patch_resp = await hc.post(
                                     f"{domain}/wp-json/wp/v2/posts/{wp_id}",
-                                    json={"modified": now_str},
+                                    json={"date": now_str, "date_gmt": now_str, "modified": now_str},
                                     headers=headers
                                 )
                             if patch_resp.status_code in (200, 201):
+                                update_col = "published_at" if table == "domain_keywords" else "created_at"
                                 async with _aiosqlite.connect(DB_PATH) as db:
                                     await db.execute(
-                                        "UPDATE domain_keywords SET published_at=? WHERE id=?",
+                                        f"UPDATE {table} SET {update_col}=? WHERE id=?",
                                         (datetime.utcnow().isoformat(), post["id"])
                                     )
                                     await db.commit()
-                                refreshed += 1
+                                return True
                 except Exception:
                     pass
-            print(f"[DateModifiedCron] Refreshed {refreshed}/{len(posts)} posts")
+                return False
+
+            refreshed = 0
+            for post in posts:
+                if await _refresh_wp_post(post, "domain_keywords"):
+                    refreshed += 1
+            for post in posts_manual:
+                if await _refresh_wp_post(post, "posts"):
+                    refreshed += 1
+            print(f"[DateModifiedCron] Refreshed {refreshed}/{len(all_posts)} posts")
         except Exception as e:
             print(f"[DateModifiedCron] Error: {e}")
 
@@ -226,6 +246,50 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass  # column already exists
         await import_csv_domains(db)
+        # Migration: batch_tag column in posts
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN batch_tag TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass  # column already exists
+        # Migration: my_domains extra columns
+        for col, typedef in [
+            ("http_user", "TEXT DEFAULT ''"),
+            ("http_pass", "TEXT DEFAULT ''"),
+            ("project_id", "INTEGER DEFAULT NULL"),
+            ("batch_tag", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE my_domains ADD COLUMN {col} {typedef}")
+                await db.commit()
+            except Exception:
+                pass
+        # DB indexes for autopilot performance
+        try:
+            await db.executescript("""
+                CREATE INDEX IF NOT EXISTS idx_dk_schedule_status
+                    ON domain_keywords(schedule_id, status);
+                CREATE INDEX IF NOT EXISTS idx_dk_status
+                    ON domain_keywords(status);
+                CREATE INDEX IF NOT EXISTS idx_posts_status
+                    ON posts(status);
+                CREATE INDEX IF NOT EXISTS idx_posts_created
+                    ON posts(created_at);
+                CREATE INDEX IF NOT EXISTS idx_posts_my_domain
+                    ON posts(my_domain_id);
+                CREATE INDEX IF NOT EXISTS idx_posts_domain_status
+                    ON posts(my_domain_id, status);
+            """)
+            await db.commit()
+        except Exception:
+            pass
+        # Clean up expired SERP cache entries on startup
+        try:
+            import time as _time
+            await db.execute("DELETE FROM serp_cache WHERE expires_at < ?", (_time.time(),))
+            await db.commit()
+        except Exception:
+            pass  # table may not exist yet on first run
     # Start background crons
     import asyncio as _asyncio
     cron_task = _asyncio.create_task(_weekly_cron())
@@ -272,6 +336,11 @@ async def basic_auth_middleware(request: Request, call_next):
         if is_local or token_ok or not CRON_SECRET:
             return await call_next(request)
     auth = request.headers.get("Authorization", "")
+    # Also accept auth via query param for SSE endpoints (EventSource can't send headers)
+    if not auth:
+        _auth_qp = request.query_params.get("_auth", "")
+        if _auth_qp:
+            auth = f"Basic {_auth_qp}"
     if auth.startswith("Basic "):
         import base64
         try:
@@ -298,6 +367,7 @@ app.include_router(topical_map.router)
 app.include_router(content_writer.router)
 app.include_router(autopilot.router)
 app.include_router(health.router)
+app.include_router(dashboard.router)
 
 
 @app.get("/health")

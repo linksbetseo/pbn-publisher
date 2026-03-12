@@ -58,7 +58,13 @@ CREATE TABLE IF NOT EXISTS domain_health_snapshot_progress (
 """
 
 
+_tables_ensured = False
+
+
 async def ensure_tables():
+    global _tables_ensured
+    if _tables_ensured:
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(CREATE_TABLES)
         # Migration: add dr column to snapshots if missing
@@ -78,18 +84,19 @@ async def ensure_tables():
         except Exception:
             pass
         await db.commit()
+    _tables_ensured = True
 
 
 # ── DataForSEO helpers ────────────────────────────────────────────────────────
 
-async def _dfs_domain_metrics(domain: str) -> dict:
+async def _dfs_domain_metrics(domain: str, location_code: int = 2616, language_code: str = "pl") -> dict:
     """Fetch organic traffic + keyword count from DataForSEO."""
     if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
         return {}
     creds = base64.b64encode(f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()).decode()
     headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
     clean = re.sub(r"^https?://", "", domain).rstrip("/")
-    payload = [{"target": clean, "location_code": 2616, "language_code": "pl"}]
+    payload = [{"target": clean, "location_code": location_code, "language_code": language_code}]
     try:
         async with httpx.AsyncClient(timeout=18) as client:
             resp = await client.post(
@@ -173,6 +180,25 @@ async def _whois_expiry(domain: str) -> dict:
 
 # ── WP ping ───────────────────────────────────────────────────────────────────
 
+async def _ahrefs_dr(domain: str) -> Optional[int]:
+    """Fetch Domain Rating from Ahrefs public API (no key needed)."""
+    clean = re.sub(r"^https?://", "", domain).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://ahrefs.com/api/public/dr",
+                params={"url": clean},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                dr = data.get("domain_rating")
+                if dr is not None:
+                    return int(dr)
+    except Exception as e:
+        logger.warning(f"[Health] Ahrefs DR failed for {clean}: {e}")
+    return None
+
+
 async def _wp_ping(domain: str, http_user: str = "", http_pass: str = "") -> bool:
     base = domain if domain.startswith("http") else f"https://{domain}"
     base = base.rstrip("/")
@@ -191,15 +217,22 @@ async def _wp_ping(domain: str, http_user: str = "", http_pass: str = "") -> boo
 
 # ── Health score ──────────────────────────────────────────────────────────────
 
-def _health_score(traffic: int, keywords: int, days_to_expiry: Optional[int] = None) -> str:
+def _health_score(traffic: int, keywords: int, days_to_expiry: Optional[int] = None, dr: Optional[int] = None) -> str:
     # Critical: expired or expiring very soon
     if days_to_expiry is not None and days_to_expiry < 7:
         return "critical"
+    score = "weak"
     if traffic >= 500 or keywords >= 200:
-        return "good"
-    if traffic >= 50 or keywords >= 30:
-        return "medium"
-    return "weak"
+        score = "good"
+    elif traffic >= 50 or keywords >= 30:
+        score = "medium"
+    # DR boost: DR >= 20 bumps up score by one tier
+    if dr is not None and dr >= 20:
+        if score == "medium":
+            score = "good"
+        elif score == "weak":
+            score = "medium"
+    return score
 
 
 # ── Per-domain health (with hard timeout) ─────────────────────────────────────
@@ -229,6 +262,7 @@ def _empty_result(row: dict) -> dict:
         "days_to_expiry": None,
         "expiry_status": "unknown",
         "health_score": "weak",
+        "dr": None,
         "error": "timeout",
     }
 
@@ -238,15 +272,17 @@ async def _domain_health_live(row: dict) -> dict:
     http_user = row.get("http_user", "") or ""
     http_pass = row.get("http_pass", "") or ""
 
-    metrics, whois_data, wp_ok = await asyncio.gather(
+    metrics, whois_data, wp_ok, dr = await asyncio.gather(
         _dfs_domain_metrics(domain),
         _whois_expiry(domain),
         _wp_ping(domain, http_user, http_pass),
+        _ahrefs_dr(domain),
         return_exceptions=True,
     )
     if isinstance(metrics, Exception): metrics = {}
     if isinstance(whois_data, Exception): whois_data = {}
     if isinstance(wp_ok, Exception): wp_ok = False
+    if isinstance(dr, Exception): dr = None
 
     traffic = metrics.get("traffic", 0) or 0
     keywords = metrics.get("keywords", 0) or 0
@@ -268,7 +304,8 @@ async def _domain_health_live(row: dict) -> dict:
             else "ok" if days is not None
             else "unknown"
         ),
-        "health_score": _health_score(traffic, keywords, days),
+        "health_score": _health_score(traffic, keywords, days, dr),
+        "dr": dr,
     }
 
 
@@ -315,30 +352,28 @@ async def run_weekly_snapshot():
             )
             await db.commit()
 
-    # Save all results
+    # Save all results in one batch
     async with aiosqlite.connect(DB_PATH) as db:
-        for r in results:
-            await db.execute(
-                """INSERT INTO domain_health_snapshots
-                   (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, snapped_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+        await db.executemany(
+            """INSERT INTO domain_health_snapshots
+               (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            [
                 (r["id"], r["domain"], r["traffic"], r["keywords"],
                  1 if r.get("wp_ok") else 0,
-                 r.get("expiry_date"), r.get("days_to_expiry"), r.get("health_score", "weak"), snapped_at)
-            )
+                 r.get("expiry_date"), r.get("days_to_expiry"), r.get("health_score", "weak"),
+                 r.get("dr"), snapped_at)
+                for r in results
+            ]
+        )
+        await db.executemany(
+            "UPDATE my_domains SET wp_ok=? WHERE id=?",
+            [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
+        )
         await db.execute(
             "UPDATE domain_health_snapshot_progress SET done=?, finished=1, finished_at=? WHERE id=?",
             (total, datetime.utcnow().isoformat(), progress_id)
         )
-        await db.commit()
-
-    # Also update my_domains.wp_ok for quick access
-    async with aiosqlite.connect(DB_PATH) as db:
-        for r in results:
-            await db.execute(
-                "UPDATE my_domains SET wp_ok=? WHERE id=?",
-                (1 if r.get("wp_ok") else 0, r["id"])
-            )
         await db.commit()
 
     logger.info(f"[HealthCron] Snapshot done: {len(results)} domains")
@@ -346,11 +381,6 @@ async def run_weekly_snapshot():
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
-
-@router.on_event("startup")
-async def startup():
-    await ensure_tables()
-
 
 @router.get("")
 async def domain_health(limit: int = 50, offset: int = 0):
@@ -371,7 +401,7 @@ async def domain_health(limit: int = 50, offset: int = 0):
         # Get last snapshot for each domain
         async with db.execute(
             """SELECT my_domain_id, traffic, keywords, wp_ok, expiry_date,
-                      days_to_expiry, health_score, snapped_at
+                      days_to_expiry, health_score, dr, snapped_at
                FROM domain_health_snapshots
                WHERE id IN (
                    SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id
@@ -411,6 +441,7 @@ async def domain_health(limit: int = 50, offset: int = 0):
                 else "unknown"
             ),
             "health_score": snap.get("health_score", "weak") if has_snap else "weak",
+            "dr": snap.get("dr") if has_snap else None,
             "from_snapshot": has_snap,
             "snapped_at": snap.get("snapped_at") if has_snap else None,
         })

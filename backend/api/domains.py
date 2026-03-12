@@ -7,8 +7,14 @@ from config import DB_PATH
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 
 
+_columns_ensured = False
+
+
 async def _ensure_http_auth_columns():
     """Migration: add http_user / http_pass / project_id / batch_tag columns if missing."""
+    global _columns_ensured
+    if _columns_ensured:
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         for col in [
             ("http_user", "TEXT DEFAULT ''"),
@@ -21,6 +27,7 @@ async def _ensure_http_auth_columns():
             except Exception:
                 pass
         await db.commit()
+    _columns_ensured = True
 
 
 class DomainToggle(BaseModel):
@@ -46,11 +53,6 @@ class BatchImportRequest(BaseModel):
     batch_tag: str
     project_id: Optional[int] = None
     server: str = ""
-
-
-@router.on_event("startup")
-async def startup():
-    await _ensure_http_auth_columns()
 
 
 @router.get("/batches")
@@ -120,14 +122,18 @@ async def bulk_import_domains(items: List[DomainImportItem]):
     """Import multiple domains at once. Skips duplicates by domain name."""
     await _ensure_http_auth_columns()
     async with aiosqlite.connect(DB_PATH) as db:
+        # Single query to find all existing domains — avoids N+1
+        domain_names = [item.domain for item in items]
+        placeholders = ",".join("?" * len(domain_names))
+        async with db.execute(
+            f"SELECT domain FROM my_domains WHERE domain IN ({placeholders})", domain_names
+        ) as cursor:
+            existing_set = {r[0] for r in await cursor.fetchall()}
+
         inserted = 0
         skipped = 0
         for item in items:
-            async with db.execute(
-                "SELECT id FROM my_domains WHERE domain = ?", (item.domain,)
-            ) as cursor:
-                existing = await cursor.fetchone()
-            if existing:
+            if item.domain in existing_set:
                 skipped += 1
                 continue
             await db.execute(
@@ -227,7 +233,11 @@ async def toggle_domain(domain_id: int, body: DomainToggle):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Domain not found")
 
-        new_active = body.active if body.active is not None else (0 if row["active"] else 1)
+        # Only toggle active if explicitly sent; otherwise preserve current value
+        if body.active is not None:
+            new_active = body.active
+        else:
+            new_active = row["active"]
         updates = ["active = ?"]
         params = [new_active]
         if body.wp_ok is not None:
