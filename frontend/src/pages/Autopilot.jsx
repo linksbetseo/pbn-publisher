@@ -613,7 +613,13 @@ export default function Autopilot() {
     const id = sched.id
     const total = pending_count(id)
     if (total === '?' || total === 0) { alert('Brak pending keywords do opublikowania.'); return }
-    if (!confirm(`Opublikować WSZYSTKIE ${total} pending keywords dla ${sched.domain}?\n\nTo może potrwać długo.`)) return
+    const estMinutes = Math.ceil(total * 3)
+    if (!confirm(
+      `⚠️ UWAGA: Opublikować WSZYSTKIE ${total} artykułów dla ${sched.domain}?\n\n` +
+      `Szacowany czas: ~${estMinutes} min (${Math.ceil(estMinutes/60)} godz.)\n` +
+      `Koszt: ${total * 10} kredytów\n\n` +
+      `Tej operacji nie można cofnąć. Kontynuować?`
+    )) return
     setRunning(r => ({ ...r, [id]: true }))
     setRunLog(l => ({ ...l, [id]: [] }))
     try {
