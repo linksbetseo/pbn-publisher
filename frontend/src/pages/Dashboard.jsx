@@ -1,16 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { dashboard, history as historyApi } from '../api/client'
 import api from '../api/client'
+import { Link } from 'react-router-dom'
 
 function StatCard({ label, value, color, icon }) {
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-sm text-gray-500 font-medium">{label}</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 font-medium">{label}</p>
           <p className={`text-3xl font-bold mt-1 ${color}`}>{value}</p>
         </div>
-        <div className={`w-12 h-12 rounded-full flex items-center justify-center ${color.replace('text-', 'bg-').replace('-600', '-100')}`}>
+        <div className={`w-12 h-12 rounded-full flex items-center justify-center ${color.replace('text-', 'bg-').replace('-600', '-100')} dark:opacity-80`}>
           {icon}
         </div>
       </div>
@@ -19,9 +20,10 @@ function StatCard({ label, value, color, icon }) {
 }
 
 function PublicationChart({ trend30d }) {
-  // Build last 14 days from trend_30d data returned by /api/dashboard/stats
+  const [hovered, setHovered] = useState(null)
+  // Build last 30 days
   const days = []
-  for (let i = 13; i >= 0; i--) {
+  for (let i = 29; i >= 0; i--) {
     const d = new Date()
     d.setDate(d.getDate() - i)
     days.push(d.toISOString().slice(0, 10))
@@ -33,20 +35,29 @@ function PublicationChart({ trend30d }) {
   })
   const values = days.map(d => counts[d])
   const max = Math.max(...values, 1)
+  const total30 = values.reduce((a, b) => a + b, 0)
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-      <h3 className="text-base font-semibold text-gray-800 mb-4">Publikacje — ostatnie 14 dni</h3>
-      <div className="flex items-end gap-1.5 h-28">
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200">Publikacje — ostatnie 30 dni</h3>
+        <span className="text-sm text-gray-400">{total30} total</span>
+      </div>
+      <div className="flex items-end gap-0.5 h-28 relative">
         {days.map((day, i) => (
-          <div key={day} className="flex-1 flex flex-col items-center gap-1">
+          <div key={day} className="flex-1 flex flex-col items-center gap-1 relative"
+            onMouseEnter={() => setHovered(i)} onMouseLeave={() => setHovered(null)}>
             <div
-              className="w-full bg-blue-500 rounded-t transition-all"
-              style={{ height: `${Math.round((values[i] / max) * 96)}px`, minHeight: values[i] > 0 ? '4px' : '0' }}
-              title={`${day}: ${values[i]} postów`}
+              className={`w-full rounded-t transition-all ${values[i] > 0 ? 'bg-blue-500 dark:bg-blue-400' : 'bg-gray-100 dark:bg-gray-700'}`}
+              style={{ height: `${Math.max(Math.round((values[i] / max) * 96), values[i] > 0 ? 4 : 1)}px` }}
             />
-            {i % 2 === 0 && (
-              <span className="text-gray-400 text-[9px] rotate-45 origin-left whitespace-nowrap">
+            {hovered === i && (
+              <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-gray-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap z-10">
+                {day.slice(5)}: {values[i]}
+              </div>
+            )}
+            {i % 5 === 0 && (
+              <span className="text-gray-400 dark:text-gray-500 text-[8px] rotate-45 origin-left whitespace-nowrap">
                 {day.slice(5)}
               </span>
             )}
@@ -60,12 +71,12 @@ function PublicationChart({ trend30d }) {
 function FailedAlert({ failedCount }) {
   if (!failedCount) return null
   return (
-    <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3">
+    <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-4 mb-6 flex items-center gap-3">
       <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
       </svg>
-      <span className="text-sm text-red-700">
-        <strong>{failedCount}</strong> {failedCount === 1 ? 'fraza' : failedCount < 5 ? 'frazy' : 'fraz'} autopilota zakończyło się błędem. Sprawdź zakładkę <strong>Autopilot → Historia</strong>.
+      <span className="text-sm text-red-700 dark:text-red-300">
+        <strong>{failedCount}</strong> {failedCount === 1 ? 'fraza' : failedCount < 5 ? 'frazy' : 'fraz'} autopilota z bledem. Sprawdz <strong>Autopilot</strong>.
       </span>
     </div>
   )
@@ -76,10 +87,10 @@ function ActiveJobsProgress({ jobs }) {
   const running = jobs.filter(j => !j.done)
   if (running.length === 0) return null
   return (
-    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+    <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-xl p-4 mb-6">
       <div className="flex items-center gap-2 mb-3">
         <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
-        <span className="text-sm font-semibold text-blue-800">Autopilot w trakcie ({running.length} aktywnych jobów)</span>
+        <span className="text-sm font-semibold text-blue-800 dark:text-blue-300">Autopilot w trakcie ({running.length} aktywnych)</span>
       </div>
       {running.map(job => {
         const total = job.total || 1
@@ -87,17 +98,40 @@ function ActiveJobsProgress({ jobs }) {
         const pct = Math.round((done / total) * 100)
         return (
           <div key={job.job_id} className="mb-2 last:mb-0">
-            <div className="flex justify-between text-xs text-blue-700 mb-1">
-              <span>Job {job.job_id?.slice(0, 8)}…</span>
+            <div className="flex justify-between text-xs text-blue-700 dark:text-blue-300 mb-1">
+              <span>Job {job.job_id?.slice(0, 8)}</span>
               <span>{done}/{total} ({pct}%)</span>
             </div>
-            <div className="h-2 bg-blue-200 rounded-full overflow-hidden">
+            <div className="h-2 bg-blue-200 dark:bg-blue-800 rounded-full overflow-hidden">
               <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
             </div>
-            {job.failed > 0 && <span className="text-xs text-red-500 mt-0.5 block">✗ {job.failed} błędów</span>}
           </div>
         )
       })}
+    </div>
+  )
+}
+
+function QuickActions() {
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
+      <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Szybkie akcje</h3>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: 'Nowy artykul', to: '/publish', icon: 'M12 4v16m8-8H4', color: 'text-blue-600 bg-blue-50 dark:bg-blue-900/30' },
+          { label: 'Content Writer', to: '/content-writer', icon: 'M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z', color: 'text-purple-600 bg-purple-50 dark:bg-purple-900/30' },
+          { label: 'Autopilot', to: '/autopilot', icon: 'M13 10V3L4 14h7v7l9-11h-7z', color: 'text-cyan-600 bg-cyan-50 dark:bg-cyan-900/30' },
+          { label: 'Health Check', to: '/health', icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z', color: 'text-green-600 bg-green-50 dark:bg-green-900/30' },
+        ].map(a => (
+          <Link key={a.to} to={a.to}
+            className={`${a.color} rounded-lg p-4 flex flex-col items-center gap-2 hover:opacity-80 transition-opacity`}>
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={a.icon} />
+            </svg>
+            <span className="text-xs font-medium">{a.label}</span>
+          </Link>
+        ))}
+      </div>
     </div>
   )
 }
@@ -106,19 +140,23 @@ function RecentPublications({ posts }) {
   const recent = [...posts].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 5)
   if (!recent.length) return null
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-8">
-      <h3 className="text-base font-semibold text-gray-800 mb-3">Ostatnie publikacje</h3>
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6 mb-8">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200">Ostatnie publikacje</h3>
+        <Link to="/history" className="text-xs text-blue-600 hover:underline">Wszystkie</Link>
+      </div>
       <div className="space-y-2">
         {recent.map((p, i) => (
-          <div key={i} className="flex items-start justify-between gap-3 py-2 border-b border-gray-50 last:border-0">
+          <div key={i} className="flex items-start justify-between gap-3 py-2 border-b border-gray-50 dark:border-gray-700 last:border-0">
             <div className="min-w-0">
-              <p className="text-sm text-gray-800 truncate font-medium">{p.title || p.keyword || '—'}</p>
+              <p className="text-sm text-gray-800 dark:text-gray-200 truncate font-medium">{p.title || p.keyword || '—'}</p>
               <p className="text-xs text-gray-400">{p.domain || p.my_domain} · {p.created_at?.slice(0, 16).replace('T', ' ')}</p>
+              {p.word_count > 0 && <span className="text-xs text-gray-400 ml-2">{p.word_count} slow</span>}
             </div>
             {p.wp_post_url && (
               <a href={p.wp_post_url} target="_blank" rel="noopener noreferrer"
                 className="flex-shrink-0 text-xs text-blue-600 hover:underline">
-                Zobacz →
+                Zobacz
               </a>
             )}
           </div>
@@ -139,21 +177,21 @@ function AutopilotWidget({ autopilotStats }) {
   }
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-base font-semibold text-gray-800">Autopilot</h3>
-        <span className="text-xs text-gray-400">Następny cron: {formatNextRun(next_cron_utc)} UTC</span>
+        <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200">Autopilot</h3>
+        <span className="text-xs text-gray-400">Nastepny cron: {formatNextRun(next_cron_utc)} UTC</span>
       </div>
       <div className="grid grid-cols-4 gap-3 mb-4">
         {[
-          { label: 'Aktywne', value: active_schedules, color: 'text-cyan-600', bg: 'bg-cyan-50' },
-          { label: 'W kolejce', value: pending_keywords, color: 'text-yellow-600', bg: 'bg-yellow-50' },
-          { label: 'Opublikowane', value: published_keywords, color: 'text-green-600', bg: 'bg-green-50' },
-          { label: 'Błędy', value: failed_keywords || 0, color: 'text-red-600', bg: 'bg-red-50' },
+          { label: 'Aktywne', value: active_schedules, color: 'text-cyan-600', bg: 'bg-cyan-50 dark:bg-cyan-900/30' },
+          { label: 'W kolejce', value: pending_keywords, color: 'text-yellow-600', bg: 'bg-yellow-50 dark:bg-yellow-900/30' },
+          { label: 'Opublikowane', value: published_keywords, color: 'text-green-600', bg: 'bg-green-50 dark:bg-green-900/30' },
+          { label: 'Bledy', value: failed_keywords || 0, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-900/30' },
         ].map(s => (
           <div key={s.label} className={`${s.bg} rounded-lg p-3 text-center`}>
             <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
-            <p className="text-xs text-gray-500 mt-1">{s.label}</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{s.label}</p>
           </div>
         ))}
       </div>
@@ -162,13 +200,13 @@ function AutopilotWidget({ autopilotStats }) {
           <p className="text-xs text-gray-400 uppercase font-semibold mb-2">Ostatnie joby</p>
           <div className="space-y-1">
             {recent_jobs.map(job => (
-              <div key={job.job_id} className="flex items-center justify-between text-xs text-gray-600 py-1 border-b border-gray-50 last:border-0">
+              <div key={job.job_id} className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400 py-1 border-b border-gray-50 dark:border-gray-700 last:border-0">
                 <span className="font-mono text-gray-400">{job.created_at?.slice(0, 16)}</span>
                 <span>
                   <span className="text-green-600 font-medium">+{job.published}</span>
-                  {job.failed > 0 && <span className="text-red-500 ml-2">✗{job.failed}</span>}
+                  {job.failed > 0 && <span className="text-red-500 ml-2">{job.failed} err</span>}
                 </span>
-                <span className={`px-2 py-0.5 rounded-full text-xs ${job.error ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
+                <span className={`px-2 py-0.5 rounded-full text-xs ${job.error ? 'bg-red-100 dark:bg-red-900/30 text-red-600' : 'bg-green-100 dark:bg-green-900/30 text-green-600'}`}>
                   {job.error ? 'error' : 'ok'}
                 </span>
               </div>
@@ -184,16 +222,19 @@ function TopDomainsWidget({ topDomains }) {
   if (!topDomains || topDomains.length === 0) return null
   const max = topDomains[0]?.count || 1
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-      <h3 className="text-base font-semibold text-gray-800 mb-4">Top domeny wg liczby artykułów</h3>
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200">Top domeny wg artykulow</h3>
+        <Link to="/domain-health" className="text-xs text-blue-600 hover:underline">Health Check</Link>
+      </div>
       <div className="space-y-3">
         {topDomains.map((d, i) => (
           <div key={d.domain}>
             <div className="flex justify-between text-sm mb-1">
-              <span className="text-gray-700 truncate max-w-[70%]">{d.domain}</span>
+              <span className="text-gray-700 dark:text-gray-300 truncate max-w-[70%]">{d.domain}</span>
               <span className="text-gray-500 font-medium">{d.count}</span>
             </div>
-            <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-2 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
               <div
                 className="h-full bg-blue-500 rounded-full"
                 style={{ width: `${Math.round((d.count / max) * 100)}%` }}
@@ -211,18 +252,18 @@ function HealthWidget({ stats }) {
   const h = stats.health_distribution
   const items = [
     { label: 'Dobra', key: 'good', color: 'bg-green-500' },
-    { label: 'Średnia', key: 'medium', color: 'bg-yellow-400' },
-    { label: 'Słaba', key: 'weak', color: 'bg-gray-300' },
+    { label: 'Srednia', key: 'medium', color: 'bg-yellow-400' },
+    { label: 'Slaba', key: 'weak', color: 'bg-gray-300' },
     { label: 'Krytyczna', key: 'critical', color: 'bg-red-500' },
   ]
   const total = Object.values(h).reduce((a, b) => a + b, 0) || 1
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-base font-semibold text-gray-800">Zdrowie domen PBN</h3>
+        <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200">Zdrowie domen PBN</h3>
         {stats.expiring_soon > 0 && (
-          <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full font-medium">
-            ⚠ {stats.expiring_soon} wygasa wkrótce
+          <span className="text-xs bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400 px-2 py-1 rounded-full font-medium">
+            {stats.expiring_soon} wygasa wkrotce
           </span>
         )}
       </div>
@@ -239,7 +280,7 @@ function HealthWidget({ stats }) {
       <div className="grid grid-cols-4 gap-2">
         {items.map(it => (
           <div key={it.key} className="text-center">
-            <p className="text-lg font-bold text-gray-800">{h[it.key] || 0}</p>
+            <p className="text-lg font-bold text-gray-800 dark:text-gray-200">{h[it.key] || 0}</p>
             <p className="text-xs text-gray-400">{it.label}</p>
           </div>
         ))}
@@ -248,10 +289,125 @@ function HealthWidget({ stats }) {
   )
 }
 
+function GptModelWidget({ model }) {
+  if (!model) return null
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-4 flex items-center gap-3">
+      <div className="w-10 h-10 rounded-full bg-violet-100 dark:bg-violet-900/30 flex items-center justify-center">
+        <svg className="w-5 h-5 text-violet-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+        </svg>
+      </div>
+      <div>
+        <p className="text-xs text-gray-400">Model GPT</p>
+        <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">{model}</p>
+      </div>
+    </div>
+  )
+}
+
+function ArticleQualityWidget({ avgWordCount, totalPublished }) {
+  // Score based on avg word count (target: 1500-2500 words)
+  let score = 0
+  let label = 'Brak danych'
+  let color = 'text-gray-400'
+  if (avgWordCount > 0) {
+    if (avgWordCount >= 1800) { score = 95; label = 'Doskonala'; color = 'text-green-600' }
+    else if (avgWordCount >= 1400) { score = 80; label = 'Dobra'; color = 'text-green-500' }
+    else if (avgWordCount >= 1000) { score = 60; label = 'Srednia'; color = 'text-yellow-500' }
+    else if (avgWordCount >= 600) { score = 40; label = 'Slaba'; color = 'text-orange-500' }
+    else { score = 20; label = 'Bardzo slaba'; color = 'text-red-500' }
+  }
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
+      <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-4">Jakosc artykulow</h3>
+      <div className="flex items-center gap-6">
+        <div className="relative w-20 h-20">
+          <svg className="w-20 h-20 -rotate-90" viewBox="0 0 36 36">
+            <path d="M18 2.0845a15.9155 15.9155 0 010 31.831 15.9155 15.9155 0 010-31.831"
+              fill="none" stroke="#e5e7eb" strokeWidth="3" className="dark:stroke-gray-700" />
+            <path d="M18 2.0845a15.9155 15.9155 0 010 31.831 15.9155 15.9155 0 010-31.831"
+              fill="none" strokeWidth="3" strokeDasharray={`${score}, 100`}
+              className={score >= 80 ? 'stroke-green-500' : score >= 60 ? 'stroke-yellow-500' : score >= 40 ? 'stroke-orange-500' : 'stroke-red-500'} />
+          </svg>
+          <span className={`absolute inset-0 flex items-center justify-center text-lg font-bold ${color}`}>{score || '—'}</span>
+        </div>
+        <div>
+          <p className={`text-sm font-semibold ${color}`}>{label}</p>
+          <p className="text-xs text-gray-400 mt-1">Srednia dlugosc: {avgWordCount || '—'} slow</p>
+          <p className="text-xs text-gray-400">Cel: 1500-2500 slow/artykul</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MoMComparisonWidget({ currentMonth, prevMonth }) {
+  const diff = currentMonth - prevMonth
+  const pct = prevMonth > 0 ? Math.round((diff / prevMonth) * 100) : (currentMonth > 0 ? 100 : 0)
+  const isUp = diff > 0
+  const isDown = diff < 0
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
+      <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-3">Miesiac do miesiaca</h3>
+      <div className="flex items-end gap-4">
+        <div>
+          <p className="text-3xl font-bold text-gray-900 dark:text-white">{currentMonth}</p>
+          <p className="text-xs text-gray-400">ten miesiac</p>
+        </div>
+        <div className="text-center px-3">
+          <span className={`text-sm font-bold ${isUp ? 'text-green-600' : isDown ? 'text-red-500' : 'text-gray-400'}`}>
+            {isUp ? '+' : ''}{pct}%
+          </span>
+          <div className={`mt-1 ${isUp ? 'text-green-500' : isDown ? 'text-red-500' : 'text-gray-300'}`}>
+            {isUp ? (
+              <svg className="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
+            ) : isDown ? (
+              <svg className="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
+            ) : (
+              <svg className="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
+            )}
+          </div>
+        </div>
+        <div>
+          <p className="text-xl font-bold text-gray-500 dark:text-gray-400">{prevMonth}</p>
+          <p className="text-xs text-gray-400">poprzedni</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RecentErrorsWidget({ errors }) {
+  if (!errors || errors.length === 0) return null
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 p-6">
+      <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-3">Ostatnie bledy</h3>
+      <div className="space-y-2 max-h-48 overflow-y-auto">
+        {errors.map((e, i) => (
+          <div key={i} className="flex items-start gap-2 py-1.5 border-b border-gray-50 dark:border-gray-700 last:border-0">
+            <span className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${e.source === 'autopilot' ? 'bg-orange-400' : 'bg-red-400'}`} />
+            <div className="min-w-0">
+              <p className="text-xs text-gray-700 dark:text-gray-300 truncate">{e.label || '—'}</p>
+              <p className="text-[10px] text-gray-400">
+                {e.source === 'autopilot' ? 'Autopilot' : 'Publikacja'} · {e.ts?.slice(0, 16).replace('T', ' ') || ''}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+      <Link to="/history?status=failed" className="text-xs text-blue-600 hover:underline mt-3 inline-block">
+        Wszystkie bledy
+      </Link>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [recentPosts, setRecentPosts] = useState([])
   const [activeJobs, setActiveJobs] = useState([])
+  const [gptModel, setGptModel] = useState(null)
   const [loading, setLoading] = useState(true)
   const pollRef = useRef(null)
 
@@ -259,11 +415,13 @@ export default function Dashboard() {
     dashboard.stats(),
     historyApi.list({ limit: 5, offset: 0, status: 'published' }),
     api.get('/api/autopilot/jobs').catch(() => ({ data: [] })),
-  ]).then(([s, p, jobs]) => {
+    api.get('/api/settings/gpt-model').catch(() => ({ data: {} })),
+  ]).then(([s, p, jobs, modelResp]) => {
     setStats(s)
     setRecentPosts(p.data.posts || [])
     const jobList = Array.isArray(jobs.data) ? jobs.data : (jobs.data?.jobs || [])
     setActiveJobs(jobList)
+    setGptModel(modelResp?.data?.model || null)
     const hasRunning = jobList.some(j => !j.done)
     if (hasRunning && !pollRef.current) {
       pollRef.current = setInterval(() => {
@@ -287,8 +445,8 @@ export default function Dashboard() {
 
   return (
     <div className="p-8">
-      <h2 className="text-2xl font-bold text-gray-900 mb-2">Dashboard</h2>
-      <p className="text-gray-500 mb-8">Przegląd systemu PBN Publisher</p>
+      <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2">Dashboard</h2>
+      <p className="text-gray-500 dark:text-gray-400 mb-8">Przeglad systemu PBN Publisher</p>
 
       {loading ? (
         <div className="flex items-center justify-center h-40">
@@ -307,13 +465,13 @@ export default function Dashboard() {
             <StatCard label="Opublikowane" value={stats?.total_published ?? 0} color="text-green-600"
               icon={<svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>}
             />
-            <StatCard label="Dziś" value={stats?.posts_today ?? 0} color="text-purple-600"
+            <StatCard label="Dzis" value={stats?.posts_today ?? 0} color="text-purple-600"
               icon={<svg className="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>}
             />
-            <StatCard label="Ten tydzień" value={stats?.posts_week ?? 0} color="text-indigo-600"
+            <StatCard label="Ten tydzien" value={stats?.posts_week ?? 0} color="text-indigo-600"
               icon={<svg className="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>}
             />
-            <StatCard label="Ten miesiąc" value={stats?.posts_month ?? 0} color="text-orange-600"
+            <StatCard label="Ten miesiac" value={stats?.posts_month ?? 0} color="text-orange-600"
               icon={<svg className="w-6 h-6 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>}
             />
           </div>
@@ -329,7 +487,7 @@ export default function Dashboard() {
             <StatCard label="Autopilot opublikowane" value={stats?.published_keywords ?? 0} color="text-teal-600"
               icon={<svg className="w-6 h-6 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
             />
-            <StatCard label="Błędy autopilota" value={stats?.failed_keywords ?? 0} color="text-red-600"
+            <StatCard label="Bledy autopilota" value={stats?.failed_keywords ?? 0} color="text-red-600"
               icon={<svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>}
             />
           </div>
@@ -337,13 +495,35 @@ export default function Dashboard() {
           <FailedAlert failedCount={stats?.failed_keywords} />
           <ActiveJobsProgress jobs={activeJobs} />
 
-          <div className="mb-8">
-            <PublicationChart trend30d={stats?.trend_30d} />
+          {/* Quick Actions + GPT model */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+            <div className="lg:col-span-2">
+              <QuickActions />
+            </div>
+            <GptModelWidget model={gptModel} />
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          {/* Publication chart + MoM + Article Quality */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+            <div className="lg:col-span-2">
+              <PublicationChart trend30d={stats?.trend_30d} />
+            </div>
+            <div className="space-y-6">
+              <MoMComparisonWidget
+                currentMonth={stats?.posts_month ?? 0}
+                prevMonth={stats?.prev_month_published ?? 0}
+              />
+              <ArticleQualityWidget
+                avgWordCount={stats?.avg_word_count ?? 0}
+                totalPublished={stats?.total_published ?? 0}
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
             <HealthWidget stats={stats} />
             <TopDomainsWidget topDomains={stats?.top_domains} />
+            <RecentErrorsWidget errors={stats?.recent_errors} />
           </div>
 
           <RecentPublications posts={recentPosts} />

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import api from '../api/client'
+import { useToast } from '../components/Toast'
 
 const STATUS_COLOR = {
   pending: 'bg-yellow-100 text-yellow-700',
@@ -16,6 +17,7 @@ const KW_TYPE_COLOR = {
 // ── Bulk Tab ──────────────────────────────────────────────────────────────────
 
 function BulkTab() {
+  const addToast = useToast()
   const [allDomains, setAllDomains] = useState([])
   const [schedules, setSchedules] = useState([])
   const [selected, setSelected] = useState(new Set())
@@ -135,8 +137,8 @@ function BulkTab() {
   // ── Actions ──
 
   const bulkCreateSchedules = async () => {
-    if (!selectedList.length) return alert('Zaznacz domeny')
-    if (!seedKw.trim()) return alert('Wpisz frazę seed')
+    if (!selectedList.length) return addToast('Zaznacz domeny', 'warning')
+    if (!seedKw.trim()) return addToast('Wpisz frazę seed', 'warning')
     setRunning(true)
     setActionLog([])
     log(`Tworzę harmonogramy dla ${selectedList.length} domen...`)
@@ -162,7 +164,7 @@ function BulkTab() {
   }
 
   const bulkGenerateMaps = async () => {
-    if (!selectedList.length) return alert('Zaznacz harmonogramy')
+    if (!selectedList.length) return addToast('Zaznacz harmonogramy', 'warning')
     setRunning(true)
     setActionLog([])
     log(`Generuję Topical Map dla ${selectedList.length} harmonogramów... (może potrwać kilka minut)`)
@@ -182,7 +184,7 @@ function BulkTab() {
   }
 
   const bulkRun = async () => {
-    if (!selectedList.length) return alert('Zaznacz harmonogramy')
+    if (!selectedList.length) return addToast('Zaznacz harmonogramy', 'warning')
     setRunning(true)
     setActionLog([])
     log(`Uruchamiam publikację dla ${selectedList.length} harmonogramów (${runLimit} artykuł/domena)...`)
@@ -203,7 +205,7 @@ function BulkTab() {
   }
 
   const bulkSetPpd = async () => {
-    if (!selectedList.length) return alert('Zaznacz harmonogramy')
+    if (!selectedList.length) return addToast('Zaznacz harmonogramy', 'warning')
     setRunning(true)
     try {
       await api.post('/api/autopilot/bulk-set-ppd', { schedule_ids: selectedList, limit: Number(ppd) })
@@ -441,7 +443,82 @@ function BulkTab() {
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
+function AutopilotLogs() {
+  const [logs, setLogs] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+
+  useEffect(() => {
+    setLoading(true)
+    api.get('/api/autopilot/logs').then(r => setLogs(r.data)).catch(() => {}).finally(() => setLoading(false))
+  }, [])
+
+  const filtered = search
+    ? logs.filter(l => l.keyword?.toLowerCase().includes(search.toLowerCase()) || l.domain?.toLowerCase().includes(search.toLowerCase()))
+    : logs
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-4">
+        <input
+          type="text"
+          placeholder="Szukaj po keyword lub domenie..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="border border-gray-200 rounded-lg px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <span className="text-sm text-gray-400">{filtered.length} wpisów</span>
+      </div>
+      {loading ? (
+        <div className="flex items-center justify-center h-40 text-gray-400">
+          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mr-2" />Ładowanie...
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-12 text-gray-400">Brak logów</div>
+      ) : (
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="border-b border-gray-100 bg-gray-50">
+              <tr>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Data</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Domena</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Seed</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Keyword</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Status</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">URL</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {filtered.map(l => (
+                <tr key={l.id} className="hover:bg-gray-50">
+                  <td className="px-4 py-2 text-gray-500 text-xs whitespace-nowrap">
+                    {l.published_at ? new Date(l.published_at).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
+                  </td>
+                  <td className="px-4 py-2 text-gray-700 text-xs font-medium">{l.domain}</td>
+                  <td className="px-4 py-2 text-purple-600 text-xs">{l.seed_keyword}</td>
+                  <td className="px-4 py-2 text-gray-800 text-xs max-w-[200px] truncate" title={l.keyword}>{l.keyword}</td>
+                  <td className="px-4 py-2">
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${l.status === 'published' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                      {l.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    {l.wp_post_url ? (
+                      <a href={l.wp_post_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline text-xs">link</a>
+                    ) : <span className="text-gray-300 text-xs">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Autopilot() {
+  const addToast = useToast()
   const [schedules, setSchedules] = useState([])
   const [domains, setDomains] = useState([])
   const [stats, setStats] = useState({})
@@ -455,9 +532,12 @@ export default function Autopilot() {
   const [generatingMap, setGeneratingMap] = useState({})
   const [syncingCats, setSyncingCats] = useState({})
   const [catResults, setCatResults] = useState({})
+  const [kwTypeFilter, setKwTypeFilter] = useState({})
   const [cannibModal, setCannibModal] = useState(null) // { scheduleId, data } | null
   const [cannibLoading, setCannibLoading] = useState({})
   const [siteMetrics, setSiteMetrics] = useState({})
+  const [previewModal, setPreviewModal] = useState(null) // { keyword, title, content, excerpt } | null
+  const [previewLoading, setPreviewLoading] = useState({})
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -612,7 +692,7 @@ export default function Autopilot() {
   const runAll = async (sched) => {
     const id = sched.id
     const total = pending_count(id)
-    if (total === '?' || total === 0) { alert('Brak pending keywords do opublikowania.'); return }
+    if (total === '?' || total === 0) { addToast('Brak pending keywords do opublikowania.', 'warning'); return }
     const estMinutes = Math.ceil(total * 3)
     if (!confirm(
       `⚠️ UWAGA: Opublikować WSZYSTKIE ${total} artykułów dla ${sched.domain}?\n\n` +
@@ -666,14 +746,26 @@ export default function Autopilot() {
       await api.post(`/api/autopilot/keywords/${kwId}/retry`)
       await loadKeywords(schedId, kwFilter[schedId] || '')
     } catch (e) {
-      alert('Błąd retry: ' + (e.response?.data?.detail || e.message))
+      addToast('Błąd retry: ' + (e.response?.data?.detail || e.message), 'error')
+    }
+  }
+
+  const previewKeyword = async (kwId) => {
+    setPreviewLoading(l => ({ ...l, [kwId]: true }))
+    try {
+      const res = await api.post(`/api/autopilot/keywords/${kwId}/preview`)
+      setPreviewModal(res.data)
+    } catch (e) {
+      addToast('Błąd podglądu: ' + (e.response?.data?.detail || e.message), 'error')
+    } finally {
+      setPreviewLoading(l => ({ ...l, [kwId]: false }))
     }
   }
 
   const retryAllFailed = async (sched) => {
     const id = sched.id
     const failed_count = keywords[id]?.filter(k => k.status === 'failed').length || 0
-    if (failed_count === 0) { alert('Brak failed keywords do ponowienia.'); return }
+    if (failed_count === 0) { addToast('Brak failed keywords do ponowienia.', 'warning'); return }
     if (!confirm(`Ponowić ${failed_count} failed keywords dla ${sched.domain}?`)) return
     setRunning(r => ({ ...r, [id]: true }))
     try {
@@ -686,7 +778,7 @@ export default function Autopilot() {
         if (expandedId === id) await loadKeywords(id, kwFilter[id] || '')
       }
     } catch (e) {
-      alert('Błąd retry-all: ' + (e.response?.data?.detail || e.message))
+      addToast('Błąd retry-all: ' + (e.response?.data?.detail || e.message), 'error')
     } finally {
       setRunning(r => ({ ...r, [id]: false }))
     }
@@ -712,7 +804,7 @@ export default function Autopilot() {
       a.download = `keywords_${id}.csv`
       a.click()
       URL.revokeObjectURL(url)
-    }).catch(e => alert('Błąd eksportu CSV: ' + e.message))
+    }).catch(e => addToast('Błąd eksportu CSV: ' + e.message, 'error'))
   }
 
   const updatePpd = async (id, val) => {
@@ -758,15 +850,34 @@ export default function Autopilot() {
 
       {/* Main tabs */}
       <div className="flex gap-1 bg-gray-100 rounded-lg p-1 mb-5 w-fit">
-        {[['schedules', 'Harmonogramy'], ['bulk', '⚡ Bulk Setup']].map(([k, label]) => (
+        {[['schedules', 'Harmonogramy'], ['bulk', '⚡ Bulk Setup'], ['logs', 'Logi']].map(([k, label]) => (
           <button key={k} onClick={() => setMainTab(k)}
             className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${mainTab === k ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
           </button>
         ))}
+        <button
+          onClick={() => {
+            const BASE = import.meta.env.VITE_API_URL || ''
+            const token = localStorage.getItem('pbn_auth_token')
+            fetch(`${BASE}/api/autopilot/export-csv`, {
+              headers: token ? { Authorization: `Basic ${token}` } : {},
+            }).then(r => r.blob()).then(blob => {
+              const a = document.createElement('a')
+              a.href = URL.createObjectURL(blob)
+              a.download = 'autopilot_all_keywords.csv'
+              a.click()
+            }).catch(e => addToast('Błąd: ' + e.message, 'error'))
+          }}
+          className="ml-2 px-3 py-2 text-xs text-gray-600 hover:text-blue-600 hover:bg-white rounded-md transition-colors"
+          title="Eksportuj wszystkie frazy do CSV"
+        >
+          ↓ CSV
+        </button>
       </div>
 
       {mainTab === 'bulk' && <BulkTab />}
+      {mainTab === 'logs' && <AutopilotLogs />}
       {mainTab === 'schedules' && <>
 
 
@@ -1152,6 +1263,25 @@ export default function Autopilot() {
                         })
                       </button>
                     ))}
+                    <span className="text-gray-300 mx-1">|</span>
+                    {['pillar', 'supporting'].map(t => {
+                      const kws = keywords[sched.id] || []
+                      const count = kws.filter(k => k.keyword_type === t).length
+                      return (
+                        <button
+                          key={t}
+                          onClick={() => {
+                            setKwTypeFilter(f => ({ ...f, [sched.id]: kwTypeFilter[sched.id] === t ? '' : t }))
+                          }}
+                          className={`text-xs px-2 py-1 rounded ${kwTypeFilter[sched.id] === t
+                            ? (t === 'pillar' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-white')
+                            : (t === 'pillar' ? 'bg-blue-50 text-blue-600 hover:bg-blue-100' : 'bg-gray-50 text-gray-600 hover:bg-gray-100')
+                          }`}
+                        >
+                          {t === 'pillar' ? 'Pillar' : 'Supporting'} ({count})
+                        </button>
+                      )
+                    })}
                   </div>
                   {!keywords[sched.id] ? (
                     <p className="text-sm text-gray-400">Ładowanie...</p>
@@ -1173,7 +1303,7 @@ export default function Autopilot() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-50">
-                          {keywords[sched.id].map(kw => (
+                          {keywords[sched.id].filter(kw => !kwTypeFilter[sched.id] || kw.keyword_type === kwTypeFilter[sched.id]).map(kw => (
                             <tr key={kw.id} className="hover:bg-gray-50">
                               <td className="py-1.5 pr-3 font-medium text-gray-800 max-w-[180px] truncate">{kw.keyword}</td>
                               <td className="py-1.5 pr-3 text-gray-500 max-w-[120px] truncate">{kw.pillar_label || '—'}</td>
@@ -1198,7 +1328,14 @@ export default function Autopilot() {
                                   <a href={kw.wp_post_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">link</a>
                                 ) : '—'}
                               </td>
-                              <td className="py-1.5">
+                              <td className="py-1.5 flex gap-1">
+                                {kw.status === 'pending' && (
+                                  <button
+                                    onClick={() => previewKeyword(kw.id)}
+                                    disabled={previewLoading[kw.id]}
+                                    className="text-xs px-2 py-0.5 bg-blue-50 text-blue-600 rounded hover:bg-blue-100 disabled:opacity-50"
+                                  >{previewLoading[kw.id] ? '...' : 'Podgląd'}</button>
+                                )}
                                 {kw.status === 'failed' && (
                                   <button
                                     onClick={() => retryKeyword(kw.id, sched.id)}
@@ -1219,6 +1356,50 @@ export default function Autopilot() {
         </div>
       )}
       </>}
+
+      {/* Preview modal */}
+      {previewModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setPreviewModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div>
+                <h3 className="font-bold text-gray-900">Podgląd artykułu</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Fraza: <strong>{previewModal.keyword}</strong> · Tytuł: {previewModal.title}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(previewModal.content)
+                  }}
+                  className="px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200"
+                >Kopiuj HTML</button>
+                <button onClick={() => setPreviewModal(null)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+              </div>
+            </div>
+            <div className="overflow-y-auto flex-1 px-6 py-4">
+              {previewModal.excerpt && (
+                <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                  <span className="text-xs font-medium text-gray-500">Meta description:</span>
+                  <p className="text-sm text-gray-700 mt-1">{previewModal.excerpt}</p>
+                </div>
+              )}
+              {previewModal.lsi_tags?.length > 0 && (
+                <div className="mb-4 flex gap-1 flex-wrap">
+                  {previewModal.lsi_tags.map((t, i) => (
+                    <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-xs">{t}</span>
+                  ))}
+                </div>
+              )}
+              <div
+                className="prose prose-sm max-w-none"
+                dangerouslySetInnerHTML={{ __html: previewModal.content }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Cannibalization modal */}
       {cannibModal && (

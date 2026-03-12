@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import api from '../api/client'
+import { useToast } from '../components/Toast'
 
 const PAGE_SIZE = 50
 
@@ -230,6 +231,7 @@ function SnapshotsTab() {
 // ── HTTP Auth Modal ───────────────────────────────────────────────────────────
 
 function HttpAuthModal({ domain, onClose }) {
+  const addToast = useToast()
   const [user, setUser] = useState('')
   const [pass, setPass] = useState('')
   const [saving, setSaving] = useState(false)
@@ -242,7 +244,7 @@ function HttpAuthModal({ domain, onClose }) {
       setSaved(true)
       setTimeout(onClose, 800)
     } catch (e) {
-      alert('Błąd zapisu: ' + (e.response?.data?.detail || e.message))
+      addToast('Błąd zapisu: ' + (e.response?.data?.detail || e.message), 'error')
     } finally {
       setSaving(false)
     }
@@ -293,6 +295,8 @@ function LiveTab() {
   const [sortDir, setSortDir] = useState('desc')
   const [filter, setFilter] = useState('all')
   const [authModal, setAuthModal] = useState(null)
+  const [wpTesting, setWpTesting] = useState({})
+  const [wpTestResult, setWpTestResult] = useState(null)
   const [snapping, setSnapping] = useState(false)
   const [snapMsg, setSnapMsg] = useState('')
   const [progress, setProgress] = useState(null)
@@ -441,6 +445,20 @@ function LiveTab() {
   return (
     <div>
       {authModal && <HttpAuthModal domain={authModal} onClose={() => setAuthModal(null)} />}
+      {wpTestResult && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setWpTestResult(null)}>
+          <div className="bg-white rounded-xl shadow-xl p-6 w-96" onClick={e => e.stopPropagation()}>
+            <h3 className="text-base font-semibold text-gray-900 mb-1">Test WP Connection</h3>
+            <p className="text-xs text-gray-500 mb-4">{wpTestResult.domain}</p>
+            <div className={`p-4 rounded-lg text-sm ${wpTestResult.ok ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'}`}>
+              <p className="font-semibold mb-1">{wpTestResult.ok ? 'Połączenie OK' : 'Błąd połączenia'}</p>
+              <p>{wpTestResult.message}</p>
+              {wpTestResult.status_code > 0 && <p className="text-xs mt-1 opacity-70">HTTP {wpTestResult.status_code}</p>}
+            </div>
+            <button onClick={() => setWpTestResult(null)} className="mt-4 w-full py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200">Zamknij</button>
+          </div>
+        </div>
+      )}
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 mb-5">
@@ -600,11 +618,29 @@ function LiveTab() {
                   <td className="px-4 py-3"><ExpiryBadge days={d.days_to_expiry} date={d.expiry_date} /></td>
                   <td className="px-4 py-3"><WpBadge ok={d.wp_ok} /></td>
                   <td className="px-4 py-3"><ScoreBadge score={d.health_score} /></td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 flex items-center gap-1">
                     <button onClick={() => setAuthModal(d)}
                       title="Ustaw Basic Auth (htpasswd)"
                       className="text-gray-400 hover:text-blue-600 text-sm px-2 py-0.5 rounded hover:bg-blue-50 transition-colors">
                       🔑
+                    </button>
+                    <button
+                      onClick={async () => {
+                        setWpTesting(prev => ({ ...prev, [d.id]: true }))
+                        try {
+                          const res = await api.post(`/api/health/${d.id}/test-wp`)
+                          setWpTestResult(res.data)
+                        } catch (e) {
+                          setWpTestResult({ ok: false, domain: d.domain, message: e.response?.data?.detail || e.message, status_code: 0 })
+                        } finally {
+                          setWpTesting(prev => ({ ...prev, [d.id]: false }))
+                        }
+                      }}
+                      disabled={wpTesting[d.id]}
+                      title="Test WP connection"
+                      className="text-gray-400 hover:text-green-600 text-xs px-2 py-0.5 rounded hover:bg-green-50 transition-colors disabled:opacity-40"
+                    >
+                      {wpTesting[d.id] ? '⟳' : 'WP'}
                     </button>
                   </td>
                   <td className="px-4 py-3">

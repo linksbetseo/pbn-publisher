@@ -12,6 +12,7 @@ WORKDIR /app
 COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm ci
 
+# cache bust frontend: 2026-03-12-v3
 COPY frontend/ ./frontend/
 RUN mkdir -p backend/frontend_dist && \
     cd frontend && npm run build && cp -r dist/* ../backend/frontend_dist/

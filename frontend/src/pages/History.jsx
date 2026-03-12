@@ -53,6 +53,7 @@ export default function History() {
 
   useEffect(() => { load(0) }, [clientFilter, statusFilter, batchFilter, dateFrom, dateTo])
 
+  const [retryingAll, setRetryingAll] = useState(false)
   const [retrying, setRetrying] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [preview, setPreview] = useState(null) // { id, title, content }
@@ -268,6 +269,29 @@ export default function History() {
         >
           Odśwież
         </button>
+        {(stats.failed || 0) > 0 && (
+          <button
+            onClick={async () => {
+              if (!confirm(`Ponowić publikację ${stats.failed} nieudanych postów?`)) return
+              setRetryingAll(true)
+              try {
+                const res = await api.post('/api/history/retry-all-failed')
+                addToast(`Ponowiono: ${res.data.succeeded} OK, ${res.data.failed} błędów z ${res.data.retried}`, res.data.succeeded > 0 ? 'success' : 'error')
+                await load(offset)
+              } catch (e) {
+                addToast(e.response?.data?.detail || 'Błąd ponownej publikacji', 'error')
+              } finally {
+                setRetryingAll(false)
+              }
+            }}
+            disabled={retryingAll}
+            className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 disabled:opacity-40 flex items-center gap-2"
+          >
+            {retryingAll ? (
+              <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Ponawiam...</>
+            ) : `Retry all failed (${stats.failed})`}
+          </button>
+        )}
         <button
           onClick={copyAllUrls}
           disabled={posts.filter(p => p.wp_post_url).length === 0}
@@ -322,6 +346,7 @@ export default function History() {
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Domena klienta</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Moja domena</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Tytuł</th>
+                  <th className="text-left px-4 py-3 font-semibold text-gray-600">Slow</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Status</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Link</th>
                   <th className="px-4 py-3"></th>
@@ -343,6 +368,7 @@ export default function History() {
                         {p.title}
                       </button>
                     </td>
+                    <td className="px-4 py-3 text-gray-500 text-xs tabular-nums">{p.word_count || '—'}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[p.status] || 'bg-gray-100 text-gray-600'}`}>
                         {p.status}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { projects as projectsApi, clients as clientsApi, publish as publishApi } from '../api/client'
+import { useToast } from '../components/Toast'
 import DomainSelector from '../components/DomainSelector'
 
 const STEPS = ['Konfiguracja', 'Wybór domen', 'Generowanie', 'Publikacja']
@@ -20,8 +21,11 @@ export default function Publisher() {
   const [customPrompt, setCustomPrompt] = useState('')
   const [useCustomPrompt, setUseCustomPrompt] = useState(false)
   const [language, setLanguage] = useState('pl')
+  const [toneOfVoice, setToneOfVoice] = useState('ekspert')
+  const [useSerpScrape, setUseSerpScrape] = useState(true)
   const [selectedDomainIds, setSelectedDomainIds] = useState([])
   const [generating, setGenerating] = useState(false)
+  const [genProgress, setGenProgress] = useState(null)
   const [generated, setGenerated] = useState(null)
   const [editTitle, setEditTitle] = useState('')
   const [editContent, setEditContent] = useState('')
@@ -32,6 +36,9 @@ export default function Publisher() {
   const [publishing, setPublishing] = useState(false)
   const [publishDone, setPublishDone] = useState(false)
   const [error, setError] = useState('')
+  const [pingSitemap, setPingSitemap] = useState({})
+  const [dripDelay, setDripDelay] = useState(true)
+  const addToast = useToast()
   const fileInputRef = useRef(null)
 
   useEffect(() => {
@@ -59,6 +66,20 @@ export default function Publisher() {
   const handleGenerate = async () => {
     setGenerating(true)
     setError('')
+    const steps = [
+      { label: 'Analiza SERP top10...', pct: 15 },
+      { label: 'Generowanie artykulu (GPT)...', pct: 50 },
+      { label: 'Generowanie obrazka...', pct: 80 },
+      { label: 'Finalizacja...', pct: 95 },
+    ]
+    let stepIdx = 0
+    setGenProgress({ label: steps[0].label, pct: steps[0].pct })
+    const progressTimer = setInterval(() => {
+      stepIdx++
+      if (stepIdx < steps.length) {
+        setGenProgress({ label: steps[stepIdx].label, pct: steps[stepIdx].pct })
+      }
+    }, useSerpScrape ? 12000 : 5000)
     try {
       const res = await publishApi.generate({
         topic,
@@ -70,6 +91,8 @@ export default function Publisher() {
         anchor_text3: anchorText3,
         anchor_url3: anchorUrl3,
         custom_prompt: useCustomPrompt ? customPrompt : '',
+        tone_of_voice: toneOfVoice,
+        use_serp_scrape: useSerpScrape,
       })
       setGenerated(res.data)
       setEditTitle(res.data.title)
@@ -78,6 +101,8 @@ export default function Publisher() {
     } catch (e) {
       setError(e.response?.data?.detail || e.message || 'Błąd generowania')
     } finally {
+      clearInterval(progressTimer)
+      setGenProgress(null)
       setGenerating(false)
     }
   }
@@ -141,6 +166,7 @@ export default function Publisher() {
       custom_prompt: useCustomPrompt ? customPrompt : '',
       language,
       unique_per_domain: true,
+      drip_delay: dripDelay,
     }
 
     try {
@@ -346,6 +372,33 @@ export default function Publisher() {
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Ton głosu</label>
+              <select
+                value={toneOfVoice}
+                onChange={(e) => setToneOfVoice(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="ekspert">Ekspert (autorytatywny)</option>
+                <option value="przyjazny">Przyjazny (doradca)</option>
+                <option value="formalny">Formalny (biznesowy)</option>
+                <option value="poradnikowy">Poradnikowy (krok po kroku)</option>
+              </select>
+            </div>
+            <div className="flex items-end pb-1">
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useSerpScrape}
+                  onChange={(e) => setUseSerpScrape(e.target.checked)}
+                  className="rounded border-gray-300 text-blue-600"
+                />
+                Analizuj SERP top10 (DataForSEO)
+              </label>
+            </div>
+          </div>
+
           {/* Custom prompt */}
           <div>
             <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2 cursor-pointer">
@@ -433,6 +486,17 @@ export default function Publisher() {
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4" />
               <p className="text-gray-600 font-medium">Generowanie artykułu i zdjęcia...</p>
               <p className="text-gray-400 text-sm mt-1">Może potrwać 20-40 sekund</p>
+              {genProgress && (
+                <div className="w-full max-w-md mt-4">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-gray-600">{genProgress.label}</span>
+                    <span className="text-xs text-gray-400">{genProgress.pct}%</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div className="bg-blue-600 h-2 rounded-full transition-all duration-1000 ease-out" style={{ width: `${genProgress.pct}%` }} />
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex gap-3">
@@ -558,10 +622,19 @@ export default function Publisher() {
             <h3 className="font-semibold text-gray-800 mb-3">Publikacja na {selectedDomainIds.length} domenach</h3>
 
             {!publishing && !publishDone && (
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <p className="text-sm text-gray-600">
                   Link kotwiczny prowadzi do <strong>{selectedClientDomain}</strong>.
                 </p>
+                <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={dripDelay}
+                    onChange={e => setDripDelay(e.target.checked)}
+                    className="rounded border-gray-300 text-blue-600"
+                  />
+                  Drip publishing (losowe odstepy miedzy domenami)
+                </label>
                 <div className="flex gap-2">
                   <button
                     onClick={() => { setGenerated(null); setStep(2) }}
@@ -615,12 +688,33 @@ export default function Publisher() {
                       Sukces: <strong className="text-green-600">{publishResults.filter(r => r.status === 'published').length}</strong> |
                       Błędy: <strong className="text-red-600">{publishResults.filter(r => r.status !== 'published').length}</strong>
                     </p>
-                    <button
-                      onClick={resetAll}
-                      className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
-                    >
-                      Nowa publikacja
-                    </button>
+                    <div className="flex gap-2 mb-2">
+                      <button
+                        onClick={async () => {
+                          const domains = [...new Set(publishResults.filter(r => r.status === 'published').map(r => r.domain))]
+                          setPingSitemap({ loading: true })
+                          let ok = 0
+                          for (const dom of domains) {
+                            try {
+                              await publishApi.pingSitemap({ domain: dom })
+                              ok++
+                            } catch {}
+                          }
+                          setPingSitemap({ loading: false })
+                          addToast(`Sitemap ping wysłany do ${ok}/${domains.length} domen`, 'success')
+                        }}
+                        disabled={pingSitemap.loading}
+                        className="flex-1 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:opacity-50"
+                      >
+                        {pingSitemap.loading ? 'Pingowanie...' : 'Ping Sitemap (Google + Bing)'}
+                      </button>
+                      <button
+                        onClick={resetAll}
+                        className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                      >
+                        Nowa publikacja
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

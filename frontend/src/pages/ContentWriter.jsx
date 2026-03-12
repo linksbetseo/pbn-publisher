@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import api from '../api/client'
+import { useToast } from '../components/Toast'
 
 const TONES = [
   { value: 'ekspert', label: 'Ekspert (autorytatywny)' },
@@ -9,6 +10,7 @@ const TONES = [
 ]
 
 export default function ContentWriter() {
+  const addToast = useToast()
   const [form, setForm] = useState({
     keyword: '',
     client_domain: '',
@@ -30,6 +32,19 @@ export default function ContentWriter() {
   const [error, setError] = useState('')
   const [copied, setCopied] = useState('')
   const [previewMode, setPreviewMode] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [progress, setProgress] = useState(null)
+  const [serpCache, setSerpCache] = useState(null)
+  const [autopilotDomains, setAutopilotDomains] = useState([])
+  const [selectedAutopilotDomain, setSelectedAutopilotDomain] = useState('')
+  const [sendingToAutopilot, setSendingToAutopilot] = useState(false)
+  const [sentToAutopilot, setSentToAutopilot] = useState(false)
+  const pollRef = useRef(null)
+
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [])
 
   const set = (field, value) => setForm(f => ({ ...f, [field]: value }))
 
@@ -41,6 +56,23 @@ export default function ContentWriter() {
     setLoading(true)
     setError('')
     setResult(null)
+    setSaved(false)
+    // Animated progress steps
+    const steps = [
+      { label: 'Analiza SERP top10...', pct: 15 },
+      { label: 'Generowanie artykulu (GPT)...', pct: 50 },
+      { label: 'Wzbogacanie treści...', pct: 75 },
+      { label: 'Wzbogacanie tresci (TOC, FAQ)...', pct: 90 },
+      { label: 'Finalizacja...', pct: 95 },
+    ]
+    let stepIdx = 0
+    setProgress({ label: steps[0].label, pct: steps[0].pct })
+    const progressTimer = setInterval(() => {
+      stepIdx++
+      if (stepIdx < steps.length) {
+        setProgress({ label: steps[stepIdx].label, pct: steps[stepIdx].pct })
+      }
+    }, form.use_serp_scrape ? 12000 : 5000)
     try {
       const supporting_page_urls = form.supporting_page_urls
         .split('\n')
@@ -63,9 +95,19 @@ export default function ContentWriter() {
         use_serp_scrape: form.use_serp_scrape,
       })
       setResult(resp.data)
+      // Check SERP cache TTL
+      api.get('/api/content-writer/serp-cache-info', { params: { keyword: form.keyword.trim() } })
+        .then(r => setSerpCache(r.data))
+        .catch(() => {})
+      // Load domains for autopilot send
+      api.get('/api/domains', { params: { active: 1 } })
+        .then(r => setAutopilotDomains(r.data || []))
+        .catch(() => {})
     } catch (e) {
       setError(e.response?.data?.detail || e.message || 'Błąd generowania artykułu')
     } finally {
+      clearInterval(progressTimer)
+      setProgress(null)
       setLoading(false)
     }
   }
@@ -217,9 +259,25 @@ export default function ContentWriter() {
             className="w-full py-3 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {loading ? (
-              <><span className="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full" />Generuję artykuł (30-60s)...</>
+              <><span className="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full" />Generuję artykuł...</>
             ) : 'Generuj artykuł SEO'}
           </button>
+
+          {/* Progress bar */}
+          {loading && progress && (
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-gray-700">{progress.label}</span>
+                <span className="text-xs text-gray-500">{progress.pct}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div
+                  className="bg-blue-600 h-2 rounded-full transition-all duration-1000 ease-out"
+                  style={{ width: `${progress.pct}%` }}
+                />
+              </div>
+            </div>
+          )}
 
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm">{error}</div>
@@ -234,7 +292,14 @@ export default function ContentWriter() {
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="font-semibold text-gray-800 text-sm uppercase tracking-wide">Meta dane</h3>
-                  <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">{wordCount} słów</span>
+                  <div className="flex items-center gap-2">
+                    {serpCache && serpCache.cached && (
+                      <span className="text-xs text-purple-600 bg-purple-50 px-2 py-1 rounded-full" title="Dane SERP z cache">
+                        SERP cache {serpCache.expires_in_hours}h
+                      </span>
+                    )}
+                    <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">{wordCount} słów</span>
+                  </div>
                 </div>
                 <div className="space-y-3">
                   <div>
@@ -305,6 +370,78 @@ export default function ContentWriter() {
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 bg-gray-50 resize-none focus:outline-none"
                   />
                 )}
+              </div>
+
+              {/* Save to history */}
+              <button
+                onClick={async () => {
+                  setSaving(true)
+                  try {
+                    await api.post('/api/content-writer/save', {
+                      keyword: form.keyword,
+                      title: result.title,
+                      content: result.content,
+                      client_domain: form.client_domain,
+                      meta_description: result.meta_description || '',
+                    })
+                    setSaved(true)
+                    addToast('Artykuł zapisany w historii', 'success')
+                    setTimeout(() => setSaved(false), 3000)
+                  } catch (e) {
+                    addToast('Błąd zapisu: ' + (e.response?.data?.detail || e.message), 'error')
+                  } finally {
+                    setSaving(false)
+                  }
+                }}
+                disabled={saving || saved}
+                className={`w-full py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 ${saved ? 'bg-green-600 text-white' : 'bg-gray-800 text-white hover:bg-gray-900 disabled:opacity-50'}`}
+              >
+                {saved ? 'Zapisano w historii' : saving ? 'Zapisuję...' : 'Zapisz do historii'}
+              </button>
+
+              {/* Send to Autopilot */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm uppercase tracking-wide">Wyślij do Autopilota</h3>
+                <p className="text-xs text-gray-500 mb-3">Dodaj artykuł do kolejki autopilota na wybranej domenie PBN</p>
+                <div className="flex gap-2">
+                  <select
+                    value={selectedAutopilotDomain}
+                    onChange={e => setSelectedAutopilotDomain(e.target.value)}
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  >
+                    <option value="">— wybierz domenę PBN —</option>
+                    {autopilotDomains.map(d => (
+                      <option key={d.id} value={d.id}>{d.domain}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={async () => {
+                      if (!selectedAutopilotDomain) { addToast('Wybierz domenę', 'warning'); return }
+                      setSendingToAutopilot(true)
+                      try {
+                        const res = await api.post('/api/content-writer/send-to-autopilot', {
+                          keyword: form.keyword,
+                          title: result.title,
+                          content: result.content,
+                          my_domain_id: parseInt(selectedAutopilotDomain),
+                          client_domain: form.client_domain,
+                          anchor_text: form.anchor_text,
+                        })
+                        setSentToAutopilot(true)
+                        addToast(res.data.message, 'success')
+                        setTimeout(() => setSentToAutopilot(false), 3000)
+                      } catch (e) {
+                        addToast(e.response?.data?.detail || 'Błąd wysyłania do autopilota', 'error')
+                      } finally {
+                        setSendingToAutopilot(false)
+                      }
+                    }}
+                    disabled={sendingToAutopilot || sentToAutopilot || !selectedAutopilotDomain}
+                    className={`px-4 py-2 rounded-lg text-sm font-semibold ${sentToAutopilot ? 'bg-green-600 text-white' : 'bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50'}`}
+                  >
+                    {sentToAutopilot ? 'Wysłano!' : sendingToAutopilot ? 'Wysyłam...' : 'Wyślij'}
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
