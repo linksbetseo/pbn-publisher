@@ -92,28 +92,37 @@ async def ensure_tables():
 async def _dfs_domain_metrics(domain: str, location_code: int = 2616, language_code: str = "pl") -> dict:
     """Fetch organic traffic + keyword count from DataForSEO."""
     if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        logger.warning("[Health] DFS credentials not set — skipping metrics")
         return {}
     creds = base64.b64encode(f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()).decode()
     headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
     clean = re.sub(r"^https?://", "", domain).rstrip("/")
     payload = [{"target": clean, "location_code": location_code, "language_code": language_code}]
     try:
-        async with httpx.AsyncClient(timeout=18) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://api.dataforseo.com/v3/dataforseo_labs/google/domain_rank_overview/live",
                 json=payload,
                 headers=headers,
             )
             if resp.status_code != 200:
+                logger.warning(f"[Health] DFS HTTP {resp.status_code} for {clean}")
                 return {}
             data = resp.json()
         for task in data.get("tasks", []):
+            status_code = task.get("status_code", 0)
+            if status_code != 20000:
+                logger.info(f"[Health] DFS task status {status_code} for {clean}: {task.get('status_message', '')}")
             for result in task.get("result", []):
                 metrics = result.get("metrics", {}).get("organic", {})
+                traffic = int(metrics.get("etv", 0) or 0)
+                keywords = int(metrics.get("count", 0) or 0)
+                logger.info(f"[Health] DFS {clean}: traffic={traffic}, keywords={keywords}")
                 return {
-                    "traffic": int(metrics.get("etv", 0) or 0),
-                    "keywords": int(metrics.get("count", 0) or 0),
+                    "traffic": traffic,
+                    "keywords": keywords,
                 }
+        logger.info(f"[Health] DFS no results for {clean} (domain may have no organic data)")
     except Exception as e:
         logger.warning(f"[Health] DFS metrics failed for {domain}: {e}")
     return {}
@@ -337,46 +346,55 @@ async def run_weekly_snapshot():
         progress_id = cur.lastrowid
         await db.commit()
 
-    # Process in batches of 10 (parallel per batch)
+    # Process in batches of 5 (smaller to avoid rate-limiting)
     results = []
-    BATCH = 10
-    for i in range(0, total, BATCH):
-        batch = rows[i:i + BATCH]
-        batch_results = await asyncio.gather(*[_domain_health_safe(r) for r in batch])
-        results.extend(batch_results)
-        done = min(i + BATCH, total)
+    BATCH = 5
+    try:
+        for i in range(0, total, BATCH):
+            batch = rows[i:i + BATCH]
+            batch_results = await asyncio.gather(*[_domain_health_safe(r) for r in batch])
+            results.extend(batch_results)
+            done = min(i + BATCH, total)
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE domain_health_snapshot_progress SET done=? WHERE id=?",
+                    (done, progress_id)
+                )
+                await db.commit()
+            logger.info(f"[HealthCron] Batch {i//BATCH+1}: {done}/{total} done")
+    except Exception as e:
+        logger.error(f"[HealthCron] Batch processing failed at {len(results)}/{total}: {e}")
+
+    # Save whatever results we have (even partial)
+    if results:
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE domain_health_snapshot_progress SET done=? WHERE id=?",
-                (done, progress_id)
+            await db.executemany(
+                """INSERT INTO domain_health_snapshots
+                   (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (r["id"], r["domain"], r["traffic"], r["keywords"],
+                     1 if r.get("wp_ok") else 0,
+                     r.get("expiry_date"), r.get("days_to_expiry"), r.get("health_score", "weak"),
+                     r.get("dr"), snapped_at)
+                    for r in results
+                ]
+            )
+            await db.executemany(
+                "UPDATE my_domains SET wp_ok=? WHERE id=?",
+                [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
             )
             await db.commit()
 
-    # Save all results in one batch
+    # Always mark progress as finished (even on error)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.executemany(
-            """INSERT INTO domain_health_snapshots
-               (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            [
-                (r["id"], r["domain"], r["traffic"], r["keywords"],
-                 1 if r.get("wp_ok") else 0,
-                 r.get("expiry_date"), r.get("days_to_expiry"), r.get("health_score", "weak"),
-                 r.get("dr"), snapped_at)
-                for r in results
-            ]
-        )
-        await db.executemany(
-            "UPDATE my_domains SET wp_ok=? WHERE id=?",
-            [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
-        )
         await db.execute(
             "UPDATE domain_health_snapshot_progress SET done=?, finished=1, finished_at=? WHERE id=?",
-            (total, datetime.now(timezone.utc).isoformat(), progress_id)
+            (len(results), datetime.now(timezone.utc).isoformat(), progress_id)
         )
         await db.commit()
 
-    logger.info(f"[HealthCron] Snapshot done: {len(results)} domains")
+    logger.info(f"[HealthCron] Snapshot done: {len(results)}/{total} domains")
     return len(results)
 
 
@@ -595,64 +613,74 @@ async def run_quick_snapshot():
             if isinstance(wp_ok, Exception): wp_ok = False
             traffic = metrics.get("traffic", 0) or 0
             keywords = metrics.get("keywords", 0) or 0
-            # Preserve existing WHOIS data from last full snapshot
             return {"id": row["id"], "domain": domain, "traffic": traffic,
                     "keywords": keywords, "wp_ok": bool(wp_ok), "health_score": _health_score(traffic, keywords)}
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[HealthQuick] _quick_check failed for {row.get('domain')}: {e}")
             return {"id": row["id"], "domain": domain, "traffic": 0,
                     "keywords": 0, "wp_ok": False, "health_score": "weak"}
 
     results = []
-    BATCH = 15  # larger batches — no slow WHOIS
-    for i in range(0, total, BATCH):
-        batch = rows[i:i + BATCH]
-        batch_results = await asyncio.gather(*[_quick_check(r) for r in batch])
-        results.extend(batch_results)
-        done = min(i + BATCH, total)
+    BATCH = 8
+    try:
+        for i in range(0, total, BATCH):
+            batch = rows[i:i + BATCH]
+            batch_results = await asyncio.gather(*[_quick_check(r) for r in batch])
+            results.extend(batch_results)
+            done = min(i + BATCH, total)
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE domain_health_snapshot_progress SET done=? WHERE id=?",
+                    (done, progress_id)
+                )
+                await db.commit()
+            logger.info(f"[HealthQuick] Batch {i//BATCH+1}: {done}/{total} done")
+    except Exception as e:
+        logger.error(f"[HealthQuick] Batch processing failed at {len(results)}/{total}: {e}")
+
+    # Save whatever results we have
+    if results:
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE domain_health_snapshot_progress SET done=? WHERE id=?",
-                (done, progress_id)
+            # Merge with existing expiry data from last snapshot
+            async with db.execute(
+                """SELECT my_domain_id, expiry_date, days_to_expiry, dr
+                   FROM domain_health_snapshots
+                   WHERE id IN (SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id)"""
+            ) as cur:
+                existing = {r["my_domain_id"]: dict(r) for r in await cur.fetchall()}
+
+            await db.executemany(
+                """INSERT INTO domain_health_snapshots
+                   (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (r["id"], r["domain"], r["traffic"], r["keywords"],
+                     1 if r.get("wp_ok") else 0,
+                     existing.get(r["id"], {}).get("expiry_date"),
+                     existing.get(r["id"], {}).get("days_to_expiry"),
+                     _health_score(r["traffic"], r["keywords"],
+                                   existing.get(r["id"], {}).get("days_to_expiry"),
+                                   existing.get(r["id"], {}).get("dr")),
+                     existing.get(r["id"], {}).get("dr"),
+                     snapped_at)
+                    for r in results
+                ]
+            )
+            await db.executemany(
+                "UPDATE my_domains SET wp_ok=? WHERE id=?",
+                [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
             )
             await db.commit()
 
+    # Always mark as finished
     async with aiosqlite.connect(DB_PATH) as db:
-        # Merge with existing expiry data from last snapshot
-        async with db.execute(
-            """SELECT my_domain_id, expiry_date, days_to_expiry, dr
-               FROM domain_health_snapshots
-               WHERE id IN (SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id)"""
-        ) as cur:
-            existing = {r["my_domain_id"]: dict(r) for r in await cur.fetchall()}
-
-        await db.executemany(
-            """INSERT INTO domain_health_snapshots
-               (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            [
-                (r["id"], r["domain"], r["traffic"], r["keywords"],
-                 1 if r.get("wp_ok") else 0,
-                 existing.get(r["id"], {}).get("expiry_date"),
-                 existing.get(r["id"], {}).get("days_to_expiry"),
-                 _health_score(r["traffic"], r["keywords"],
-                               existing.get(r["id"], {}).get("days_to_expiry"),
-                               existing.get(r["id"], {}).get("dr")),
-                 existing.get(r["id"], {}).get("dr"),
-                 snapped_at)
-                for r in results
-            ]
-        )
-        await db.executemany(
-            "UPDATE my_domains SET wp_ok=? WHERE id=?",
-            [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
-        )
         await db.execute(
             "UPDATE domain_health_snapshot_progress SET done=?, finished=1, finished_at=? WHERE id=?",
-            (total, datetime.now(timezone.utc).isoformat(), progress_id)
+            (len(results), datetime.now(timezone.utc).isoformat(), progress_id)
         )
         await db.commit()
 
-    logger.info(f"[HealthQuick] Quick snapshot done: {len(results)} domains")
+    logger.info(f"[HealthQuick] Quick snapshot done: {len(results)}/{total} domains")
     return len(results)
 
 
@@ -670,6 +698,19 @@ async def trigger_quick_snapshot(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(run_quick_snapshot)
     return {"message": "Szybki snapshot uruchomiony (DataForSEO + WP)", "already_running": False}
+
+
+@router.post("/snapshot-reset")
+async def reset_snapshot_progress():
+    """Force-finish any stuck snapshot progress so a new one can start."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE domain_health_snapshot_progress SET finished=1, finished_at=? WHERE finished=0",
+            (datetime.now(timezone.utc).isoformat(),)
+        )
+        await db.commit()
+    return {"ok": True, "message": "Stuck snapshot progress reset"}
 
 
 @router.get("/export-csv")

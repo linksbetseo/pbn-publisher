@@ -55,17 +55,38 @@ function StatCard({ label, value, sub, color, onClick, active }) {
 function SnapshotProgress({ progress, onDone }) {
   if (!progress || !progress.running) return null
   const pct = progress.pct || 0
+  // Check if stuck (started > 15 min ago)
+  const startedAt = progress.started_at ? new Date(progress.started_at + 'Z') : null
+  const stuckMinutes = startedAt ? Math.round((Date.now() - startedAt.getTime()) / 60000) : 0
+  const isStuck = stuckMinutes > 15
+
+  const handleReset = async () => {
+    try {
+      await api.post('/api/health/snapshot-reset')
+      if (onDone) onDone()
+      window.location.reload()
+    } catch {}
+  }
+
   return (
-    <div className="mb-4 px-4 py-3 bg-blue-50 border border-blue-200 rounded-xl">
+    <div className={`mb-4 px-4 py-3 border rounded-xl ${isStuck ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'}`}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-semibold text-blue-700">
-          Snapshot w toku — {progress.done}/{progress.total} domen ({pct}%)
+        <span className={`text-xs font-semibold ${isStuck ? 'text-orange-700' : 'text-blue-700'}`}>
+          {isStuck
+            ? `Snapshot prawdopodobnie zawisnął (${stuckMinutes} min) — ${progress.done}/${progress.total} domen`
+            : `Snapshot w toku — ${progress.done}/${progress.total} domen (${pct}%)`}
         </span>
-        <span className="text-xs text-blue-500 animate-pulse">● działa</span>
+        {isStuck ? (
+          <button onClick={handleReset} className="text-xs bg-orange-600 text-white px-3 py-1 rounded-lg hover:bg-orange-700">
+            Resetuj i spróbuj ponownie
+          </button>
+        ) : (
+          <span className="text-xs text-blue-500 animate-pulse">● działa</span>
+        )}
       </div>
       <div className="w-full bg-blue-100 rounded-full h-2">
         <div
-          className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+          className={`h-2 rounded-full transition-all duration-500 ${isStuck ? 'bg-orange-400' : 'bg-blue-500'}`}
           style={{ width: `${pct}%` }}
         />
       </div>
