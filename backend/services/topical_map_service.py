@@ -154,12 +154,20 @@ def _coherence_score(keyword: str, seed_toks: set, seed: str) -> float:
 
 def _differentiators(keyword: str, seed_toks: set) -> list[str]:
     """
-    Tokens that DIFFERENTIATE the keyword from the seed.
-    Seed='prawo pracy', keyword='prawo pracy urlop' → ['urlop']
-    These become cluster anchors (topic facets).
+    Tokens and bigrams that DIFFERENTIATE the keyword from the seed.
+    Returns both single tokens and consecutive 2-token bigrams.
+    Seed='prawo pracy', keyword='prawo pracy urlop macierzyński' → ['urlop', 'macierzynski', 'urlop macierzynski']
+    Bigrams produce more precise cluster anchors (e.g. 'urlop macierzynski' vs just 'urlop').
     """
     tokens = _tokenize(keyword)
-    return [t for t in tokens if t not in seed_toks]
+    diff_tokens = [t for t in tokens if t not in seed_toks]
+    # Build bigrams from consecutive diff tokens in original order
+    bigrams = []
+    for i in range(len(tokens) - 1):
+        a, b = tokens[i], tokens[i + 1]
+        if a not in seed_toks and b not in seed_toks:
+            bigrams.append(f"{a} {b}")
+    return diff_tokens + bigrams
 
 
 # ── SiteFocus: cluster focus score ────────────────────────────────────────────
@@ -169,12 +177,13 @@ def _cluster_focus_score(kw_list: list[dict], anchor: str) -> float:
     Measures how tight (focused) a cluster is around its anchor (SiteFocus proxy).
     High score = all keywords share the same differentiator → high topical focus.
     Low score = keywords are loosely related → cluster is diluting SiteFocus.
+    Supports both single-token and bigram anchors (e.g. 'urlop macierzynski').
 
     Returns score in [0, 1].
     """
     if not kw_list:
         return 0.0
-    anchor_toks = set(_tokenize(anchor))
+    anchor_toks = set(anchor.split()) if " " in anchor else set(_tokenize(anchor))
     scores = []
     for kw in kw_list:
         kw_toks = set(_tokenize(kw["keyword"]))
@@ -221,10 +230,11 @@ def _cluster(
         for d in diffs:
             token_to_kws[d].append(kw)
 
-    # Score each differentiator token combining:
+    # Score each differentiator (token or bigram) combining:
     # - breadth (how many keywords use it) → SiteFocus: more coverage = better
     # - volume (total search demand) → commercial value
     # - cluster_focus_score → how tight the cluster is (SiteFocus proxy)
+    # Bigrams get a 1.5x bonus because they produce more precise clusters
     token_scores: dict[str, float] = {}
     for token, kws in token_to_kws.items():
         if len(kws) < 2:
@@ -232,7 +242,10 @@ def _cluster(
         total_vol = sum(k.get("search_volume", 0) for k in kws)
         focus = _cluster_focus_score(kws, token)
         # SiteFocus-weighted score: focus score amplifies well-defined clusters
-        token_scores[token] = (len(kws) * 2 + total_vol / 500) * (0.5 + focus)
+        base_score = (len(kws) * 2 + total_vol / 500) * (0.5 + focus)
+        # Bigram bonus: multi-token anchors are more specific → better SiteFocus
+        bigram_bonus = 1.5 if " " in token else 1.0
+        token_scores[token] = base_score * bigram_bonus
 
     # Select top anchors, deduplicate via Jaccard similarity (not prefix-4)
     top_tokens = sorted(token_scores, key=lambda x: token_scores[x], reverse=True)
@@ -249,32 +262,52 @@ def _cluster(
     for token in top_tokens:
         if len(selected_anchors) >= max_clusters:
             break
-        # Jaccard > 0.6 = too similar (covers inflections: urlop/urlopów, prawo/prawa)
-        too_similar = any(
-            _jaccard(token, a) > 0.6
-            for a in selected_anchors
-            if len(token) > 3 and len(a) > 3
-        )
+        # Check similarity: Jaccard on chars OR bigram subsumes single token
+        too_similar = False
+        for a in selected_anchors:
+            # Bigram subsumption: "urlop macierzynski" subsumes "urlop"
+            if " " in token and a in token.split():
+                too_similar = True
+                break
+            if " " in a and token in a.split():
+                too_similar = True
+                break
+            # Jaccard > 0.6 = too similar (covers inflections: urlop/urlopów, prawo/prawa)
+            if len(token) > 3 and len(a) > 3 and _jaccard(token, a) > 0.6:
+                too_similar = True
+                break
         if too_similar:
             continue
         selected_anchors.append(token)
         clusters[token] = []
 
     # Assign each keyword to best-matching cluster
+    # For bigram anchors: check if all bigram tokens appear in keyword's differentiators
     assigned: set[str] = set()
     for kw in sorted(keywords, key=lambda x: x.get("search_volume", 0), reverse=True):
         kw_text = kw["keyword"]
         if kw_text in assigned:
             continue
         diffs = kw_to_diffs.get(kw_text, [])
+        diff_tokens_set = set(t for t in diffs if " " not in t)  # only single tokens
         best_anchor = None
         best_score = -1
         for anchor in selected_anchors:
-            if anchor in diffs:
-                score = token_scores.get(anchor, 0)
-                if score > best_score:
-                    best_score = score
-                    best_anchor = anchor
+            if " " in anchor:
+                # Bigram anchor: all parts must be in diff tokens
+                parts = anchor.split()
+                if all(p in diff_tokens_set for p in parts):
+                    score = token_scores.get(anchor, 0)
+                    if score > best_score:
+                        best_score = score
+                        best_anchor = anchor
+            else:
+                # Single token anchor
+                if anchor in diffs:
+                    score = token_scores.get(anchor, 0)
+                    if score > best_score:
+                        best_score = score
+                        best_anchor = anchor
         if best_anchor:
             clusters[best_anchor].append(kw)
             assigned.add(kw_text)
@@ -505,6 +538,9 @@ async def generate_topical_map(
             "avg_difficulty": cluster["avg_difficulty"],
         })
 
+    # Sort pillars by avg_difficulty ASC — publish low-KD clusters first for faster indexation
+    pillars.sort(key=lambda p: p["avg_difficulty"])
+
     # Compute site-level SiteFocus / SiteRadius
     site_metrics = _compute_site_metrics(pillars, seed, keywords)
     logger.info(
@@ -512,6 +548,35 @@ async def generate_topical_map(
         f"SiteRadius={site_metrics['site_radius']} ({site_metrics['radius_rating']}), "
         f"coverage={site_metrics['coverage']}"
     )
+
+    # Cross-pillar interlinking map: compute pillar-to-pillar token similarity
+    # Each pillar gets a list of related pillars it should link to
+    pillar_token_sets = {}
+    for i, p in enumerate(pillars):
+        all_kws = [p["pillar_keyword"]] + [sk["keyword"] for sk in p["supporting_keywords"]]
+        tokens = set()
+        for kw_text in all_kws:
+            tokens.update(_tokenize(kw_text))
+        tokens -= seed_toks  # remove seed tokens, only differentiation matters
+        pillar_token_sets[i] = tokens
+
+    for i, p in enumerate(pillars):
+        related = []
+        for j, p2 in enumerate(pillars):
+            if i == j:
+                continue
+            shared = pillar_token_sets[i] & pillar_token_sets[j]
+            union = pillar_token_sets[i] | pillar_token_sets[j]
+            similarity = len(shared) / len(union) if union else 0
+            if similarity > 0.05:  # minimal topical overlap
+                related.append({
+                    "pillar_index": j,
+                    "pillar_keyword": p2["pillar_keyword"],
+                    "similarity": round(similarity, 3),
+                })
+        # Sort by similarity DESC, keep top 3 related pillars
+        related.sort(key=lambda x: x["similarity"], reverse=True)
+        p["related_pillars"] = related[:3]
 
     # Force Graph
     nodes = [{"id": "seed", "label": seed, "type": "seed", "size": 24, "color": "#1a2332"}]
@@ -544,6 +609,21 @@ async def generate_topical_map(
                 "coherence": sk.get("coherence", 0),
             })
             links.append({"source": pid, "target": sid, "strength": sk.get("coherence", 0.5)})
+
+    # Add cross-pillar links to force graph (dashed lines between related pillars)
+    seen_pairs = set()
+    for i, p in enumerate(pillars):
+        for rel in p.get("related_pillars", []):
+            j = rel["pillar_index"]
+            pair = (min(i, j), max(i, j))
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                links.append({
+                    "source": f"pillar_{i}",
+                    "target": f"pillar_{j}",
+                    "strength": rel["similarity"],
+                    "type": "cross_pillar",
+                })
 
     result = {
         "seed": seed,

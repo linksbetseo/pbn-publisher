@@ -760,7 +760,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             async with db.execute(
                 """SELECT * FROM domain_keywords
                    WHERE schedule_id = ? AND status = 'pending'
-                   ORDER BY keyword_type DESC, search_volume DESC
+                   ORDER BY keyword_type DESC, keyword_difficulty ASC, search_volume DESC
                    LIMIT ?""",
                 (schedule_id, limit)
             ) as cur:
