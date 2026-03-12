@@ -373,10 +373,21 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
             (sched["my_domain_id"],)
         ) as cur:
             domain_published_kws = {row[0] for row in await cur.fetchall()}
+
+        # Also exclude titles from manual publisher (posts table) — avoid content overlap
+        async with db.execute(
+            "SELECT DISTINCT title FROM posts WHERE my_domain_id=? AND status='published'",
+            (sched["my_domain_id"],)
+        ) as cur:
+            manual_titles = {row[0] for row in await cur.fetchall()}
+
         existing_kws |= domain_published_kws
 
-        # Build stem index from already-published keywords for cannibalization detection
+        # Build stem index from already-published keywords + manual post titles for cannibalization detection
         published_stems: dict[str, str] = {_kw_stem(kw): kw for kw in domain_published_kws}
+        for title in manual_titles:
+            stem = _kw_stem(title)
+            published_stems.setdefault(stem, title)
 
         for pillar in tmap.get("pillars", []):
             anchor = pillar["anchor"]
