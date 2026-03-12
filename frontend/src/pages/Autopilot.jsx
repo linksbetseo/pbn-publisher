@@ -584,6 +584,8 @@ export default function Autopilot() {
     }
   }
 
+  const pending_count = (id) => keywords[id]?.filter(k => k.status === 'pending').length ?? '?'
+
   const runNow = async (sched, limitOverride = null) => {
     const id = sched.id
     setRunning(r => ({ ...r, [id]: true }))
@@ -721,7 +723,6 @@ export default function Autopilot() {
 
   const set = (f, v) => setNewForm(n => ({ ...n, [f]: v }))
   const fmt = (s) => s ? new Date(s).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
-  const pending_count = (id) => keywords[id]?.filter(k => k.status === 'pending').length ?? '?'
 
   const [mainTab, setMainTab] = useState('schedules')
 
