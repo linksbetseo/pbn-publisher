@@ -173,7 +173,7 @@ class DataForSEOClient:
                 "location_code": location_code,
                 "language_code": language_code,
                 "limit": limit,
-                "depth": 2,
+                "depth": 1,
             }]
         )
         keywords = []

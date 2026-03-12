@@ -234,18 +234,24 @@ def _cluster(
         # SiteFocus-weighted score: focus score amplifies well-defined clusters
         token_scores[token] = (len(kws) * 2 + total_vol / 500) * (0.5 + focus)
 
-    # Select top anchors, deduplicate semantically similar ones
+    # Select top anchors, deduplicate via Jaccard similarity (not prefix-4)
     top_tokens = sorted(token_scores, key=lambda x: token_scores[x], reverse=True)
 
     selected_anchors: list[str] = []
     clusters: dict[str, list] = {}
 
+    def _jaccard(a: str, b: str) -> float:
+        sa, sb = set(a), set(b)
+        inter = len(sa & sb)
+        union = len(sa | sb)
+        return inter / union if union else 0.0
+
     for token in top_tokens:
         if len(selected_anchors) >= max_clusters:
             break
-        # Skip tokens too similar to already-selected ones (avoids SiteRadius drift from near-duplicate clusters)
+        # Jaccard > 0.6 = too similar (covers inflections: urlop/urlopów, prawo/prawa)
         too_similar = any(
-            token.startswith(a[:4]) or a.startswith(token[:4])
+            _jaccard(token, a) > 0.6
             for a in selected_anchors
             if len(token) > 3 and len(a) > 3
         )
@@ -273,18 +279,33 @@ def _cluster(
             clusters[best_anchor].append(kw)
             assigned.add(kw_text)
 
-    # Unassigned keywords → best-matching cluster by token overlap (not just biggest)
+    # Unassigned keywords → best-matching cluster by token overlap
+    # If zero overlap with all anchors → assign to largest cluster (safest fallback)
     unassigned = [kw for kw in keywords if kw["keyword"] not in assigned]
     if unassigned and selected_anchors:
         kw_toks_cache = {kw["keyword"]: set(_tokenize(kw["keyword"])) for kw in unassigned}
         anchor_toks_cache = {a: set(_tokenize(a)) for a in selected_anchors}
+        largest_anchor = max(selected_anchors, key=lambda a: len(clusters[a]))
         for kw in unassigned:
             kw_toks = kw_toks_cache[kw["keyword"]]
-            best_a = max(
-                selected_anchors,
-                key=lambda a: len(kw_toks & anchor_toks_cache[a]),
-            )
+            overlaps = {a: len(kw_toks & anchor_toks_cache[a]) for a in selected_anchors}
+            max_overlap = max(overlaps.values())
+            if max_overlap > 0:
+                best_a = max(selected_anchors, key=lambda a: overlaps[a])
+            else:
+                best_a = largest_anchor  # zero overlap → safest fallback
             clusters[best_a].append(kw)
+
+    # Merge tiny clusters (< 3 keywords) into the largest cluster
+    MIN_CLUSTER_SIZE = 3
+    if len(clusters) > 2:
+        largest = max(clusters, key=lambda a: len(clusters[a]))
+        tiny_anchors = [a for a in list(clusters) if a != largest and len(clusters[a]) < MIN_CLUSTER_SIZE]
+        for ta in tiny_anchors:
+            clusters[largest].extend(clusters[ta])
+            del clusters[ta]
+            if ta in selected_anchors:
+                selected_anchors.remove(ta)
 
     # Build result with SiteFocus scores attached
     result = []
@@ -295,16 +316,17 @@ def _cluster(
         avg_diff = sum(k.get("keyword_difficulty", 0) for k in kws) / len(kws)
         focus_score = _cluster_focus_score(kws, anchor)
 
-        label_words = anchor.split()[:3]
-        label = " ".join(w.capitalize() for w in label_words)
+        # Label from top keyword in cluster (more natural than seed + anchor)
+        top_kw = max(kws, key=lambda k: k.get("search_volume", 0))
+        label = top_kw["keyword"].title()
 
         result.append({
             "anchor": anchor,
-            "label": f"{' '.join(w.capitalize() for w in seed.split())} — {label}",
+            "label": label,
             "keywords": kws,
             "total_volume": total_vol,
             "avg_difficulty": round(avg_diff, 1),
-            "focus_score": focus_score,  # SiteFocus proxy per cluster (0–1)
+            "focus_score": focus_score,
         })
 
     return sorted(result, key=lambda x: x["total_volume"], reverse=True)
@@ -379,7 +401,7 @@ async def generate_topical_map(
     Returns site-level SiteFocus + SiteRadius metrics alongside the map.
     """
     cache_key = hashlib.md5(
-        f"{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}".encode()
+        f"{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}".encode()
     ).hexdigest()
     if not force_refresh:
         cached = await _map_cache_get(cache_key)
@@ -395,7 +417,7 @@ async def generate_topical_map(
     results_parallel = await _asyncio.gather(
         client.keyword_suggestions(seed, location_code, language_code, 500),
         client.keyword_ideas(seed, location_code, language_code, 300),
-        client.related_keywords(seed, location_code, language_code, 200),
+        client.related_keywords(seed, location_code, language_code, 150),
         return_exceptions=True,
     )
     for kws, name in zip(results_parallel, ["suggestions", "ideas", "related"]):
