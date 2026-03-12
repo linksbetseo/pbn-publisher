@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS domain_health_snapshots (
     expiry_date TEXT,
     days_to_expiry INTEGER,
     health_score TEXT DEFAULT 'weak',
+    dr INTEGER DEFAULT NULL,
     snapped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_dhs_domain ON domain_health_snapshots(my_domain_id, snapped_at);
@@ -365,26 +366,37 @@ async def run_weekly_snapshot():
     except Exception as e:
         logger.error(f"[HealthCron] Batch processing failed at {len(results)}/{total}: {e}")
 
+    # Log summary of collected data
+    with_traffic = sum(1 for r in results if r.get("traffic", 0) > 0)
+    with_kw = sum(1 for r in results if r.get("keywords", 0) > 0)
+    logger.info(f"[HealthCron] Collected {len(results)} results: {with_traffic} with traffic, {with_kw} with keywords")
+
     # Save whatever results we have (even partial)
+    saved = 0
     if results:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.executemany(
-                """INSERT INTO domain_health_snapshots
-                   (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                [
-                    (r["id"], r["domain"], r["traffic"], r["keywords"],
-                     1 if r.get("wp_ok") else 0,
-                     r.get("expiry_date"), r.get("days_to_expiry"), r.get("health_score", "weak"),
-                     r.get("dr"), snapped_at)
-                    for r in results
-                ]
-            )
-            await db.executemany(
-                "UPDATE my_domains SET wp_ok=? WHERE id=?",
-                [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
-            )
-            await db.commit()
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.executemany(
+                    """INSERT INTO domain_health_snapshots
+                       (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    [
+                        (r["id"], r["domain"], r.get("traffic", 0), r.get("keywords", 0),
+                         1 if r.get("wp_ok") else 0,
+                         r.get("expiry_date"), r.get("days_to_expiry"), r.get("health_score", "weak"),
+                         r.get("dr"), snapped_at)
+                        for r in results
+                    ]
+                )
+                await db.executemany(
+                    "UPDATE my_domains SET wp_ok=? WHERE id=?",
+                    [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
+                )
+                await db.commit()
+                saved = len(results)
+                logger.info(f"[HealthCron] Saved {saved} snapshots to DB")
+        except Exception as e:
+            logger.error(f"[HealthCron] FAILED to save snapshots to DB: {e}")
 
     # Always mark progress as finished (even on error)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -394,8 +406,8 @@ async def run_weekly_snapshot():
         )
         await db.commit()
 
-    logger.info(f"[HealthCron] Snapshot done: {len(results)}/{total} domains")
-    return len(results)
+    logger.info(f"[HealthCron] Snapshot done: {saved}/{total} saved")
+    return saved
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -638,39 +650,54 @@ async def run_quick_snapshot():
     except Exception as e:
         logger.error(f"[HealthQuick] Batch processing failed at {len(results)}/{total}: {e}")
 
-    # Save whatever results we have
-    if results:
-        async with aiosqlite.connect(DB_PATH) as db:
-            # Merge with existing expiry data from last snapshot
-            async with db.execute(
-                """SELECT my_domain_id, expiry_date, days_to_expiry, dr
-                   FROM domain_health_snapshots
-                   WHERE id IN (SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id)"""
-            ) as cur:
-                existing = {r["my_domain_id"]: dict(r) for r in await cur.fetchall()}
+    # Log summary
+    with_traffic = sum(1 for r in results if r.get("traffic", 0) > 0)
+    with_kw = sum(1 for r in results if r.get("keywords", 0) > 0)
+    logger.info(f"[HealthQuick] Collected {len(results)} results: {with_traffic} with traffic, {with_kw} with keywords")
 
-            await db.executemany(
-                """INSERT INTO domain_health_snapshots
-                   (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                [
-                    (r["id"], r["domain"], r["traffic"], r["keywords"],
-                     1 if r.get("wp_ok") else 0,
-                     existing.get(r["id"], {}).get("expiry_date"),
-                     existing.get(r["id"], {}).get("days_to_expiry"),
-                     _health_score(r["traffic"], r["keywords"],
-                                   existing.get(r["id"], {}).get("days_to_expiry"),
-                                   existing.get(r["id"], {}).get("dr")),
-                     existing.get(r["id"], {}).get("dr"),
-                     snapped_at)
-                    for r in results
-                ]
-            )
-            await db.executemany(
-                "UPDATE my_domains SET wp_ok=? WHERE id=?",
-                [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
-            )
-            await db.commit()
+    # Save whatever results we have
+    saved = 0
+    if results:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                # Merge with existing expiry data from last snapshot
+                existing = {}
+                try:
+                    async with db.execute(
+                        """SELECT my_domain_id, expiry_date, days_to_expiry, dr
+                           FROM domain_health_snapshots
+                           WHERE id IN (SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id)"""
+                    ) as cur:
+                        existing = {r["my_domain_id"]: dict(r) for r in await cur.fetchall()}
+                except Exception:
+                    pass
+
+                await db.executemany(
+                    """INSERT INTO domain_health_snapshots
+                       (my_domain_id, domain, traffic, keywords, wp_ok, expiry_date, days_to_expiry, health_score, dr, snapped_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    [
+                        (r["id"], r["domain"], r.get("traffic", 0), r.get("keywords", 0),
+                         1 if r.get("wp_ok") else 0,
+                         existing.get(r["id"], {}).get("expiry_date"),
+                         existing.get(r["id"], {}).get("days_to_expiry"),
+                         _health_score(r.get("traffic", 0), r.get("keywords", 0),
+                                       existing.get(r["id"], {}).get("days_to_expiry"),
+                                       existing.get(r["id"], {}).get("dr")),
+                         existing.get(r["id"], {}).get("dr"),
+                         snapped_at)
+                        for r in results
+                    ]
+                )
+                await db.executemany(
+                    "UPDATE my_domains SET wp_ok=? WHERE id=?",
+                    [(1 if r.get("wp_ok") else 0, r["id"]) for r in results]
+                )
+                await db.commit()
+                saved = len(results)
+                logger.info(f"[HealthQuick] Saved {saved} snapshots to DB")
+        except Exception as e:
+            logger.error(f"[HealthQuick] FAILED to save snapshots to DB: {e}")
 
     # Always mark as finished
     async with aiosqlite.connect(DB_PATH) as db:
@@ -680,8 +707,8 @@ async def run_quick_snapshot():
         )
         await db.commit()
 
-    logger.info(f"[HealthQuick] Quick snapshot done: {len(results)}/{total} domains")
-    return len(results)
+    logger.info(f"[HealthQuick] Quick snapshot done: {saved}/{total} saved")
+    return saved
 
 
 @router.post("/snapshot-quick")
