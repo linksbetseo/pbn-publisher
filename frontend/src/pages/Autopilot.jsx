@@ -37,11 +37,38 @@ function BulkTab() {
   const [anchorText, setAnchorText] = useState('')
   const [customPrompt, setCustomPrompt] = useState('')
   const [runLimit, setRunLimit] = useState(1)
+  const [aiSeedMode, setAiSeedMode] = useState(false)
+  const [aiSeeds, setAiSeeds] = useState([])
+  const [aiSeedLoading, setAiSeedLoading] = useState(false)
+  const [aiSeedError, setAiSeedError] = useState('')
 
   const [csvImporting, setCsvImporting] = useState(false)
   const csvInputRef = useRef(null)
 
   const log = (msg, type = 'info') => setActionLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString('pl-PL') }])
+
+  const fetchAiSeeds = async () => {
+    if (!clientDomain.trim()) { setAiSeedError('Wpisz domenę klienta'); return }
+    setAiSeedLoading(true)
+    setAiSeedError('')
+    setAiSeeds([])
+    try {
+      const res = await api.post('/api/autopilot/ai-seed-keywords', {
+        client_domain: clientDomain.trim(),
+        language: lang,
+        count: 5,
+      }, { timeout: 120000 })
+      if (res.data?.seeds?.length) {
+        setAiSeeds(res.data.seeds)
+      } else {
+        setAiSeedError(res.data?.message || 'Brak sugestii — domena może nie mieć pozycji w Google')
+      }
+    } catch (e) {
+      setAiSeedError(e.response?.data?.detail || e.message)
+    } finally {
+      setAiSeedLoading(false)
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -341,16 +368,46 @@ function BulkTab() {
             {tab === 'domains' && (
               <>
                 <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Fraza seed *</label>
-                  <input value={seedKw} onChange={e => setSeedKw(e.target.value)}
-                    placeholder="np. prawo pracy"
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                </div>
-                <div>
                   <label className="block text-xs font-medium text-gray-500 mb-1">Domena klienta</label>
                   <input value={clientDomain} onChange={e => setClientDomain(e.target.value)}
                     placeholder="https://klient.pl"
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="flex items-center gap-2 text-xs font-medium text-gray-500 mb-1 cursor-pointer">
+                    <input type="checkbox" checked={aiSeedMode} onChange={e => { setAiSeedMode(e.target.checked); setAiSeeds([]); setAiSeedError('') }}
+                      className="rounded border-gray-300" />
+                    AI wybiera seed keyword z domeny klienta
+                  </label>
+                  {!aiSeedMode ? (
+                    <>
+                      <label className="block text-xs font-medium text-gray-500 mb-1 mt-2">Fraza seed *</label>
+                      <input value={seedKw} onChange={e => setSeedKw(e.target.value)}
+                        placeholder="np. prawo pracy"
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    </>
+                  ) : (
+                    <div className="mt-2">
+                      <button onClick={fetchAiSeeds} disabled={aiSeedLoading || !clientDomain.trim()}
+                        className="w-full py-2 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50 flex items-center justify-center gap-2">
+                        {aiSeedLoading ? <><Spinner className="w-3 h-3" /> Analizuję domenę...</> : '🔍 Znajdź seed keywords z DataForSEO'}
+                      </button>
+                      {aiSeedError && <p className="text-red-500 text-xs mt-1">{aiSeedError}</p>}
+                      {aiSeeds.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          <p className="text-xs text-gray-400">Kliknij aby wybrać:</p>
+                          {aiSeeds.map((s, i) => (
+                            <button key={i} onClick={() => { setSeedKw(s.seed); setAiSeedMode(false) }}
+                              className={`w-full text-left p-2 rounded-lg border text-xs transition-colors ${seedKw === s.seed ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-600 hover:border-blue-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}>
+                              <span className="font-medium text-gray-900 dark:text-white">{s.seed}</span>
+                              <span className="text-gray-400 ml-2">~{s.estimated_articles} art.</span>
+                              <p className="text-gray-400 mt-0.5">{s.reason}</p>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-500 mb-1">Anchor text klienta</label>

@@ -200,3 +200,38 @@ class DataForSEOClient:
                             "intent": kp.get("search_intent", "informational") or "informational",
                         })
         return keywords
+
+    async def keywords_for_site(self, target: str, location_code: int = 2616, language_code: str = "pl", limit: int = 100) -> list[dict]:
+        """Get keywords a domain currently ranks for in Google (DataForSEO Labs)."""
+        clean = target.replace("https://", "").replace("http://", "").rstrip("/")
+        data = await self.request(
+            "dataforseo_labs/google/keywords_for_site/live",
+            [{
+                "target": clean,
+                "location_code": location_code,
+                "language_code": language_code,
+                "limit": limit,
+                "filters": [
+                    ["keyword_data.keyword_info.search_volume", ">=", 10],
+                ],
+                "order_by": ["keyword_data.keyword_info.search_volume,desc"],
+            }]
+        )
+        keywords = []
+        for task in data.get("tasks", []):
+            for result in task.get("result", []):
+                for item in result.get("items", []):
+                    kd = item.get("keyword_data", {})
+                    kw = kd.get("keyword", "")
+                    ki = kd.get("keyword_info", {})
+                    kp = kd.get("keyword_properties", {})
+                    if kw:
+                        keywords.append({
+                            "keyword": kw,
+                            "search_volume": ki.get("search_volume", 0) or 0,
+                            "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
+                            "cpc": ki.get("cpc", 0) or 0,
+                            "intent": kp.get("search_intent", "informational") or "informational",
+                            "position": item.get("ranked_serp_element", {}).get("serp_item", {}).get("rank_absolute", 0),
+                        })
+        return keywords

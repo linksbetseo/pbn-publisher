@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from config import DB_PATH
 from services.topical_map_service import generate_topical_map
+from services.dataforseo_service import DataForSEOClient
 from services.openai_service import generate_article
 from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
 from api.autopilot_helpers import (
@@ -1861,3 +1862,112 @@ async def test_freepik_raw():
                 results[key] = {"status": r.status_code, "body": r.text[:800]}
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# AI Seed Keyword Discovery — scrape client domain via DataForSEO,
+# then use GPT to pick best seed keywords for topical maps.
+# ---------------------------------------------------------------------------
+
+class AISeedRequest(BaseModel):
+    client_domain: str
+    language: str = "pl"
+    count: int = 5  # how many seed keywords to suggest
+
+
+@router.post("/ai-seed-keywords")
+async def ai_seed_keywords(body: AISeedRequest):
+    """
+    Discover seed keywords for a client domain:
+    1. DataForSEO keywords_for_site — what the domain ranks for
+    2. GPT picks the best seed keywords for topical map generation
+    """
+    if not DFS_LOGIN or not DFS_PASSWORD:
+        from fastapi import HTTPException
+        raise HTTPException(400, "DataForSEO not configured")
+    if not body.client_domain.strip():
+        from fastapi import HTTPException
+        raise HTTPException(400, "client_domain is required")
+
+    location_code = 2616 if body.language == "pl" else 2840  # Poland or US
+
+    dfs = DataForSEOClient(DFS_LOGIN, DFS_PASSWORD)
+    try:
+        site_keywords = await dfs.keywords_for_site(
+            body.client_domain.strip(),
+            location_code=location_code,
+            language_code=body.language,
+            limit=200,
+        )
+    except Exception as e:
+        logger.warning(f"[AI-Seed] DataForSEO keywords_for_site failed: {e}")
+        site_keywords = []
+
+    if not site_keywords:
+        return {
+            "seeds": [],
+            "message": "Nie znaleziono fraz — domena może nie mieć jeszcze pozycji w Google.",
+            "raw_keywords": [],
+        }
+
+    # Group by topic clusters using GPT
+    top_kws = sorted(site_keywords, key=lambda x: x["search_volume"], reverse=True)[:80]
+    kw_list = "\n".join(f"- {k['keyword']} (vol: {k['search_volume']}, pos: {k.get('position', '?')})" for k in top_kws)
+
+    from openai import AsyncOpenAI
+    openai_client = AsyncOpenAI()
+    gpt_model = "gpt-4o-mini"
+    try:
+        from services.openai_service import get_gpt_model
+        gpt_model = await get_gpt_model()
+    except Exception:
+        pass
+
+    prompt = f"""Analyze these keywords that a website ranks for and suggest {body.count} best seed keywords for building PBN topical maps.
+
+Each seed keyword should:
+- Represent a broad topic cluster (not too specific, not too generic)
+- Have enough related subtopics for 15-30 supporting articles
+- Be commercially relevant (the site wants traffic in this niche)
+
+Keywords the site ranks for:
+{kw_list}
+
+Return ONLY a JSON array of objects, no markdown:
+[{{"seed": "keyword phrase", "reason": "short reason why this is a good seed", "estimated_articles": 20}}]"""
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model=gpt_model,
+            messages=[
+                {"role": "system", "content": "You are an SEO expert. Return valid JSON only, no markdown fences."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=1000,
+        )
+        raw_text = response.choices[0].message.content.strip()
+        # Strip markdown fences if GPT adds them
+        if raw_text.startswith("```"):
+            raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+            raw_text = re.sub(r"\s*```$", "", raw_text)
+        import json
+        seeds = json.loads(raw_text)
+    except Exception as e:
+        logger.warning(f"[AI-Seed] GPT analysis failed: {e}")
+        # Fallback: pick top volume keywords as seeds
+        seen = set()
+        seeds = []
+        for k in top_kws:
+            words = k["keyword"].split()
+            if len(words) >= 2 and k["keyword"] not in seen:
+                seen.add(k["keyword"])
+                seeds.append({"seed": k["keyword"], "reason": f"vol: {k['search_volume']}", "estimated_articles": 20})
+                if len(seeds) >= body.count:
+                    break
+
+    return {
+        "seeds": seeds[:body.count],
+        "raw_keywords_count": len(site_keywords),
+        "top_keywords": top_kws[:20],
+    }
