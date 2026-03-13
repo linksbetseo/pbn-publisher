@@ -1461,29 +1461,21 @@ async def bulk_create_auto(body: BulkCreateAutoRequest):
             logger.warning(f"[auto-seed] DFS keywords_for_site failed for {domain_name}: {e}")
             site_keywords = []
 
-        if not site_keywords:
-            results.append({"domain_id": domain_id, "domain": domain_name, "error": "brak danych z DataForSEO — domena bez pozycji"})
-            error_count += 1
-            continue
-
-        # 2) GPT picks the best seed
-        top_kws = sorted(site_keywords, key=lambda x: x["search_volume"], reverse=True)[:60]
-        kw_list = "\n".join(f"- {k['keyword']} (vol: {k['search_volume']})" for k in top_kws)
-
+        # 2) GPT picks the best seed — from DFS data or from domain name analysis
         gpt_model = "gpt-4o-mini"
         try:
             gpt_model = await get_gpt_model()
         except Exception:
             pass
 
-        try:
-            from openai import AsyncOpenAI as _AO
-            _oai = _AO()
-            response = await _oai.chat.completions.create(
-                model=gpt_model,
-                messages=[
-                    {"role": "system", "content": "You are an SEO expert. Return valid JSON only, no markdown."},
-                    {"role": "user", "content": f"""Pick the single best seed keyword for building a topical map on this PBN domain.
+        from openai import AsyncOpenAI as _AO
+        _oai = _AO()
+
+        if site_keywords:
+            # Domain has rankings — pick seed from actual keyword data
+            top_kws = sorted(site_keywords, key=lambda x: x["search_volume"], reverse=True)[:60]
+            kw_list = "\n".join(f"- {k['keyword']} (vol: {k['search_volume']})" for k in top_kws)
+            gpt_prompt = f"""Pick the single best seed keyword for building a topical map on this PBN domain.
 The seed should be a broad topic (2-3 words) that covers the most keywords this domain ranks for.
 It should allow generating 15-30 supporting articles for long tail traffic.
 
@@ -1491,9 +1483,50 @@ Domain: {domain_name}
 Keywords it ranks for:
 {kw_list}
 
-Return: {{"seed": "keyword phrase", "reason": "short reason"}}"""},
+Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason"}}"""
+        else:
+            # New domain — scrape page content to determine niche
+            page_content = ""
+            try:
+                page_content = await dfs.page_content(f"https://{domain_name}")
+            except Exception as e:
+                logger.warning(f"[auto-seed] page_content failed for {domain_name}: {e}")
+            if not page_content:
+                try:
+                    page_content = await dfs.page_content(f"http://{domain_name}")
+                except Exception:
+                    pass
+
+            if page_content:
+                # Trim to reasonable length for GPT
+                content_snippet = page_content[:4000]
+                gpt_prompt = f"""Analyze the content of this website and pick the best seed keyword for building a topical map.
+The seed should be a broad topic (2-3 words, in {body.language} language) matching the site's existing content and niche.
+It should allow generating 15-30 supporting articles for long tail organic traffic.
+
+Domain: {domain_name}
+Page content:
+{content_snippet}
+
+Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason based on page content"}}"""
+            else:
+                # Last resort — analyze domain name
+                gpt_prompt = f"""Analyze this domain name and pick the best seed keyword for building a topical map.
+Look at the domain name, interpret what niche/topic it suggests, and pick a broad seed keyword (2-3 words, in {body.language} language).
+The seed should allow generating 15-30 supporting articles for long tail organic traffic.
+
+Domain: {domain_name}
+
+Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason"}}"""
+
+        try:
+            response = await _oai.chat.completions.create(
+                model=gpt_model,
+                messages=[
+                    {"role": "system", "content": "You are an SEO expert specializing in PBN domain analysis. Return valid JSON only, no markdown."},
+                    {"role": "user", "content": gpt_prompt},
                 ],
-                temperature=0.2,
+                temperature=0.3,
                 max_tokens=200,
             )
             raw = response.choices[0].message.content.strip()
@@ -1503,17 +1536,14 @@ Return: {{"seed": "keyword phrase", "reason": "short reason"}}"""},
             seed_data = _json.loads(raw)
             chosen_seed = seed_data.get("seed", "")
             reason = seed_data.get("reason", "")
+            if not site_keywords:
+                reason = f"(z analizy strony) {reason}"
         except Exception as e:
-            # Fallback: pick the highest-volume 2+ word keyword
             logger.warning(f"[auto-seed] GPT failed for {domain_name}: {e}")
-            for k in top_kws:
-                if len(k["keyword"].split()) >= 2:
-                    chosen_seed = k["keyword"]
-                    reason = f"fallback: highest vol ({k['search_volume']})"
-                    break
-            else:
-                chosen_seed = top_kws[0]["keyword"] if top_kws else ""
-                reason = "fallback: top keyword"
+            # Last resort fallback: extract words from domain name
+            domain_base = domain_name.replace("www.", "").split(".")[0]
+            chosen_seed = domain_base
+            reason = "fallback: nazwa domeny"
 
         if not chosen_seed:
             results.append({"domain_id": domain_id, "domain": domain_name, "error": "AI nie wybrało seeda"})
