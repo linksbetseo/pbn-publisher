@@ -133,6 +133,46 @@ async def _dfs_domain_metrics(domain: str, location_code: int = 2616, language_c
     return {}
 
 
+async def _dfs_domain_metrics_raw(domain: str, location_code: int = 2616, language_code: str = "pl") -> dict:
+    """Like _dfs_domain_metrics but returns raw API response for diagnostics."""
+    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        return {"error": "DFS credentials not set"}
+    creds = base64.b64encode(f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()).decode()
+    headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+    clean = re.sub(r"^https?://", "", domain).rstrip("/")
+    payload = [{"target": clean, "location_code": location_code, "language_code": language_code}]
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.dataforseo.com/v3/dataforseo_labs/google/domain_rank_overview/live",
+            json=payload,
+            headers=headers,
+        )
+        raw = resp.json()
+    # Extract parsed + include raw tasks
+    parsed = {}
+    for task in raw.get("tasks", []):
+        for result in task.get("result", []) or []:
+            metrics = result.get("metrics", {}).get("organic", {})
+            parsed = {
+                "traffic_etv": metrics.get("etv"),
+                "keywords_count": metrics.get("count"),
+                "rank": result.get("rank"),
+                "metrics_keys": list(result.get("metrics", {}).keys()),
+                "result_keys": list(result.keys()),
+            }
+            break
+    return {
+        "domain": clean,
+        "http_status": resp.status_code,
+        "parsed": parsed,
+        "tasks_count": len(raw.get("tasks", [])),
+        "task_status": raw.get("tasks", [{}])[0].get("status_code"),
+        "task_message": raw.get("tasks", [{}])[0].get("status_message"),
+        "result_count": len(raw.get("tasks", [{}])[0].get("result", []) or []),
+        "raw_first_result": (raw.get("tasks", [{}])[0].get("result", [None]) or [None])[0],
+    }
+
+
 # ── WHOIS helpers ─────────────────────────────────────────────────────────────
 
 def _days_until(expiry_str: str) -> Optional[int]:
@@ -865,19 +905,22 @@ async def health_diagnostics():
             prog = await cur.fetchone()
             diag["last_progress"] = dict(prog) if prog else None
 
-    # Test DFS with first active domain
+    # Test DFS with known-traffic domains + first active domain
     if diag["dataforseo_configured"]:
+        test_domains = ["caremed.pl", "fakturki24.pl"]
+        # Also add first active domain from DB
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT domain FROM my_domains WHERE active=1 LIMIT 1") as cur:
                 row = await cur.fetchone()
         if row:
-            test_domain = row[0]
-            diag["dfs_test_domain"] = test_domain
+            test_domains.append(row[0])
+        diag["dfs_tests"] = {}
+        for td in test_domains:
             try:
-                result = await _dfs_domain_metrics(test_domain)
-                diag["dfs_test_result"] = result or {"note": "No data returned (domain may have no organic visibility)"}
+                result = await _dfs_domain_metrics_raw(td)
+                diag["dfs_tests"][td] = result
             except Exception as e:
-                diag["dfs_test_error"] = str(e)
+                diag["dfs_tests"][td] = {"error": str(e)}
     else:
         diag["dfs_test_note"] = "Skipped — DATAFORSEO_LOGIN or DATAFORSEO_PASSWORD not set"
 
