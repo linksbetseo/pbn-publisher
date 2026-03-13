@@ -147,8 +147,9 @@ def _coherence_score(keyword: str, seed_toks: set, seed: str) -> float:
 
     Formula:
       overlap_ratio  = |intersection(kw_tokens, seed_tokens)| / |kw_tokens|
-      length_penalty = penalises very short keywords (less topical depth)
-      result = weighted average
+      containment    = bonus if seed is contained within keyword (compound queries)
+      substring_bonus = partial credit for substring matches
+      result = weighted combination
     """
     kw_toks = set(_tokenize(keyword))
     if not kw_toks:
@@ -156,9 +157,17 @@ def _coherence_score(keyword: str, seed_toks: set, seed: str) -> float:
     overlap = len(kw_toks & seed_toks)
     overlap_ratio = overlap / len(kw_toks)
     # Partial credit: seed words appearing as substrings in keyword tokens
-    seed_str = _ascii_fold(seed)
     substring_bonus = 0.2 if any(st in _ascii_fold(keyword) for st in seed_toks if len(st) > 3) else 0.0
-    score = min(1.0, overlap_ratio + substring_bonus)
+    # Containment bonus: if the seed phrase is fully contained in the keyword
+    # e.g. seed="prawo pracy" → keyword="prawo pracy urlop" → high relevance
+    containment_bonus = 0.0
+    seed_folded = _ascii_fold(seed)
+    kw_folded = _ascii_fold(keyword)
+    if seed_folded in kw_folded:
+        containment_bonus = 0.3
+    elif all(st in kw_folded for st in seed_folded.split() if len(st) > 2):
+        containment_bonus = 0.15
+    score = min(1.0, overlap_ratio + substring_bonus + containment_bonus)
     return round(score, 3)
 
 
@@ -523,6 +532,11 @@ async def generate_topical_map(
             reverse=True
         )
 
+        # Intent distribution for this cluster
+        all_cluster_kws = cluster["keywords"]
+        intent_counts = Counter(k.get("intent", "informational") for k in all_cluster_kws)
+        intent_dist = {intent: count for intent, count in intent_counts.most_common()}
+
         # Proportional limit: at least 10, at most 30, scaled to cluster size
         sup_limit = min(30, max(10, len(supporting)))
         pillars.append({
@@ -546,10 +560,20 @@ async def generate_topical_map(
             ],
             "total_volume": cluster["total_volume"],
             "avg_difficulty": cluster["avg_difficulty"],
+            "intent_distribution": intent_dist,
         })
 
-    # Sort pillars by avg_difficulty ASC — publish low-KD clusters first for faster indexation
-    pillars.sort(key=lambda p: p["avg_difficulty"])
+    # Compute publishing priority score per pillar:
+    # Formula: (volume / (KD + 1)) * coherence * focus — favours high-volume, low-KD, tightly-focused clusters
+    for p in pillars:
+        vol = p["total_volume"] or 1
+        kd = p["avg_difficulty"] or 1
+        coherence = p.get("pillar_coherence", 0.5)
+        focus = p.get("focus_score", 0.5)
+        p["priority_score"] = round((vol / (kd + 1)) * (0.5 + coherence) * (0.5 + focus), 1)
+
+    # Sort pillars by priority_score DESC — publish highest-opportunity clusters first
+    pillars.sort(key=lambda p: p["priority_score"], reverse=True)
 
     # Compute site-level SiteFocus / SiteRadius
     site_metrics = _compute_site_metrics(pillars, seed, keywords)

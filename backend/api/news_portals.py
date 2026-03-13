@@ -27,10 +27,13 @@ Endpoints:
 - PUT    /api/news-portals/drafts/{id}                  — edit draft
 """
 
+import asyncio
 import hashlib
 import json
 import logging
+import random
 import re
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -44,6 +47,12 @@ from pydantic import BaseModel
 from config import DB_PATH, OPENAI_API_KEY
 from services.crypto_service import get_plain_password
 from services.wordpress_service import publish_post
+from services.openai_service import get_gpt_model
+from services.article_helpers import (
+    markdown_to_html as _markdown_to_html,
+    strip_markdown_remnants as _strip_markdown_remnants,
+    content_fingerprint as _content_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -931,9 +940,38 @@ async def list_drafts(
     }
 
 
+async def _news_gpt(
+    system: str, user: str, temperature: float = 0.5,
+    max_tokens: int = 1500, model: str = None,
+) -> str:
+    """GPT helper for news pipeline with retry logic."""
+    if model is None:
+        model = await get_gpt_model()
+    for attempt in range(3):
+        try:
+            response = await _openai_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if attempt == 2:
+                raise
+            wait = 2 ** attempt
+            logger.warning(f"[NewsGPT] attempt {attempt+1} failed: {e} — retrying in {wait}s")
+            await asyncio.sleep(wait)
+    return ""
+
+
 @router.post("/{portal_id}/generate")
 async def generate_draft(portal_id: int, body: GenerateRequest):
-    """Generate a unique article draft from a news cluster using OpenAI."""
+    """Generate a world-class unique news article from a cluster using multi-step pipeline."""
+    _t0 = time.time()
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -972,14 +1010,18 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
     if not items:
         raise HTTPException(status_code=400, detail="No items found for this cluster")
 
-    # Build source text for the prompt
+    # ── Resolve GPT model once for entire pipeline ──
+    _resolved_model = await get_gpt_model()
+
+    # ── Build source context ──
     sources_parts = []
     source_urls = []
+    source_titles = []
     for i, item in enumerate(items, 1):
-        part = f"Zrodlo {i}: {item['title']}"
+        part = f"Źródło {i}: {item['title']}"
+        source_titles.append(item['title'])
         if item.get("content"):
-            # Limit content per source to keep prompt manageable
-            part += f"\n{item['content'][:800]}"
+            part += f"\n{item['content'][:1200]}"
         if item.get("url"):
             part += f"\nURL: {item['url']}"
             source_urls.append(item["url"])
@@ -987,61 +1029,333 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
     sources_text = "\n\n".join(sources_parts)
 
     portal_language = portal.get("language", "pl")
-    portal_editorial_prompt = portal.get("editorial_prompt", "")
+    portal_niche = portal.get("niche", "")
+    portal_editorial = portal.get("editorial_prompt", "")
+    lang_pl = portal_language == "pl"
+    _current_year = datetime.now(timezone.utc).year
 
-    system_message = portal_editorial_prompt or (
-        "Jestes doswiadczonym dziennikarzem. Pisz unikalne, angazujace artykuly newsowe w jezyku polskim."
-    )
+    # Build editorial context block
+    editorial_ctx = ""
+    if portal_editorial:
+        editorial_ctx = f"\nWytyczne redakcji: {portal_editorial}" if lang_pl else f"\nEditorial guidelines: {portal_editorial}"
+    niche_ctx = ""
+    if portal_niche:
+        niche_ctx = f"\nNisza tematyczna: {portal_niche}" if lang_pl else f"\nThematic niche: {portal_niche}"
 
-    user_message = (
-        f"Na podstawie ponizszych zrodel napisz unikalny artykul newsowy.\n\n"
-        f"Zrodla:\n{sources_text}\n\n"
-        f"Wymagania:\n"
-        f"- Tytul (zwroc jako pierwsza linie, poprzedzona 'TYTUL: ')\n"
-        f"- Lead 2-3 zdania\n"
-        f"- Tresc 300-600 slow\n"
-        f"- Unikalny tekst, NIE kopiuj zdan ze zrodel\n"
-        f"- Jezyk: {portal_language}"
-    )
+    # ── STEP 1: Analyze sources → extract key facts, angles, entities ──
+    logger.info(f"[NewsGen] Starting pipeline for cluster {body.cluster_id} ({len(items)} sources)")
 
-    messages = [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": user_message},
-    ]
-
-    try:
-        completion = await _openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.8,
-            max_tokens=2000,
+    if lang_pl:
+        analysis_system = (
+            "Jesteś analitykiem newsowym. Analizujesz źródła i wyciągasz kluczowe fakty."
         )
-        response_text = completion.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"[NewsPortals] OpenAI error: {e}")
-        raise HTTPException(status_code=502, detail=f"OpenAI error: {str(e)[:200]}")
-
-    # Parse title from response
-    title = ""
-    content = response_text
-    lines = response_text.split("\n", 1)
-    if lines and lines[0].upper().startswith("TYTUL:"):
-        title = lines[0].split(":", 1)[1].strip().strip("\"'")
-        content = lines[1].strip() if len(lines) > 1 else ""
-    elif lines and lines[0].upper().startswith("TYTUL :"):
-        title = lines[0].split(":", 1)[1].strip().strip("\"'")
-        content = lines[1].strip() if len(lines) > 1 else ""
+        analysis_user = (
+            f"Przeanalizuj poniższe źródła newsowe i wyciągnij:\n"
+            f"1. GŁÓWNY TEMAT (1 zdanie)\n"
+            f"2. 5-8 KLUCZOWYCH FAKTÓW (konkretne dane, liczby, nazwiska, daty)\n"
+            f"3. ENCJE (osoby, firmy, instytucje, miejsca, produkty — nazwy własne)\n"
+            f"4. KONTEKST (dlaczego to ważne, jaki jest szerszy kontekst)\n"
+            f"5. UNIKALNY KĄT (jaki aspekt tematu jest najciekawszy dla czytelnika)\n\n"
+            f"Źródła:\n{sources_text}{niche_ctx}"
+        )
     else:
-        # Fallback: use first sentence as title
-        first_sentence = re.split(r"[.!?\n]", response_text, maxsplit=1)
-        title = first_sentence[0].strip()[:150]
-        content = response_text
+        analysis_system = "You are a news analyst. Extract key facts from sources."
+        analysis_user = (
+            f"Analyze these news sources and extract:\n"
+            f"1. MAIN TOPIC (1 sentence)\n"
+            f"2. 5-8 KEY FACTS (specific data, numbers, names, dates)\n"
+            f"3. ENTITIES (people, companies, institutions, places, products — proper nouns)\n"
+            f"4. CONTEXT (why this matters, broader context)\n"
+            f"5. UNIQUE ANGLE (most interesting aspect for readers)\n\n"
+            f"Sources:\n{sources_text}{niche_ctx}"
+        )
 
-    # Extract excerpt (first 2-3 sentences)
-    plain = re.sub(r"<[^>]+>", " ", content)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    sentences = re.split(r"(?<=[.!?])\s+", plain, maxsplit=3)
-    excerpt = " ".join(sentences[:2])[:300]
+    analysis = await _news_gpt(
+        analysis_system, analysis_user,
+        temperature=0.3, max_tokens=600, model=_resolved_model,
+    )
+    logger.info(f"[NewsGen] Analysis done: {analysis[:80]}...")
+
+    # ── STEP 2: Generate headline + outline (JSON structured) ──
+    if lang_pl:
+        outline_system = (
+            "Jesteś redaktorem naczelnym prestiżowego portalu informacyjnego. "
+            "Tworzysz chwytliwe nagłówki i struktury artykułów."
+            f"{editorial_ctx}"
+        )
+        outline_user = (
+            f"Na podstawie analizy stwórz strukturę artykułu newsowego.\n\n"
+            f"Analiza:\n{analysis}\n\n"
+            f"Odpowiedz TYLKO w formacie JSON (bez markdown):\n"
+            f'{{"title": "chwytliwy tytuł 50-70 znaków, bez cudzysłowów", '
+            f'"lead": "lead 2-3 zdania, podsumowanie najważniejszych faktów", '
+            f'"sections": ["Nagłówek H2 sekcji 1", "Nagłówek H2 sekcji 2", "Nagłówek H2 sekcji 3", "Nagłówek H2 sekcji 4"]}}'
+        )
+    else:
+        outline_system = (
+            "You are the editor-in-chief of a prestigious news portal. "
+            "Create catchy headlines and article structures."
+            f"{editorial_ctx}"
+        )
+        outline_user = (
+            f"Based on the analysis, create a news article structure.\n\n"
+            f"Analysis:\n{analysis}\n\n"
+            f"Reply ONLY in JSON format (no markdown):\n"
+            f'{{"title": "catchy title 50-70 chars, no quotes", '
+            f'"lead": "lead 2-3 sentences summarizing key facts", '
+            f'"sections": ["H2 heading 1", "H2 heading 2", "H2 heading 3", "H2 heading 4"]}}'
+        )
+
+    outline_raw = await _news_gpt(
+        outline_system, outline_user,
+        temperature=0.6, max_tokens=500, model=_resolved_model,
+    )
+
+    # Parse JSON output (handle GPT wrapping it in ```json)
+    outline_clean = re.sub(r"```(?:json)?\s*", "", outline_raw).strip().rstrip("`")
+    try:
+        outline = json.loads(outline_clean)
+    except json.JSONDecodeError:
+        # Fallback: try to extract JSON from response
+        json_match = re.search(r'\{[^{}]*"title"[^{}]*\}', outline_clean, re.DOTALL)
+        if json_match:
+            try:
+                outline = json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                outline = {}
+        else:
+            outline = {}
+
+    title = outline.get("title", cluster.get("label", source_titles[0] if source_titles else "News"))
+    title = title.strip('"\'').strip()
+    lead = outline.get("lead", "")
+    sections = outline.get("sections", [])
+
+    if not sections:
+        # Fallback sections
+        if lang_pl:
+            sections = ["Co się wydarzyło?", "Szczegóły i kontekst", "Reakcje i komentarze", "Co dalej?"]
+        else:
+            sections = ["What happened?", "Details and context", "Reactions and comments", "What's next?"]
+
+    logger.info(f"[NewsGen] Title: {title} | Sections: {len(sections)}")
+
+    # ── STEP 3: Generate intro (lead) ──
+    if lang_pl:
+        intro_system = (
+            "Jesteś doświadczonym dziennikarzem. Piszesz wstępy do artykułów newsowych w HTML.\n"
+            "STRUKTURA: 2-3 akapity w tagach <p>.\n"
+            "1) Akapit 1 = KTO, CO, KIEDY, GDZIE — najważniejszy fakt.\n"
+            "2) Akapit 2 = DLACZEGO to ważne, kontekst.\n"
+            "Używaj <strong> dla kluczowych nazwisk, liczb, dat.\n"
+            "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. TYLKO HTML."
+            f"{editorial_ctx}"
+        )
+        intro_user = (
+            f"Napisz wstęp (lead) do artykułu '{title}'.\n"
+            f"Lead do rozwinięcia: {lead}\n"
+            f"Kluczowe fakty:\n{analysis}\n"
+            f"Źródła: {', '.join(source_titles[:3])}\n"
+            f"Tylko HTML <p> i <strong>. Bez nagłówków."
+        )
+    else:
+        intro_system = (
+            "You are an experienced journalist. Write news article intros in HTML.\n"
+            "STRUCTURE: 2-3 paragraphs in <p> tags.\n"
+            "1) Para 1 = WHO, WHAT, WHEN, WHERE — the most important fact.\n"
+            "2) Para 2 = WHY it matters, context.\n"
+            "Use <strong> for key names, numbers, dates.\n"
+            "STRICT: NO markdown. ONLY HTML."
+            f"{editorial_ctx}"
+        )
+        intro_user = (
+            f"Write the lead/intro for article '{title}'.\n"
+            f"Lead to expand: {lead}\n"
+            f"Key facts:\n{analysis}\n"
+            f"Sources: {', '.join(source_titles[:3])}\n"
+            f"Only HTML <p> and <strong>. No headings."
+        )
+
+    # ── STEP 4: Generate body sections (parallel with semaphore) ──
+    _sem = asyncio.Semaphore(3)
+
+    async def _gen_section(i: int, heading: str) -> str:
+        async with _sem:
+            if lang_pl:
+                sec_system = (
+                    "Jesteś dziennikarzem śledczym i ekspertem tematycznym. Piszesz sekcje artykułów newsowych w HTML.\n"
+                    "WYMAGANIA:\n"
+                    "- Zacznij od <h2>, dodaj 1-2 <h3> jeśli temat wymaga podziału\n"
+                    "- Używaj <p>, <ul>/<li>, <strong> dla ważnych faktów\n"
+                    "- Pisz KONKRETNIE: dane, liczby, cytaty, fakty — NIE ogólniki\n"
+                    "- ENCJE: Używaj konkretnych nazw własnych (osoby, firmy, instytucje)\n"
+                    "- E-E-A-T: Wpleć perspektywę ekspercką ('Eksperci wskazują...', 'Analitycy podkreślają...')\n"
+                    "- 150-250 słów na sekcję\n"
+                    "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. TYLKO HTML."
+                    f"{editorial_ctx}"
+                )
+                sec_user = (
+                    f"Napisz sekcję artykułu '{title}'.\n"
+                    f"H2: '{heading}'\n"
+                    f"Fakty i kontekst:\n{analysis}\n"
+                    f"Struktura: <h2>{heading}</h2> → akapity <p> z faktami\n"
+                    f"Źródła: {', '.join(source_titles[:3])}"
+                )
+            else:
+                sec_system = (
+                    "You are an investigative journalist and subject expert. Write news sections in HTML.\n"
+                    "REQUIREMENTS:\n"
+                    "- Start with <h2>, add 1-2 <h3> if needed\n"
+                    "- Use <p>, <ul>/<li>, <strong> for key facts\n"
+                    "- Be SPECIFIC: data, numbers, quotes, facts — NO generalities\n"
+                    "- ENTITIES: Use proper nouns (people, companies, institutions)\n"
+                    "- E-E-A-T: Include expert perspective ('Experts point out...', 'Analysts emphasize...')\n"
+                    "- 150-250 words per section\n"
+                    "STRICT: NO markdown. ONLY HTML."
+                    f"{editorial_ctx}"
+                )
+                sec_user = (
+                    f"Write a section of article '{title}'.\n"
+                    f"H2: '{heading}'\n"
+                    f"Facts and context:\n{analysis}\n"
+                    f"Structure: <h2>{heading}</h2> → <p> paragraphs with facts\n"
+                    f"Sources: {', '.join(source_titles[:3])}"
+                )
+            sec_html = await _news_gpt(
+                sec_system, sec_user,
+                temperature=0.5, max_tokens=800, model=_resolved_model,
+            )
+            if not sec_html.strip().startswith("<"):
+                sec_html = _markdown_to_html(sec_html)
+            sec_html = _strip_markdown_remnants(sec_html)
+            logger.info(f"[NewsGen] Section {i+1}/{len(sections)}: {heading[:40]}")
+            return sec_html
+
+    # Launch intro + all sections in parallel
+    intro_task = _news_gpt(
+        intro_system, intro_user,
+        temperature=0.5, max_tokens=500, model=_resolved_model,
+    )
+    section_tasks = [_gen_section(i, h) for i, h in enumerate(sections)]
+
+    results = await asyncio.gather(intro_task, *section_tasks)
+    intro_html = results[0]
+    sections_html = list(results[1:])
+
+    # Post-process intro
+    if not intro_html.strip().startswith("<"):
+        intro_html = _markdown_to_html(intro_html)
+    intro_html = _strip_markdown_remnants(intro_html)
+
+    # ── STEP 5: Conclusion + Excerpt (parallel) ──
+    if lang_pl:
+        _concl_headings = ["Podsumowanie", "Co dalej?", "Kluczowe wnioski", "Najważniejsze ustalenia"]
+    else:
+        _concl_headings = ["Summary", "What's next?", "Key takeaways", "Key findings"]
+    _concl_h2 = random.choice(_concl_headings)
+
+    if lang_pl:
+        concl_user = (
+            f"Napisz krótkie zakończenie artykułu '{title}'.\n"
+            f"Omówione tematy: {', '.join(sections[:4])}\n"
+            f"STRUKTURA:\n"
+            f"<h2>{_concl_h2}</h2>\n"
+            f"- 1 akapit: podsumowanie kluczowych faktów\n"
+            f"- 1 akapit: co to oznacza / co dalej\n"
+            f"Max 100 słów. TYLKO HTML."
+        )
+        excerpt_user = (
+            f"Napisz meta description dla artykułu '{title}'.\n"
+            f"Max 155 znaków, bez HTML, zawiera kluczowy fakt. Tylko tekst."
+        )
+    else:
+        concl_user = (
+            f"Write a short conclusion for '{title}'.\n"
+            f"Topics covered: {', '.join(sections[:4])}\n"
+            f"STRUCTURE:\n"
+            f"<h2>{_concl_h2}</h2>\n"
+            f"- 1 paragraph: key facts summary\n"
+            f"- 1 paragraph: what it means / what's next\n"
+            f"Max 100 words. HTML ONLY."
+        )
+        excerpt_user = (
+            f"Write meta description for '{title}'.\n"
+            f"Max 155 chars, no HTML, includes key fact. Only text."
+        )
+
+    concl_system = (
+        "Jesteś dziennikarzem. Piszesz zakończenia artykułów w HTML. TYLKO tagi HTML."
+    ) if lang_pl else (
+        "You are a journalist. Write article conclusions in HTML. ONLY HTML tags."
+    )
+
+    conclusion_raw, excerpt_raw = await asyncio.gather(
+        _news_gpt(concl_system, concl_user, temperature=0.5, max_tokens=400, model=_resolved_model),
+        _news_gpt(
+            "Jesteś SEO copywriterem." if lang_pl else "You are an SEO copywriter.",
+            excerpt_user, temperature=0.4, max_tokens=80, model=_resolved_model,
+        ),
+    )
+
+    conclusion_html = conclusion_raw
+    if not conclusion_html.strip().startswith("<"):
+        conclusion_html = _markdown_to_html(conclusion_html)
+    conclusion_html = _strip_markdown_remnants(conclusion_html)
+
+    excerpt = excerpt_raw.strip('"\'').strip()[:300]
+
+    # ── STEP 6: Source attribution box (E-E-A-T) ──
+    if source_urls:
+        if lang_pl:
+            src_label = "Źródła"
+        else:
+            src_label = "Sources"
+        src_links = "".join(
+            f'<li><a href="{url}" target="_blank" rel="noopener noreferrer nofollow">{url.split("//")[-1].split("/")[0]}</a></li>'
+            for url in source_urls[:5]
+        )
+        _vary_px = random.randint(12, 18)
+        _vary_radius = random.randint(4, 8)
+        source_box = (
+            f'<div style="background:#f8fafc;border:1px solid #e2e8f0;'
+            f'padding:{_vary_px}px {_vary_px + 4}px;margin:20px 0;'
+            f'border-radius:{_vary_radius}px;font-size:0.9em;">'
+            f'<strong>{src_label}:</strong>'
+            f'<ul style="margin:8px 0 0;padding-left:20px;">{src_links}</ul></div>'
+        )
+    else:
+        source_box = ""
+
+    # ── STEP 7: Assemble article ──
+    # Layout variant (vary to avoid footprint)
+    _rv = random.random()
+    if _rv < 0.3 and source_box:
+        # Sources at top (30%)
+        content_parts = [source_box, intro_html] + sections_html + [conclusion_html]
+    elif _rv < 0.5:
+        # Update box variant
+        _update_date = datetime.now(timezone.utc).strftime("%d.%m.%Y" if lang_pl else "%Y-%m-%d")
+        _update_label = f"Artykuł zaktualizowany: {_update_date}" if lang_pl else f"Updated: {_update_date}"
+        update_box = (
+            f'<div style="background:#eff6ff;border-left:4px solid #3b82f6;padding:10px 16px;'
+            f'margin:0 0 20px;border-radius:0 6px 6px 0;font-size:0.85em;">'
+            f'<strong>{_update_label}</strong></div>'
+        )
+        content_parts = [update_box, intro_html] + sections_html + [conclusion_html, source_box]
+    else:
+        # Standard (50%)
+        content_parts = [intro_html] + sections_html + [conclusion_html, source_box]
+
+    content = "\n\n".join(p for p in content_parts if p)
+
+    # Final cleanup
+    content = _strip_markdown_remnants(content)
+
+    # Fingerprint for dedup
+    fingerprint = _content_fingerprint(content)
+
+    _elapsed = round(time.time() - _t0, 1)
+    logger.info(f"[NewsGen] Done — '{title}' | {len(sections)} sections | fp={fingerprint[:8]} | {_elapsed}s")
 
     # Save draft
     async with aiosqlite.connect(DB_PATH) as db:
