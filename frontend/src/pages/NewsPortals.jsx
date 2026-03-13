@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import api from '../api/client'
 
-const TABS = ['Portale', 'Kolejka Review', 'Statystyki']
+const TABS = ['Portale', 'Kolejka Review', 'Opublikowane', 'Statystyki']
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1045,6 +1045,169 @@ function ReviewQueueTab({ portals }) {
   )
 }
 
+// ── Tab: Opublikowane ────────────────────────────────────────────────────────
+
+function PublishedTab({ portals }) {
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [portalFilter, setPortalFilter] = useState('')
+  const [selected, setSelected] = useState(new Set())
+  const [indexing, setIndexing] = useState(false)
+  const [indexResult, setIndexResult] = useState(null)
+  const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [total, setTotal] = useState(0)
+
+  const loadPublished = useCallback(async () => {
+    setLoading(true)
+    try {
+      const params = { page, per_page: 50 }
+      if (portalFilter) params.portal_id = portalFilter
+      const res = await api.get('/api/news-portals/published-urls', { params })
+      setItems(res.data?.items || [])
+      setTotalPages(res.data?.pages || 1)
+      setTotal(res.data?.total || 0)
+    } catch {
+      setItems([])
+    } finally {
+      setLoading(false)
+    }
+  }, [page, portalFilter])
+
+  useEffect(() => { loadPublished() }, [loadPublished])
+
+  const toggleSelect = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  const toggleAll = () => {
+    if (selected.size === items.length) {
+      setSelected(new Set())
+    } else {
+      setSelected(new Set(items.map(i => i.id)))
+    }
+  }
+
+  const handleIndex = async () => {
+    const urls = items.filter(i => selected.has(i.id)).map(i => i.wp_post_url).filter(Boolean)
+    if (!urls.length) return
+    setIndexing(true)
+    setIndexResult(null)
+    try {
+      const res = await api.post('/api/history/indexer/submit', { urls })
+      setIndexResult(res.data)
+    } catch (e) {
+      setIndexResult({ success: false, message: e.message })
+    } finally {
+      setIndexing(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-16">
+        <Spinner className="w-8 h-8 text-blue-600" />
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="flex items-center gap-4 mb-4 flex-wrap">
+        <select value={portalFilter} onChange={e => { setPortalFilter(e.target.value); setPage(1) }}
+          className="border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">Wszystkie portale</option>
+          {(portals || []).map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <span className="text-sm text-gray-500 dark:text-gray-400">{total} opublikowanych</span>
+        {selected.size > 0 && (
+          <button onClick={handleIndex} disabled={indexing}
+            className="ml-auto px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2">
+            {indexing && <Spinner className="w-4 h-4" />}
+            Indeksuj zaznaczone ({selected.size})
+          </button>
+        )}
+      </div>
+
+      {indexResult && (
+        <div className={`mb-4 p-3 rounded-lg text-sm ${indexResult.success !== false ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300' : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'}`}>
+          {indexResult.success !== false ? 'Wysłano do indeksacji!' : `Błąd: ${indexResult.message || 'Nieznany błąd'}`}
+          {indexResult.submitted && <span className="ml-2">({indexResult.submitted} URL-i)</span>}
+        </div>
+      )}
+
+      {items.length === 0 ? (
+        <div className="text-center py-16">
+          <p className="text-gray-500 dark:text-gray-400">Brak opublikowanych artykułów.</p>
+        </div>
+      ) : (
+        <>
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 dark:bg-gray-700/50">
+                <tr>
+                  <th className="px-4 py-3 text-left">
+                    <input type="checkbox" checked={selected.size === items.length && items.length > 0}
+                      onChange={toggleAll} className="rounded border-gray-300 dark:border-gray-600" />
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Tytuł</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Portal</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">URL</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Data</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                {items.map(item => (
+                  <tr key={item.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                    <td className="px-4 py-3">
+                      <input type="checkbox" checked={selected.has(item.id)}
+                        onChange={() => toggleSelect(item.id)} className="rounded border-gray-300 dark:border-gray-600" />
+                    </td>
+                    <td className="px-4 py-3 text-gray-900 dark:text-white font-medium max-w-xs truncate">{item.title}</td>
+                    <td className="px-4 py-3"><Badge color="blue">{item.portal_name || '—'}</Badge></td>
+                    <td className="px-4 py-3 max-w-sm">
+                      <a href={item.wp_post_url} target="_blank" rel="noopener noreferrer"
+                        className="text-blue-600 dark:text-blue-400 hover:underline text-xs truncate block">
+                        {item.wp_post_url}
+                      </a>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                      {item.published_at?.slice(0, 16).replace('T', ' ') || '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div className="flex justify-center gap-2 mt-4">
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1}
+                className="px-3 py-1 text-sm border border-gray-200 dark:border-gray-600 rounded-lg disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700">
+                &laquo; Poprzednia
+              </button>
+              <span className="px-3 py-1 text-sm text-gray-500 dark:text-gray-400">
+                {page} / {totalPages}
+              </span>
+              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages}
+                className="px-3 py-1 text-sm border border-gray-200 dark:border-gray-600 rounded-lg disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700">
+                Następna &raquo;
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </>
+  )
+}
+
+
 // ── Tab: Statystyki ──────────────────────────────────────────────────────────
 
 function StatsTab() {
@@ -1250,6 +1413,9 @@ export default function NewsPortals() {
         <ReviewQueueTab portals={portals} />
       )}
       {activeTab === 2 && (
+        <PublishedTab portals={portals} />
+      )}
+      {activeTab === 3 && (
         <StatsTab />
       )}
 
