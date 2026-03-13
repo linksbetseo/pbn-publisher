@@ -113,6 +113,14 @@ function BulkTab() {
 
   const servers = ['all', ...new Set(allDomains.map(d => d.server).filter(Boolean))]
 
+  // Build domain→schedule lookup (domain may have multiple schedules)
+  const schedByDomain = {}
+  schedules.forEach(s => {
+    const did = s.my_domain_id
+    if (!schedByDomain[did]) schedByDomain[did] = []
+    schedByDomain[did].push(s)
+  })
+
   const filteredDomains = allDomains.filter(d => {
     if (serverFilter !== 'all' && d.server !== serverFilter) return false
     if (search && !d.domain.toLowerCase().includes(search.toLowerCase())) return false
@@ -321,6 +329,7 @@ function BulkTab() {
                     </th>
                     <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Domena</th>
                     {tab === 'domains' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Serwer</th>}
+                    {tab === 'domains' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Harmonogram</th>}
                     {tab === 'schedules' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Seed</th>}
                     {tab === 'schedules' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Frazy</th>}
                     {tab === 'schedules' && <th className="px-3 py-2 text-left font-semibold text-gray-500 uppercase tracking-wide">Mapa</th>}
@@ -336,6 +345,29 @@ function BulkTab() {
                       </td>
                       <td className="px-3 py-2 font-medium text-gray-800 max-w-[200px] truncate">{item.domain}</td>
                       {tab === 'domains' && <td className="px-3 py-2 text-gray-500">{item.server || '—'}</td>}
+                      {tab === 'domains' && (
+                        <td className="px-3 py-2">
+                          {schedByDomain[item.id] ? (
+                            <div className="space-y-0.5">
+                              {schedByDomain[item.id].map(sc => (
+                                <div key={sc.id} className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="inline-block px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px] font-medium max-w-[100px] truncate" title={sc.seed_keyword}>
+                                    {sc.seed_keyword}
+                                  </span>
+                                  <span className="text-[10px] text-gray-400">
+                                    {sc.published_count || 0}/{sc.total_keywords || 0}
+                                  </span>
+                                  {sc.map_generated
+                                    ? <span className="text-green-500 text-[10px]" title="Mapa wygenerowana">&#10003;</span>
+                                    : <span className="text-orange-400 text-[10px]" title="Brak mapy">&#9679;</span>}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-gray-300 text-[10px]">—</span>
+                          )}
+                        </td>
+                      )}
                       {tab === 'schedules' && <td className="px-3 py-2 text-purple-700 max-w-[140px] truncate">{item.seed_keyword}</td>}
                       {tab === 'schedules' && (
                         <td className="px-3 py-2 text-gray-600">
@@ -352,7 +384,7 @@ function BulkTab() {
                     </tr>
                   ))}
                   {(tab === 'domains' ? filteredDomains : filteredSchedules).length === 0 && (
-                    <tr><td colSpan={5} className="px-3 py-8 text-center text-gray-400">Brak wyników</td></tr>
+                    <tr><td colSpan={6} className="px-3 py-8 text-center text-gray-400">Brak wyników</td></tr>
                   )}
                 </tbody>
               </table>
