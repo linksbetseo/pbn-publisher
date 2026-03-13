@@ -24,6 +24,9 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend/ ./backend/
 
+# Re-copy frontend build (COPY backend/ above overwrites frontend_dist)
+RUN cd frontend && cp -r dist/* ../backend/frontend_dist/
+
 EXPOSE 8080
 
 CMD cd backend && python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
