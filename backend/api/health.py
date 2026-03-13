@@ -114,10 +114,15 @@ async def _dfs_domain_metrics(domain: str, location_code: int = 2616, language_c
             if status_code != 20000:
                 logger.info(f"[Health] DFS task status {status_code} for {clean}: {task.get('status_message', '')}")
             for result in task.get("result", []):
-                metrics = result.get("metrics", {}).get("organic", {})
+                # DFS domain_rank_overview nests data inside result.items[]
+                items = result.get("items") or []
+                if items:
+                    item = items[0]
+                    metrics = item.get("metrics", {}).get("organic", {})
+                else:
+                    metrics = result.get("metrics", {}).get("organic", {})
                 traffic = int(metrics.get("etv", 0) or 0)
                 keywords = int(metrics.get("count", 0) or 0)
-                # DataForSEO domain_rank_overview returns 'rank' at the result level
                 dr = result.get("rank")
                 if dr is not None:
                     dr = int(dr)
