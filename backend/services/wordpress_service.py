@@ -3,6 +3,7 @@ import base64
 import logging
 import re
 import unicodedata
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 import httpx
 
@@ -108,12 +109,16 @@ async def get_categories(domain: str, wp_login: str, wp_pass: str, http_user: st
 
 
 def _keyword_to_slug(keyword: str) -> str:
-    """Convert keyword to SEO-friendly WP slug."""
+    """Convert keyword to SEO-friendly WP slug. SEO #16: max 5 words, not 80 chars."""
     nfkd = unicodedata.normalize("NFKD", keyword.lower())
     ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_str).strip("-")
+    # SEO #16: limit to 5 words (Google prefers short keyword-focused slugs)
+    parts = slug.split("-")
+    if len(parts) > 5:
+        slug = "-".join(parts[:5])
+    # Still cap at 80 as safety net
     slug = slug[:80]
-    # Trim trailing partial word
     if len(slug) == 80 and "-" in slug:
         slug = slug.rsplit("-", 1)[0]
     return slug
@@ -129,10 +134,24 @@ async def _upload_image(
 ) -> Tuple[Optional[int], str]:
     """FIX #43: return type now correctly Tuple[Optional[int], str] (was Optional[int])."""
     image_data = base64.b64decode(image_b64)
+    # SEO #35: convert to WebP if Pillow available (30% smaller → better CWV)
+    _content_type = "image/jpeg"
+    try:
+        from PIL import Image
+        import io as _io
+        _img = Image.open(_io.BytesIO(image_data))
+        _webp_buf = _io.BytesIO()
+        _img.save(_webp_buf, format="WEBP", quality=82, method=4)
+        image_data = _webp_buf.getvalue()
+        _content_type = "image/webp"
+        if not filename.endswith(".webp"):
+            filename = filename.rsplit(".", 1)[0] + ".webp"
+    except Exception:
+        pass  # Pillow not installed or conversion failed — use original JPEG
     headers = {
         "Authorization": auth,
         "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Type": "image/jpeg",
+        "Content-Type": _content_type,
     }
     resp = await client.post(
         f"{base_url}/wp-json/wp/v2/media",
@@ -201,9 +220,27 @@ async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
                     except Exception:
                         pass
             # Note: Google sitemap ping deprecated 2023 — only Bing remains
-            sitemap_url = f"{base_url}/sitemap.xml"
+            # SEO #18: cache-bust sitemap URL with timestamp
+            import time as _time
+            sitemap_url = f"{base_url}/sitemap.xml?t={int(_time.time())}"
             try:
                 await ping_client.get(f"https://www.bing.com/ping?sitemap={sitemap_url}")
+            except Exception:
+                pass
+            # SEO #17: Pingomatic ping for broader reach (some PBN hosts disable IndexNow)
+            try:
+                _ping_body = (
+                    '<?xml version="1.0"?>'
+                    '<methodCall><methodName>weblogUpdates.ping</methodName>'
+                    f'<params><param><value>{base_url}</value></param>'
+                    f'<param><value>{base_url}/sitemap.xml</value></param>'
+                    '</params></methodCall>'
+                )
+                await ping_client.post(
+                    "https://rpc.pingomatic.com/",
+                    content=_ping_body,
+                    headers={"Content-Type": "text/xml"},
+                )
             except Exception:
                 pass
     except Exception:
@@ -233,16 +270,40 @@ async def publish_post(
 
     # SEO slug from keyword
     slug = _keyword_to_slug(keyword) if keyword else _keyword_to_slug(title)
-    alt_text = keyword or title
-    image_filename = f"{slug[:50]}.jpg" if slug else "featured.jpg"
+    # SEO #20: vary alt text — not identical to title (Google image search)
+    _alt_variations_pl = ["ilustracja", "grafika", "zdjęcie", "obraz"]
+    _alt_variations_en = ["illustration", "image", "photo", "graphic"]
+    import random as _rnd
+    _alt_suffix = _rnd.choice(_alt_variations_pl) if (keyword and any(c in keyword for c in "ąćęłńóśźż")) else _rnd.choice(_alt_variations_en)
+    alt_text = f"{keyword or title} — {_alt_suffix}"
+    # SEO #35: prefer WebP format for smaller files and better Core Web Vitals
+    _use_webp = True
+    try:
+        from PIL import Image
+        import io as _io
+    except ImportError:
+        _use_webp = False
+    image_filename = f"{slug[:50]}.webp" if _use_webp else f"{slug[:50]}.jpg"
 
     # Excerpt fallback — strip HTML from content intro if excerpt is empty/bad
+    # SEO #15: cut at sentence boundary, not mid-word
     if not excerpt or len(excerpt.strip()) < 20:
         _plain = re.sub(r'<[^>]+>', ' ', content or "")
         _plain = re.sub(r'\s+', ' ', _plain).strip()
         if _plain:
-            parts = _plain[:155].rsplit(' ', 1)
-            excerpt = (parts[0] if len(parts) > 1 else _plain[:155]) + "..."
+            # Try to cut at sentence boundary within 155 chars
+            _sentences = re.split(r'(?<=[.!?])\s+', _plain[:200])
+            _excerpt_build = ""
+            for _s in _sentences:
+                if len(_excerpt_build) + len(_s) + 1 <= 155:
+                    _excerpt_build = (_excerpt_build + " " + _s).strip()
+                else:
+                    break
+            if len(_excerpt_build) >= 50:
+                excerpt = _excerpt_build
+            else:
+                parts = _plain[:155].rsplit(' ', 1)
+                excerpt = (parts[0] if len(parts) > 1 else _plain[:155]) + "..."
 
     urls_to_try = _base_url(domain)
 
@@ -262,11 +323,14 @@ async def publish_post(
                     except Exception as img_err:
                         logger.warning(f"Image upload failed for {base_url}: {img_err}")
 
+                # SEO #6: explicit date for consistent timezone control
+                _now_gmt = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
                 post_data = {
                     "title": title,
                     "content": content,
                     "status": "publish",
                     "slug": slug,
+                    "date_gmt": _now_gmt,
                 }
                 if media_id:
                     post_data["featured_media"] = media_id
@@ -297,7 +361,14 @@ async def publish_post(
                         "_yoast_wpseo_twitter-title": title,
                         "_yoast_wpseo_twitter-description": excerpt[:200],
                         "_yoast_wpseo_twitter-card-type": "summary_large_image",
+                        # SEO #8: OG article metadata for Facebook/Pinterest
+                        "article:published_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                        "article:section": keyword or title[:50],
                     })
+                    if tags:
+                        # SEO #8: article:tag for OG taxonomy
+                        for _ti, _tag in enumerate(tags[:5]):
+                            meta[f"article:tag_{_ti}"] = _tag
                 if keyword:
                     meta["_yoast_wpseo_focuskw"] = keyword
                     # RankMath supports comma-separated focus keywords
@@ -380,7 +451,8 @@ async def _get_or_create_tags(
     """Get or create WP tags, return list of IDs. Uses one bulk GET to minimize API calls."""
     if not tag_names:
         return []
-    tags = tag_names[:5]
+    # SEO #19: increased tag limit from 5 to 10 for richer taxonomy
+    tags = tag_names[:10]
     headers = {"Authorization": auth, "Content-Type": "application/json"}
     slugs = [_keyword_to_slug(n) for n in tags]
 

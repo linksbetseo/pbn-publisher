@@ -110,15 +110,25 @@ def _clean(text: str) -> str:
 
 
 def _stem_pl(token: str) -> str:
-    """Naive Polish suffix stripper — handles most common case inflections."""
+    """Naive Polish suffix stripper — handles most common case inflections.
+    SEO #23: also handles common prefixes and compound word splits."""
     # FIX #27: expanded suffix list for better Polish stemming (added common noun/verb endings)
+    # SEO #23: strip common prefixes first for better matching
+    _core = token
+    for prefix in ("nie", "prze", "za", "na", "pod", "roz", "wy", "do"):
+        if _core.startswith(prefix) and len(_core) - len(prefix) >= 4:
+            _core_candidate = _core[len(prefix):]
+            # Only strip prefix if remainder is long enough to be meaningful
+            if len(_core_candidate) >= 4:
+                _core = _core_candidate
+                break
     for suffix in ("owania", "owego", "owej", "owym", "nych", "nego", "nemu",
                    "eniu", "anie", "enie", "ości",
                    "ach", "ami", "iem", "ego", "emu", "owi",
                    "ie", "ej", "ów", "ą", "ę"):
-        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
-            return token[:-len(suffix)]
-    return token
+        if _core.endswith(suffix) and len(_core) - len(suffix) >= 3:
+            return _core[:-len(suffix)]
+    return _core
 
 
 def _tokenize(text: str) -> list[str]:
@@ -613,14 +623,15 @@ async def generate_topical_map(
             },
         })
 
-    # Compute publishing priority score per pillar:
-    # Formula: (volume / (KD + 1)) * coherence * focus — favours high-volume, low-KD, tightly-focused clusters
+    # SEO #21: intent-weighted priority — informational pillars first (build authority before commercial)
+    _intent_weight = {"informational": 1.2, "": 1.0, "commercial": 0.8, "transactional": 0.7, "navigational": 0.6}
     for p in pillars:
         vol = p["total_volume"] or 1
         kd = p["avg_difficulty"] or 1
         coherence = p.get("pillar_coherence", 0.5)
         focus = p.get("focus_score", 0.5)
-        p["priority_score"] = round((vol / (kd + 1)) * (0.5 + coherence) * (0.5 + focus), 1)
+        _iw = _intent_weight.get(p.get("pillar_intent", "informational"), 1.0)
+        p["priority_score"] = round((vol / (kd + 1)) * (0.5 + coherence) * (0.5 + focus) * _iw, 1)
 
     # Sort pillars by priority_score DESC — publish highest-opportunity clusters first
     pillars.sort(key=lambda p: p["priority_score"], reverse=True)

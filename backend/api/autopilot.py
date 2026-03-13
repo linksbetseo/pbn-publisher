@@ -502,15 +502,36 @@ async def check_cannibalization(schedule_id: int):
         ) as cur:
             all_kws = [dict(r) for r in await cur.fetchall()]
 
-    # FIX #68: use module-level re import instead of inline import
+    # SEO #24: improved cannibalization detection — Jaccard similarity instead of first-2-tokens
     def _stem(kw: str) -> str:
         tokens = re.sub(r"[^a-z0-9ąćęłńóśźż ]+", "", kw.lower()).split()
         return " ".join(tokens[:2])
+
+    def _kw_tokens(kw: str) -> set:
+        return set(re.sub(r"[^a-z0-9ąćęłńóśźż ]+", "", kw.lower()).split())
 
     groups: dict[str, list] = {}
     for row in all_kws:
         stem = _stem(row["keyword"])
         groups.setdefault(stem, []).append(row)
+
+    # Also detect cross-stem collisions via Jaccard similarity > 0.7
+    _all_items = list(all_kws)
+    for i in range(len(_all_items)):
+        for j in range(i + 1, min(len(_all_items), i + 100)):  # limit to nearby for performance
+            t1 = _kw_tokens(_all_items[i]["keyword"])
+            t2 = _kw_tokens(_all_items[j]["keyword"])
+            if not t1 or not t2:
+                continue
+            _jaccard = len(t1 & t2) / len(t1 | t2)
+            if _jaccard > 0.7:
+                stem_key = f"~sim:{_stem(_all_items[i]['keyword'])}"
+                if stem_key not in groups:
+                    groups[stem_key] = []
+                if _all_items[i] not in groups[stem_key]:
+                    groups[stem_key].append(_all_items[i])
+                if _all_items[j] not in groups[stem_key]:
+                    groups[stem_key].append(_all_items[j])
 
     collisions = []
     for stem, items in groups.items():
@@ -643,10 +664,15 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
 
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
+            # SEO #25: pillar-first ordering — ensure pillar pages published before supporting
+            # SEO #22: quick wins (high volume + low KD) prioritized after pillars
             async with db.execute(
                 """SELECT * FROM domain_keywords
                    WHERE schedule_id = ? AND status = 'pending'
-                   ORDER BY keyword_type DESC, keyword_difficulty ASC, search_volume DESC
+                   ORDER BY
+                     CASE keyword_type WHEN 'pillar' THEN 0 ELSE 1 END,
+                     CASE WHEN search_volume >= 50 AND keyword_difficulty < 25 THEN 0 ELSE 1 END,
+                     keyword_difficulty ASC, search_volume DESC
                    LIMIT ?""",
                 (schedule_id, limit)
             ) as cur:
@@ -665,15 +691,19 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
 
         await _job_update(job_id, total=len(keywords))
 
+        # SEO #29: fetch ALL published posts then random sample 50 — ensures links to older valuable posts
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT title, keyword, wp_post_url FROM domain_keywords
-                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''
-                   ORDER BY published_at DESC LIMIT 50""",
+                   WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
                 (schedule_id,)
             ) as cur:
-                published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+                _all_published = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+        if len(_all_published) > 50:
+            published_posts = random.sample(_all_published, 50)
+        else:
+            published_posts = _all_published
 
         domain_fingerprints: set = set()
         _published = 0
@@ -732,6 +762,35 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     excerpt = article.get("excerpt", "")
                     lsi_tags = article.get("lsi_tags", [])
                     category_id = kw_row.get("wp_category_id") or None
+                    _wc = article.get("word_count", 0)
+                    _kd = article.get("keyword_density", 0)
+
+                    # SEO #28: quality gate — skip low-quality articles
+                    if _wc < 600:
+                        logger.warning(f"[Autopilot] Quality gate: '{keyword}' too short ({_wc} words) — skipping")
+                        _results.append({"status": "skipped", "keyword": keyword, "error": f"Too short: {_wc} words"})
+                        continue
+                    if _kd > 0 and (_kd < 0.3 or _kd > 3.5):
+                        logger.warning(f"[Autopilot] Quality gate: '{keyword}' KW density {_kd}% out of range — publishing anyway")
+
+                    # SEO #26: check for duplicate slug on WP before publishing
+                    from services.wordpress_service import _keyword_to_slug
+                    _check_slug = _keyword_to_slug(keyword)
+                    try:
+                        import httpx as _httpx
+                        _wp_bases = [f"https://{sched['domain']}", f"http://{sched['domain']}"] if not sched['domain'].startswith("http") else [sched['domain'].rstrip("/")]
+                        async with _httpx.AsyncClient(verify=False, timeout=10) as _sc:
+                            for _wb in _wp_bases:
+                                try:
+                                    _sr = await _sc.get(f"{_wb}/wp-json/wp/v2/posts", params={"slug": _check_slug, "per_page": 1})
+                                    if _sr.status_code == 200 and _sr.json():
+                                        logger.warning(f"[Autopilot] Duplicate slug '{_check_slug}' on {sched['domain']} — appending suffix")
+                                        title = title + f" ({datetime.now().strftime('%m/%Y')})"
+                                    break
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
 
                     img_prompt = (
                         f"A photorealistic scene that visually represents: {title}. "

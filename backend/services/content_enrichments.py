@@ -105,8 +105,9 @@ def _build_toc(sections: list[str], lang_pl: bool) -> str:
         # FIX #39: use slugify_heading for proper Polish char handling (ąćę → ace)
         anchor = _slugify_heading(section)
         items += f'<li><a href="#{anchor}" style="color:#1a73e8;text-decoration:none;">{section}</a></li>\n'
+    # SEO #32: add role="navigation" and aria-label for accessibility
     return (
-        f'<nav {_s("stats")}>\n'
+        f'<nav role="navigation" aria-label="{heading}" {_s("stats")}>\n'
         f'<strong style="display:block;margin-bottom:10px;">{heading}</strong>\n'
         f'<ol style="margin:0;padding-left:20px;">\n{items}</ol>\n'
         f'</nav>\n'
@@ -145,8 +146,10 @@ def _build_key_takeaways(points: list[str], lang_pl: bool) -> str:
 
 
 def _build_expert_quote(quote: str, source: str, _role: str = "") -> str:
+    # SEO #30: blockquote with cite attribute for E-E-A-T signal
+    _cite_attr = f' cite="{source}"' if source and source.startswith("http") else ""
     return (
-        f'<blockquote {_s("blockquote")}>\n'
+        f'<blockquote{_cite_attr} {_s("blockquote")}>\n'
         f'<p style="margin:0 0 10px;">{quote}</p>\n'
         f'<footer style="font-size:0.9em;font-style:normal;color:#555;">'
         f'— <strong>{source}</strong></footer>\n'

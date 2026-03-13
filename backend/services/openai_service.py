@@ -412,7 +412,9 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str, l
 
         kw = post.get("keyword", "")
         anchor_text = kw if (kw and len(kw.split()) <= 6) else " ".join(title.split()[:5])
-        link = f'<a href="{url}" title="{title}">{anchor_text}</a>'
+        # SEO #9: escape HTML entities in title attribute to prevent broken markup
+        _safe_title = title.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+        link = f'<a href="{url}" title="{_safe_title}">{anchor_text}</a>'
         ctx = random.choice(_int_contexts)
         new_para = best_para[:-4] + ctx(link) + "</p>"
         html = html.replace(best_para, new_para, 1)
@@ -582,7 +584,27 @@ async def generate_article(
     )
     logger.info(f"[Article] Intent: {intent_analysis[:80]}")
 
+    # SEO #10: Extract named entities from intent analysis for explicit injection into section prompts
+    _extracted_entities = ""
+    _entity_match = re.search(r'(?:encje|entities|nazw[ay]? własn[eay]|proper nouns)[:\s]*(.+?)(?:\n|$)', intent_analysis, re.IGNORECASE)
+    if _entity_match:
+        _extracted_entities = _entity_match.group(1).strip()
+
+    # SEO #5: Detect search intent type for dynamic CTA in excerpt
+    _intent_type = "informational"  # default
+    for _itype, _ipatterns in [
+        ("transactional", ["kup", "cena", "koszt", "sklep", "buy", "price", "cost", "shop", "order"]),
+        ("commercial", ["najlep", "ranking", "porównanie", "opinie", "best", "top", "review", "compare"]),
+        ("navigational", ["logowanie", "login", "strona", "kontakt", "contact", "website"]),
+    ]:
+        if any(p in topic.lower() or p in intent_analysis.lower() for p in _ipatterns):
+            _intent_type = _itype
+            break
+
     # ── STEP 3: Outline ───────────────────────────────────────────────────────
+    # SEO #10: entity block for section prompts
+    _entity_block = f"\nEncje do użycia: {_extracted_entities}" if _extracted_entities else ""
+
     # FIX #5: section count based on 250-300 words per section (was 200 → too many thin sections)
     n_sections = max(4, min(8, round(target_words / 280)))
     if lang_pl:
@@ -617,7 +639,7 @@ async def generate_article(
             f"Wymyśl unikalny tytuł SEO dla frazy: '{topic}'\n"
             f"Sekcje artykułu: {', '.join(sections[:3])}\n"
             # FIX #46: prompt says 50-65 to match the 65-char enforcement below
-            f"ZASADY: 50-65 znaków, zawiera '{topic}', przyciąga uwagę.\n"
+            f"ZASADY: 50-65 znaków, '{topic}' MUSI pojawić się w pierwszych 30 znakach, przyciąga uwagę.\n"
             f"Użyj jednego z formatów:\n"
             f"- '[Keyword] — kompletny przewodnik {_current_year}'\n"
             f"- 'Jak [działanie związane z keyword]? [X] kroków'\n"
@@ -631,7 +653,7 @@ async def generate_article(
             f"Create unique SEO title for: '{topic}'\n"
             f"Article sections: {', '.join(sections[:3])}\n"
             # FIX #47: prompt says 50-65 to match the 65-char enforcement below
-            f"RULES: 50-65 characters, contains '{topic}', attention-grabbing.\n"
+            f"RULES: 50-65 characters, '{topic}' MUST appear in the first 30 characters, attention-grabbing.\n"
             f"Use one of these formats:\n"
             f"- '[Keyword] — Complete Guide {_current_year}'\n"
             f"- 'How to [action related to keyword]? [X] Steps'\n"
@@ -761,15 +783,15 @@ async def generate_article(
 
     async def _generate_section(i: int, heading: str) -> str:
         async with _sem:
-            # Rotate LSI terms so each section gets different ones
-            section_lsi = lsi_per_section[i * 3 % max(1, len(lsi_per_section)):(i * 3 % max(1, len(lsi_per_section))) + 5] if lsi_per_section else []
+            # SEO #11: random sample LSI per section instead of rotating offset (avoids duplicates)
+            section_lsi = random.sample(lsi_per_section, min(5, len(lsi_per_section))) if lsi_per_section else []
             lsi_section_block = f"\nSłowa LSI do wplecenia: {', '.join(section_lsi)}" if section_lsi else ""
             if lang_pl:
                 section_user = (
                     f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
                     f"H2: '{heading}'\n"
                     f"Intencja: {intent_analysis}\n"
-                    f"Cel: ~{words_per_section} słów, użyj '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
+                    f"Cel: ~{words_per_section} słów, użyj '{topic}' ~{kw_per_section}x{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
                     f"Pisz ekspercko: konkretne fakty, liczby, przykłady. Unikaj ogólników.{custom_block}"
                 )
@@ -778,7 +800,7 @@ async def generate_article(
                     f"Write section for '{title}' (keyword: '{topic}').\n"
                     f"H2: '{heading}'\n"
                     f"Intent: {intent_analysis}\n"
-                    f"Target: ~{words_per_section} words, use '{topic}' ~{kw_per_section}x{lsi_section_block}\n"
+                    f"Target: ~{words_per_section} words, use '{topic}' ~{kw_per_section}x{lsi_section_block}{_entity_block}\n"
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
                     f"Write expertly: specific facts, numbers, examples. Avoid vague generalities.{custom_block}"
                 )
@@ -886,16 +908,26 @@ async def generate_article(
         "Jesteś ekspertem SEO. Tworzysz FAQ zoptymalizowane pod featured snippets, AI Overview i PAA (People Also Ask)." if lang_pl
         else "You are an SEO expert creating FAQ optimized for featured snippets, AI Overview, and PAA (People Also Ask)."
     )
+    # SEO #5: intent-based CTA for meta description
+    _cta_map_pl = {
+        "informational": "Dowiedz się więcej", "transactional": "Sprawdź ofertę",
+        "commercial": "Porównaj opcje", "navigational": "Przejdź na stronę",
+    }
+    _cta_map_en = {
+        "informational": "Learn more", "transactional": "Shop now",
+        "commercial": "Compare options", "navigational": "Visit the page",
+    }
+    _cta_hint = _cta_map_pl.get(_intent_type, "Sprawdź") if lang_pl else _cta_map_en.get(_intent_type, "Learn more")
     if lang_pl:
         excerpt_user = (
             f"Napisz meta description dla artykułu '{title}' o '{topic}'.\n"
-            f"WYMAGANIA: max 155 znaków, bez HTML, zawiera '{topic}', kończy się CTA (np. 'Sprawdź', 'Dowiedz się', 'Przeczytaj').\n"
+            f"WYMAGANIA: max 155 znaków, bez HTML, zawiera '{topic}', kończy się CTA: '{_cta_hint}'.\n"
             f"Tylko tekst meta description, nic więcej."
         )
     else:
         excerpt_user = (
             f"Write meta description for '{title}' about '{topic}'.\n"
-            f"REQUIREMENTS: max 155 chars, no HTML, includes '{topic}', ends with CTA (e.g. 'Learn more', 'Find out', 'Read now').\n"
+            f"REQUIREMENTS: max 155 chars, no HTML, includes '{topic}', ends with CTA: '{_cta_hint}'.\n"
             f"Only the meta description text, nothing else."
         )
 
@@ -920,6 +952,15 @@ async def generate_article(
     if not faq_html.strip().startswith("<"):
         faq_html = _markdown_to_html(faq_html)
     faq_html = _strip_markdown_remnants(faq_html)
+    # SEO #13: add IDs to FAQ h3 headings for anchor linking
+    _faq_idx = [0]
+    def _add_faq_id(m):
+        _faq_idx[0] += 1
+        attrs = m.group(1) or ""
+        content_h3 = m.group(2)
+        _slug = _slugify_heading(re.sub(r'<[^>]+>', '', content_h3))
+        return f'<h3 id="faq-{_slug}"{attrs}>{content_h3}</h3>'
+    faq_html = re.sub(r'<h3([^>]*)>(.*?)</h3>', _add_faq_id, faq_html, flags=re.DOTALL | re.IGNORECASE)
 
     # Post-process excerpt
     excerpt = excerpt_raw.strip('"\'').strip()
@@ -962,7 +1003,16 @@ async def generate_article(
         # Standard layout
         content_parts = [intro_html] + sections_html + [conclusion_html, faq_html]
 
+    # SEO #34: content freshness signal — visible "last updated" date
+    _freshness_date = datetime.now(timezone.utc).strftime("%d.%m.%Y")
+    _freshness_label = "Ostatnia aktualizacja" if lang_pl else "Last updated"
+    _freshness_tag = f'<p style="font-size:0.85em;color:#666;margin-bottom:16px;"><time datetime="{datetime.now(timezone.utc).strftime("%Y-%m-%d")}">{_freshness_label}: {_freshness_date}</time></p>'
+    content_parts.insert(0, _freshness_tag)
+
     content = "\n\n".join(p for p in content_parts if p)
+
+    # SEO #14: wrap content in lang div for better NLP entity recognition
+    content = f'<div lang="{language}">\n{content}\n</div>'
 
     # Inject external anchor links
     content = _inject_anchors(content, anchors_info, language=language)
@@ -1041,6 +1091,12 @@ async def generate_article(
     ]
     _author = random.choice(_author_pool_pl if lang_pl else _author_pool_en)
 
+    # SEO #3: use PBN domain name for publisher (not client_domain which is the linked site)
+    # In autopilot mode client_domain is empty, so fallback to "Publisher" — now uses domain param if available
+    _publisher_name = "Publisher"
+    if client_domain and client_domain.strip():
+        _publisher_name = client_domain.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+
     article_ld = {
         "@context": "https://schema.org",
         "@type": "Article",
@@ -1055,17 +1111,50 @@ async def generate_article(
         },
         "publisher": {
             "@type": "Organization",
-            # FIX #76: strip www. from publisher name (cleaner in SERP rich results)
-            "name": client_domain.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if client_domain else "Publisher",
+            "name": _publisher_name,
         },
         "mainEntityOfPage": {
             "@type": "WebPage",
+        },
+        # SEO #4: speakable property — first paragraph as voice search target
+        "speakable": {
+            "@type": "SpeakableSpecification",
+            "cssSelector": ["div[lang] > p:first-of-type", "div[lang] > p:nth-of-type(2)"],
         },
         "wordCount": _count_words(content),
         "articleSection": topic,
         "inLanguage": language,
     }
     schema_blocks.append(article_ld)
+
+    # SEO #1: HowTo Schema for how-to intent articles
+    _howto_patterns = ["jak ", "how to ", "krok po kroku", "step by step", "poradnik", "guide", "tutorial"]
+    if any(p in topic.lower() for p in _howto_patterns):
+        # Extract steps from ordered lists or h3 headings in content
+        _steps_raw = re.findall(r'<li>(.*?)</li>', content, re.DOTALL)
+        if len(_steps_raw) >= 3:
+            howto_ld = {
+                "@context": "https://schema.org",
+                "@type": "HowTo",
+                "name": title,
+                "description": excerpt[:200] if excerpt else "",
+                "step": [
+                    {"@type": "HowToStep", "name": re.sub(r'<[^>]+>', '', step).strip()[:100], "text": re.sub(r'<[^>]+>', '', step).strip()}
+                    for step in _steps_raw[:10]
+                ],
+            }
+            schema_blocks.append(howto_ld)
+
+    # SEO #2: BreadcrumbList Schema
+    breadcrumb_ld = {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "/"},
+            {"@type": "ListItem", "position": 2, "name": topic[:50]},
+        ],
+    }
+    schema_blocks.append(breadcrumb_ld)
 
     # Inject all schema blocks
     if schema_blocks:
@@ -1097,14 +1186,31 @@ async def generate_article(
     if final_density < 0.5 or final_density > 3.0:
         logger.warning(f"[Article] KW density out of range: {final_density}% for '{topic}'")
 
+    # SEO #19: expand tags — LSI + pillar label + intent type for richer WP taxonomy
+    _all_tags = lsi_terms[:7]  # 7 LSI tags (was 5)
+    if pillar_page_anchor:
+        _all_tags.append(pillar_page_anchor)
+    if _intent_type != "informational":
+        _all_tags.append(_intent_type)
+    # Dedupe and cap at 10
+    _seen_tags = set()
+    _unique_tags = []
+    for _t in _all_tags:
+        _tl = _t.lower().strip()
+        if _tl and _tl not in _seen_tags:
+            _seen_tags.add(_tl)
+            _unique_tags.append(_t)
+    _unique_tags = _unique_tags[:10]
+
     return {
         "title": title,
         "content": content,
         "excerpt": excerpt,
         "fingerprint": fingerprint,
-        "lsi_tags": lsi_terms[:5],  # top 5 LSI terms for WP tags
+        "lsi_tags": _unique_tags,  # SEO #19: 7-10 tags instead of 5
         "word_count": word_count,
-        "keyword_density": final_density,  # FIX #12: return density for dashboard monitoring
+        "keyword_density": final_density,
+        "intent_type": _intent_type,  # SEO #5: expose intent for quality monitoring
     }
 
 
