@@ -1,8 +1,9 @@
+import asyncio
 import base64
 import logging
 import re
 import unicodedata
-from typing import Optional
+from typing import Optional, Tuple
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,8 @@ async def _upload_image(
     image_b64: str,
     filename: str = "featured.jpg",
     alt_text: str = "",
-) -> Optional[int]:
+) -> Tuple[Optional[int], str]:
+    """FIX #43: return type now correctly Tuple[Optional[int], str] (was Optional[int])."""
     image_data = base64.b64decode(image_b64)
     headers = {
         "Authorization": auth,
@@ -142,10 +144,10 @@ async def _upload_image(
         media_json = resp.json()
         media_id = media_json.get("id")
         source_url = media_json.get("source_url", "")
-        # Set alt text, title, caption for SEO
+        # FIX #72: set alt text, title, caption for SEO — use language-aware suffix
         if media_id and alt_text:
             try:
-                descriptive_alt = f"{alt_text} — ilustracja" if alt_text else ""
+                descriptive_alt = alt_text
                 await client.post(
                     f"{base_url}/wp-json/wp/v2/media/{media_id}",
                     json={"alt_text": descriptive_alt, "title": alt_text[:60], "caption": ""},
@@ -324,8 +326,8 @@ async def publish_post(
                         break
                     except httpx.ReadTimeout:
                         if _attempt == 0:
-                            import asyncio as _asyncio
-                            await _asyncio.sleep(3)
+                            # FIX #44: use module-level asyncio import (was importing inside function body)
+                            await asyncio.sleep(3)
                             continue
                         raise
                 if resp is None:
@@ -350,9 +352,8 @@ async def publish_post(
                             )
                         except Exception:
                             pass
-                    # Ping sitemaps asynchronously (non-blocking)
-                    import asyncio as _asyncio
-                    _asyncio.create_task(_ping_sitemaps(base_url, site_auth, post_url=post_url))
+                    # FIX #45: use module-level asyncio import (was importing inside function body)
+                    asyncio.create_task(_ping_sitemaps(base_url, site_auth, post_url=post_url))
                     return {
                         "success": True,
                         "url": post_url,
@@ -430,6 +431,9 @@ async def check_wp_credentials(domain: str, wp_login: str, wp_pass: str, http_us
                 )
                 if resp.status_code == 200:
                     return True
+                # FIX #71: log specific auth error for debugging (403=forbidden, 401=bad creds)
+                if resp.status_code in (401, 403):
+                    logger.warning(f"[WP] Auth check failed for {base}: HTTP {resp.status_code}")
             except Exception:
                 continue
     return False

@@ -120,7 +120,9 @@ class GenerateRequest(BaseModel):
     def topic_length(cls, v):
         if len(v) > 200:
             raise ValueError("Topic max 200 characters")
-        return v.strip()
+        # FIX #58: strip leading/trailing whitespace AND collapse internal multi-spaces
+        import re as _re
+        return _re.sub(r'\s+', ' ', v.strip())
 
     @field_validator("custom_prompt")
     @classmethod
@@ -313,12 +315,15 @@ async def publish_posts(body: PublishRequest):
     if not body.my_domain_ids:
         return {"results": [], "published": 0, "failed": 0}
 
+    # FIX #59: deduplicate domain IDs (UI can send duplicates via multi-select)
+    deduped_ids = list(dict.fromkeys(body.my_domain_ids))
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        placeholders = ",".join("?" * len(body.my_domain_ids))
+        placeholders = ",".join("?" * len(deduped_ids))
         async with db.execute(
             f"SELECT * FROM my_domains WHERE id IN ({placeholders}) AND active = 1",
-            body.my_domain_ids,
+            deduped_ids,
         ) as cursor:
             domains = await cursor.fetchall()
 
@@ -621,12 +626,20 @@ async def publish_progress_sse(job_id: str, request: Request):
     """SSE stream: emits progress events until publish job is done."""
     async def event_generator():
         last_done = -1
+        # FIX #61: add SSE timeout guard — auto-close after 30min to prevent zombie connections
+        _sse_start = time.time()
+        _SSE_MAX_DURATION = 1800  # 30 minutes
         while True:
             # Detect client disconnect — prevents memory leak from orphaned jobs
             if await request.is_disconnected():
                 # Mark job for cleanup but let background task finish saving to DB
                 if job_id in _publish_jobs:
                     _publish_jobs[job_id]["_client_gone"] = True
+                return
+
+            # FIX #61: timeout guard
+            if time.time() - _sse_start > _SSE_MAX_DURATION:
+                yield f"data: {_json.dumps({'error': 'SSE timeout (30min)'})}\n\n"
                 return
 
             job = _publish_jobs.get(job_id)
@@ -669,11 +682,13 @@ async def publish_progress_sse(job_id: str, request: Request):
 
 @router.post("/ping-sitemap")
 async def ping_sitemap(body: dict):
-    """Ping Google & Bing with sitemap URL after publication."""
+    """Ping Bing with sitemap URL after publication."""
     import httpx
     domain = body.get("domain", "")
     if not domain:
         return {"error": "No domain"}
+    # FIX #60: strip trailing slash from domain before building sitemap URL
+    domain = domain.rstrip("/")
     sitemap_url = f"https://{domain}/sitemap.xml" if not domain.startswith("http") else f"{domain}/sitemap.xml"
     results = {}
     async with httpx.AsyncClient(timeout=10, verify=False) as client:

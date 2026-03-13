@@ -14,6 +14,8 @@ import json as _json
 import logging
 import os
 import random
+import re
+import time
 import uuid as _uuid
 from datetime import date, datetime, timezone
 from typing import List, Optional
@@ -254,24 +256,17 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate):
     """Aktualizuj ustawienia harmonogramu."""
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
-        if body.posts_per_day is not None:
-            await db.execute("UPDATE domain_schedules SET posts_per_day=? WHERE id=?", (body.posts_per_day, schedule_id))
-        if body.active is not None:
-            await db.execute("UPDATE domain_schedules SET active=? WHERE id=?", (body.active, schedule_id))
-        if body.client_domain is not None:
-            await db.execute("UPDATE domain_schedules SET client_domain=? WHERE id=?", (body.client_domain, schedule_id))
-        if body.anchor_text is not None:
-            await db.execute("UPDATE domain_schedules SET anchor_text=? WHERE id=?", (body.anchor_text, schedule_id))
-        if body.image_source is not None:
-            await db.execute("UPDATE domain_schedules SET image_source=? WHERE id=?", (body.image_source, schedule_id))
-        if body.custom_prompt is not None:
-            await db.execute("UPDATE domain_schedules SET custom_prompt=? WHERE id=?", (body.custom_prompt, schedule_id))
-        if body.min_volume is not None:
-            await db.execute("UPDATE domain_schedules SET min_volume=? WHERE id=?", (body.min_volume, schedule_id))
-        if body.min_coherence is not None:
-            await db.execute("UPDATE domain_schedules SET min_coherence=? WHERE id=?", (body.min_coherence, schedule_id))
-        if body.language is not None:
-            await db.execute("UPDATE domain_schedules SET language=? WHERE id=?", (body.language, schedule_id))
+        # FIX #64: consolidate into single UPDATE instead of N separate queries per field
+        updates = {}
+        for field in ("posts_per_day", "active", "client_domain", "anchor_text",
+                      "image_source", "custom_prompt", "min_volume", "min_coherence", "language"):
+            val = getattr(body, field, None)
+            if val is not None:
+                updates[field] = val
+        if updates:
+            sets = ", ".join(f"{k}=?" for k in updates)
+            vals = list(updates.values()) + [schedule_id]
+            await db.execute(f"UPDATE domain_schedules SET {sets} WHERE id=?", vals)
         await db.commit()
     return {"ok": True}
 
@@ -314,9 +309,8 @@ async def generate_map_for_schedule(schedule_id: int, force_refresh: bool = Fals
     """
     await ensure_tables()
 
-    # Auto-cleanup stale entries (>10min = stuck/crashed)
-    import time as _time
-    now = _time.time()
+    # FIX #65: use module-level time import instead of inline import
+    now = time.time()
     stale = [k for k, ts in _map_generating.items() if now - ts > _MAP_GEN_TIMEOUT]
     for k in stale:
         _map_generating.pop(k, None)
@@ -356,11 +350,10 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
         min_coherence=float(sched.get("min_coherence") or 0.0),
     )
 
-    # ── Cannibalization guard ────────────────────────────────────────────────
-    import re as _re_cann
+    # FIX #67: use module-level re import instead of inline import re as _re_cann
 
     def _kw_stem(kw: str) -> str:
-        tokens = _re_cann.sub(r"[^a-z0-9ąćęłńóśźż ]+", "", kw.lower()).split()
+        tokens = re.sub(r"[^a-z0-9ąćęłńóśźż ]+", "", kw.lower()).split()
         return " ".join(tokens[:2])
 
     inserted = 0
@@ -508,10 +501,9 @@ async def check_cannibalization(schedule_id: int):
         ) as cur:
             all_kws = [dict(r) for r in await cur.fetchall()]
 
-    # Group by normalised 2-token stem — simple but effective for Polish/English
-    import re as _re
+    # FIX #68: use module-level re import instead of inline import
     def _stem(kw: str) -> str:
-        tokens = _re.sub(r"[^a-z0-9ąćęłńóśźż ]+", "", kw.lower()).split()
+        tokens = re.sub(r"[^a-z0-9ąćęłńóśźż ]+", "", kw.lower()).split()
         return " ".join(tokens[:2])
 
     groups: dict[str, list] = {}
@@ -601,9 +593,8 @@ async def sync_categories(schedule_id: int):
         label = cat["pillar_label"]
         anchor = cat["pillar_anchor"]
 
-        # Generuj slug z anchora (ascii, myślniki)
-        import re as _re
-        slug = _re.sub(r"[^a-z0-9]+", "-", anchor.lower()).strip("-")
+        # FIX #66: use module-level re import instead of inline import
+        slug = re.sub(r"[^a-z0-9]+", "-", anchor.lower()).strip("-")
 
         cat_id = await get_or_create_category(
             domain=sched["domain"],

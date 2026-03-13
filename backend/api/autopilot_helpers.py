@@ -64,7 +64,7 @@ async def job_get(job_id: str) -> Optional[dict]:
 
 
 async def with_retry(coro_fn, max_attempts: int = 3, base_delay: float = 2.0):
-    """Retry async coroutine with exponential backoff."""
+    """Retry async coroutine with exponential backoff + jitter."""
     last_exc = None
     for attempt in range(max_attempts):
         try:
@@ -72,8 +72,9 @@ async def with_retry(coro_fn, max_attempts: int = 3, base_delay: float = 2.0):
         except Exception as e:
             last_exc = e
             if attempt < max_attempts - 1:
-                wait = base_delay * (2 ** attempt)
-                logger.warning(f"[Retry] attempt {attempt+1}/{max_attempts} failed: {e} — retrying in {wait:.0f}s")
+                # FIX #62: add jitter to exponential backoff (prevents thundering herd on shared GPT rate limits)
+                wait = base_delay * (2 ** attempt) + random.uniform(0, base_delay)
+                logger.warning(f"[Retry] attempt {attempt+1}/{max_attempts} failed: {e} — retrying in {wait:.1f}s")
                 await asyncio.sleep(wait)
     raise last_exc
 
@@ -83,12 +84,13 @@ async def get_pillar_url(schedule_id: int, my_domain_id: int, pillar_anchor: str
     if not pillar_anchor:
         return "", ""
     async with aiosqlite.connect(DB_PATH) as db:
+        # FIX #63: also match by pillar_label (some schedules use label not anchor for linking)
         async with db.execute(
             """SELECT wp_post_url, keyword FROM domain_keywords
-               WHERE schedule_id=? AND my_domain_id=? AND pillar_anchor=?
+               WHERE schedule_id=? AND my_domain_id=? AND (pillar_anchor=? OR pillar_label=?)
                  AND keyword_type='pillar' AND status='published' AND wp_post_url!=''
                LIMIT 1""",
-            (schedule_id, my_domain_id, pillar_anchor)
+            (schedule_id, my_domain_id, pillar_anchor, pillar_anchor)
         ) as cur:
             row = await cur.fetchone()
     if row:

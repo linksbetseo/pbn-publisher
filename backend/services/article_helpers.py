@@ -7,6 +7,7 @@ import re
 import time
 import logging
 import json as _json
+import unicodedata
 from typing import Optional
 
 import aiosqlite
@@ -14,7 +15,9 @@ from config import DB_PATH
 
 logger = logging.getLogger(__name__)
 
-_SERP_CACHE_TTL = 86400  # 24 hours
+# FIX #78: extended SERP cache TTL from 24h to 48h — reduces DataForSEO API costs
+# (SERP data for most keywords doesn't change significantly within 48h)
+_SERP_CACHE_TTL = 172800  # 48 hours
 
 _SERP_CACHE_TABLE_CREATED = False
 
@@ -83,14 +86,17 @@ def is_blog_url(url: str) -> bool:
 
 def count_words(text: str) -> int:
     # FIX #30: strip HTML tags before counting (was counting tag attribute words too)
-    clean = re.sub(r'<[^>]+>', ' ', text)
+    # FIX #79: also strip JSON-LD script blocks (schema data inflates word count)
+    clean = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    clean = re.sub(r'<[^>]+>', ' ', clean)
     return len(re.findall(r'\w+', clean))
 
 
 def keyword_density(text: str, keyword: str) -> float:
     # FIX #31: strip HTML before computing density (was matching keywords inside tag attributes)
     clean = re.sub(r'<[^>]+>', ' ', text)
-    words = count_words(text)
+    # FIX #35: use 'clean' for word counting too (was calling count_words(text) which re-strips HTML)
+    words = len(re.findall(r'\w+', clean))
     if not words:
         return 0.0
     count = len(re.findall(re.escape(keyword.lower()), clean.lower()))
@@ -108,7 +114,9 @@ def extract_lsi(text: str, keyword: str, top_n: int = 20) -> list[str]:
         "have", "from", "on", "your", "can", "we", "our", "you", "they", "their",
     }
     kw_words = set(keyword.lower().split())
-    words = re.findall(r'\b[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]{3,}\b', text.lower())
+    # FIX #36: strip HTML tags before extracting LSI words (was counting tag attribute words)
+    clean = re.sub(r'<[^>]+>', ' ', text)
+    words = re.findall(r'\b[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]{3,}\b', clean.lower())
     freq: dict[str, int] = {}
     for w in words:
         if w not in STOPWORDS and w not in kw_words and len(w) >= 4:
@@ -167,7 +175,14 @@ def markdown_to_html(text: str) -> str:
     text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
     text = re.sub(r"(?m)^[-*] (.+)$", r"<li>\1</li>", text)
     text = re.sub(r"(<li>.*?</li>)+", lambda m: f"<ul>{m.group(0)}</ul>", text, flags=re.DOTALL)
+    # FIX #37: wrap ordered list items in <ol> instead of leaving them unwrapped (was only <li> without parent)
     text = re.sub(r"(?m)^\d+\. (.+)$", r"<li>\1</li>", text)
+    # Wrap consecutive <li> that came from ordered lists in <ol> (those not already inside <ul>)
+    def _wrap_orphan_li(m: re.Match) -> str:
+        if m.start() > 0 and text[max(0, m.start()-5):m.start()].endswith("</ul>"):
+            return m.group(0)
+        return f"<ol>{m.group(0)}</ol>" if "<ul>" not in m.group(0) else m.group(0)
+    text = re.sub(r"(?:<li>.*?</li>\n?)+", _wrap_orphan_li, text, flags=re.DOTALL)
     lines = text.split("\n")
     result = []
     for line in lines:
@@ -176,6 +191,14 @@ def markdown_to_html(text: str) -> str:
             continue
         result.append(line if line.startswith("<") else f"<p>{line}</p>")
     return "\n".join(result)
+
+
+def slugify_heading(text: str) -> str:
+    """FIX #38: generate URL-safe anchor slugs from headings (handles Polish chars)."""
+    nfkd = unicodedata.normalize("NFKD", text.lower())
+    ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_str).strip("-")
+    return slug[:60]
 
 
 def strip_markdown_remnants(html: str) -> str:

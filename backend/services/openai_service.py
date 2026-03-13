@@ -38,6 +38,7 @@ from services.article_helpers import (
     content_fingerprint as _content_fingerprint,
     markdown_to_html as _markdown_to_html,
     strip_markdown_remnants as _strip_markdown_remnants,
+    slugify_heading as _slugify_heading,
 )
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -171,12 +172,17 @@ async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            # FIX #73: guard against empty choices (rare OpenAI edge case with content filters)
+            if not response.choices:
+                logger.warning("[GPT] Empty choices returned — possible content filter")
+                return ""
             return response.choices[0].message.content.strip()
         except Exception as e:
             if attempt == 2:
                 raise
-            wait = 2 ** attempt
-            logger.warning(f"[GPT] attempt {attempt+1} failed: {e} — retrying in {wait}s")
+            # FIX #74: add jitter to GPT retry delay
+            wait = 2 ** attempt + random.uniform(0, 1.5)
+            logger.warning(f"[GPT] attempt {attempt+1} failed: {e} — retrying in {wait:.1f}s")
             await asyncio.sleep(wait)
     return ""  # unreachable
 
@@ -213,6 +219,13 @@ def _fix_heading_hierarchy(html: str) -> str:
             replacements.append((m.start(), m.end(), m.group(0),
                                  f"<{new_tag}{attrs}>{content}</{new_tag}>"))
             last_level = 2
+            continue
+        # FIX #50: also demote H5/H6 to H4 max (H5/H6 are invisible in most WP themes)
+        if level >= 5:
+            new_tag = "h4"
+            replacements.append((m.start(), m.end(), m.group(0),
+                                 f"<{new_tag}{attrs}>{content}</{new_tag}>"))
+            last_level = 4
             continue
         # Fix: heading level skips more than 1 level down from last
         if level > last_level + 1:
@@ -603,7 +616,8 @@ async def generate_article(
         title_user = (
             f"Wymyśl unikalny tytuł SEO dla frazy: '{topic}'\n"
             f"Sekcje artykułu: {', '.join(sections[:3])}\n"
-            f"ZASADY: 50-60 znaków, zawiera '{topic}', przyciąga uwagę.\n"
+            # FIX #46: prompt says 50-65 to match the 65-char enforcement below
+            f"ZASADY: 50-65 znaków, zawiera '{topic}', przyciąga uwagę.\n"
             f"Użyj jednego z formatów:\n"
             f"- '[Keyword] — kompletny przewodnik {_current_year}'\n"
             f"- 'Jak [działanie związane z keyword]? [X] kroków'\n"
@@ -616,7 +630,8 @@ async def generate_article(
         title_user = (
             f"Create unique SEO title for: '{topic}'\n"
             f"Article sections: {', '.join(sections[:3])}\n"
-            f"RULES: 50-60 characters, contains '{topic}', attention-grabbing.\n"
+            # FIX #47: prompt says 50-65 to match the 65-char enforcement below
+            f"RULES: 50-65 characters, contains '{topic}', attention-grabbing.\n"
             f"Use one of these formats:\n"
             f"- '[Keyword] — Complete Guide {_current_year}'\n"
             f"- 'How to [action related to keyword]? [X] Steps'\n"
@@ -968,7 +983,7 @@ async def generate_article(
     # Fix heading hierarchy (H3 before H2, skipped levels, etc.)
     content = _fix_heading_hierarchy(content)
 
-    # Deduplicate anchor links
+    # FIX #51: deduplicate anchor links and also remove empty/broken links
     seen_hrefs: set = set()
 
     def _dedup_link(m: re.Match) -> str:
@@ -976,6 +991,9 @@ async def generate_article(
         if not href:
             return m.group(0)
         url = href.group(1).rstrip("/")
+        # FIX #52: remove links with empty/invalid href
+        if not url or url in ("#", "javascript:void(0)", ""):
+            return re.sub(r"<[^>]+>", "", m.group(0))
         if url in seen_hrefs:
             return re.sub(r"<[^>]+>", "", m.group(0))
         seen_hrefs.add(url)
@@ -1010,13 +1028,16 @@ async def generate_article(
     # Article JSON-LD — confirmed ranking signal (Google API leak: siteAuthority + entity signals)
     _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
     # Author entity pool — consistent per domain for E-E-A-T entity building
+    # FIX #75: expanded author pool — more variation for E-E-A-T entity diversity across articles
     _author_pool_pl = [
         {"name": "Redakcja", "description": "Zespół ekspertów i specjalistów"},
         {"name": "Ekspert Tematyczny", "description": "Specjalista z wieloletnim doświadczeniem"},
+        {"name": "Zespół Redakcyjny", "description": "Redaktorzy i autorzy portalu"},
     ]
     _author_pool_en = [
         {"name": "Editorial Team", "description": "Team of experts and specialists"},
         {"name": "Subject Matter Expert", "description": "Specialist with years of experience"},
+        {"name": "Staff Writers", "description": "Professional writers and editors"},
     ]
     _author = random.choice(_author_pool_pl if lang_pl else _author_pool_en)
 
@@ -1034,7 +1055,8 @@ async def generate_article(
         },
         "publisher": {
             "@type": "Organization",
-            "name": client_domain.replace("https://", "").replace("http://", "").split("/")[0] if client_domain else "Publisher",
+            # FIX #76: strip www. from publisher name (cleaner in SERP rich results)
+            "name": client_domain.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if client_domain else "Publisher",
         },
         "mainEntityOfPage": {
             "@type": "WebPage",
@@ -1064,9 +1086,11 @@ async def generate_article(
     _elapsed = round(time.time() - _t0, 1)
     logger.info(f"[Article] Done — '{title}' | {len(sections)} sekcji | {word_count} słów | fp={fingerprint[:8]} | {_elapsed}s")
 
-    # A8: Minimum article length validation
+    # FIX #53: minimum article length validation — warn if below 600 or significantly below target
     if word_count < 600:
         logger.warning(f"[Article] Short article ({word_count} words) for '{topic}' — may indicate GPT truncation")
+    elif word_count < target_words * 0.6:
+        logger.warning(f"[Article] Article under 60%% target ({word_count}/{target_words} words) for '{topic}'")
 
     # FIX #11: compute keyword density of final article for quality monitoring
     final_density = _keyword_density(content, topic)

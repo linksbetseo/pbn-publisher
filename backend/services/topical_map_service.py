@@ -99,7 +99,9 @@ STOP_WORDS = {
 # ── Text helpers ───────────────────────────────────────────────────────────────
 
 def _ascii_fold(text: str) -> str:
-    normalized = unicodedata.normalize("NFD", text)
+    # FIX #54: use NFKD normalization (decomposes ligatures like ﬁ→fi, ﬂ→fl, ½→1/2)
+    # NFD only decomposes canonical forms — NFKD also handles compatibility forms
+    normalized = unicodedata.normalize("NFKD", text)
     return "".join(c for c in normalized if unicodedata.category(c) != "Mn").lower()
 
 
@@ -276,7 +278,9 @@ def _cluster(
     clusters: dict[str, list] = {}
 
     def _jaccard(a: str, b: str) -> float:
-        sa, sb = set(a), set(b)
+        # FIX #55: Jaccard on tokens (split by space) instead of chars for multi-word anchors
+        sa = set(a.split()) if " " in a else set(a)
+        sb = set(b.split()) if " " in b else set(b)
         inter = len(sa & sb)
         union = len(sa | sb)
         return inter / union if union else 0.0
@@ -351,13 +355,24 @@ def _cluster(
                 best_a = largest_anchor  # zero overlap → safest fallback
             clusters[best_a].append(kw)
 
-    # Merge tiny clusters (< 3 keywords) into the largest cluster
+    # FIX #56: merge tiny clusters into BEST-MATCHING cluster by token overlap (was always merging into largest)
     MIN_CLUSTER_SIZE = 3
     if len(clusters) > 2:
         largest = max(clusters, key=lambda a: len(clusters[a]))
         tiny_anchors = [a for a in list(clusters) if a != largest and len(clusters[a]) < MIN_CLUSTER_SIZE]
+        remaining_anchors = [a for a in selected_anchors if a not in tiny_anchors]
         for ta in tiny_anchors:
-            clusters[largest].extend(clusters[ta])
+            # Find best-matching remaining cluster by token overlap
+            ta_toks = set(_tokenize(ta))
+            best_target = largest
+            best_overlap = 0
+            for ra in remaining_anchors:
+                ra_toks = set(_tokenize(ra))
+                overlap = len(ta_toks & ra_toks)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_target = ra
+            clusters[best_target].extend(clusters[ta])
             del clusters[ta]
             if ta in selected_anchors:
                 selected_anchors.remove(ta)
@@ -648,6 +663,7 @@ async def generate_topical_map(
         p["related_pillars"] = related[:3]
 
     # Force Graph
+    # FIX #57: cap force graph supporting nodes at 10 per pillar (was 8 — sometimes too few for large clusters)
     nodes = [{"id": "seed", "label": seed, "type": "seed", "size": 24, "color": "#1a2332"}]
     links = []
 
@@ -666,7 +682,7 @@ async def generate_topical_map(
         })
         links.append({"source": "seed", "target": pid, "strength": 1.0 + focus})
 
-        for j, sk in enumerate(p["supporting_keywords"][:8]):
+        for j, sk in enumerate(p["supporting_keywords"][:10]):
             sid = f"sup_{i}_{j}"
             nodes.append({
                 "id": sid,

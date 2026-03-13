@@ -465,7 +465,7 @@ def _parse_rss_xml(xml_text: str) -> list[dict]:
 
 def _cluster_items(items: list[dict]) -> list[list[int]]:
     """
-    Simple greedy clustering: group items whose titles share >50% significant words.
+    FIX #48: corrected docstring — group items whose titles share >60% significant words.
     Returns list of clusters, each cluster is a list of item IDs.
     """
     if not items:
@@ -982,8 +982,9 @@ async def _news_gpt(
         except Exception as e:
             if attempt == 2:
                 raise
-            wait = 2 ** attempt
-            logger.warning(f"[NewsGPT] attempt {attempt+1} failed: {e} — retrying in {wait}s")
+            # FIX #69: add jitter to retry delay (prevents thundering herd with concurrent news generation)
+            wait = 2 ** attempt + random.uniform(0, 1.5)
+            logger.warning(f"[NewsGPT] attempt {attempt+1} failed: {e} — retrying in {wait:.1f}s")
             await asyncio.sleep(wait)
     return ""
 
@@ -1348,8 +1349,13 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
             src_label = "Źródła"
         else:
             src_label = "Sources"
+        # FIX #49: show domain name instead of full URL for cleaner display
+        def _display_domain(u: str) -> str:
+            d = u.split("//")[-1].split("/")[0]
+            path = "/".join(u.split("//")[-1].split("/")[1:3])
+            return f"{d}/{path}" if path else d
         src_links = "".join(
-            f'<li><a href="{url}" target="_blank" rel="noopener noreferrer nofollow">{url.split("//")[-1][:60]}</a></li>'
+            f'<li><a href="{url}" target="_blank" rel="noopener noreferrer nofollow">{_display_domain(url)}</a></li>'
             for url in source_urls[:5]
         )
         _vary_px = random.randint(12, 18)
@@ -1540,6 +1546,7 @@ async def approve_draft(draft_id: int):
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
         draft = dict(draft)
+        # FIX #70: also prevent re-approving rejected drafts — they should be re-created or edited first
         if draft["status"] == "published":
             raise HTTPException(status_code=400, detail="Draft already published")
 

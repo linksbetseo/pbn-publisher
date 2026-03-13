@@ -33,6 +33,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from services.article_helpers import slugify_heading as _slugify_heading
+
 logger = logging.getLogger(__name__)
 
 # ── Instytucjonalne źródła (zamiast fikcyjnych ekspertów — E-E-A-T) ───────────
@@ -100,7 +102,8 @@ def _build_toc(sections: list[str], lang_pl: bool) -> str:
     heading = "Spis treści" if lang_pl else "Table of Contents"
     items = ""
     for section in sections:
-        anchor = re.sub(r"[^a-z0-9]+", "-", section.lower().strip())[:50]
+        # FIX #39: use slugify_heading for proper Polish char handling (ąćę → ace)
+        anchor = _slugify_heading(section)
         items += f'<li><a href="#{anchor}" style="color:#1a73e8;text-decoration:none;">{section}</a></li>\n'
     return (
         f'<nav {_s("stats")}>\n'
@@ -112,7 +115,8 @@ def _build_toc(sections: list[str], lang_pl: bool) -> str:
 
 def _add_toc_anchors(content: str, sections: list[str]) -> str:
     for section in sections:
-        anchor = re.sub(r"[^a-z0-9]+", "-", section.lower().strip())[:50]
+        # FIX #40: use slugify_heading for consistent anchors matching TOC links
+        anchor = _slugify_heading(section)
         escaped = re.escape(section)
         content = re.sub(rf'<h2>({escaped})</h2>', rf'<h2 id="{anchor}">\1</h2>', content)
     # Also add ids to all h3 that don't have one yet
@@ -120,7 +124,8 @@ def _add_toc_anchors(content: str, sections: list[str]) -> str:
         if 'id=' in m.group(0):
             return m.group(0)
         text = re.sub(r'<[^>]+>', '', m.group(1))
-        anchor = re.sub(r"[^a-z0-9]+", "-", text.lower().strip())[:50]
+        # FIX #41: use slugify_heading for H3 anchors too
+        anchor = _slugify_heading(text)
         return f'<h3 id="{anchor}">{m.group(1)}</h3>'
     content = re.sub(r'<h3>(.*?)</h3>', _add_h3_id, content, flags=re.DOTALL)
     return content
@@ -677,9 +682,10 @@ async def enrich_article(
     serp_urls: list = None,
 ) -> str:
     """
-    Wstrzykuje 4 elementy do artykułu:
+    FIX #42: corrected docstring — wstrzykuje 5-7 elementów do artykułu:
     - 2 gwarantowane (update_box + toc) — nie wymagają GPT, zawsze działają
-    - 2 losowe z puli GPT-elementów
+    - 3-4 losowe z puli GPT-elementów (3 for short, 4 for 6+ sections)
+    - source_citations jeśli dostępne SERP URLs
     """
     # Guaranteed elements (no GPT needed)
     GUARANTEED = ["update_box", "toc"]
@@ -701,7 +707,8 @@ async def enrich_article(
     async def _gpt_with_retry(element: str) -> dict:
         result = await _gpt_enrichment(openai_client, topic, element, lang_pl)
         if not result:
-            await asyncio.sleep(1)
+            # FIX #77: add jitter to enrichment retry delay (prevents parallel retries from colliding)
+            await asyncio.sleep(1 + random.uniform(0, 1))
             result = await _gpt_enrichment(openai_client, topic, element, lang_pl)
         return result
 
