@@ -426,12 +426,17 @@ async def rate_limit_middleware(request: Request, call_next):
         return await call_next(request)
     client_ip = request.client.host if request.client else "unknown"
     now = _time.time()
-    # Periodic cleanup of stale IPs (every 5 minutes)
+    # Periodic cleanup of stale IPs (every 5 minutes) + hard cap at 10k IPs
     if now - _rate_limit_last_cleanup > 300:
         _rate_limit_last_cleanup = now
         stale_ips = [ip for ip, hits in _rate_limit_store.items() if not hits or hits[-1] < now - _RATE_LIMIT_WINDOW]
         for ip in stale_ips:
             _rate_limit_store.pop(ip, None)
+        # Hard cap: if still over 10k entries, evict oldest
+        if len(_rate_limit_store) > 10_000:
+            sorted_ips = sorted(_rate_limit_store.items(), key=lambda x: x[1][-1] if x[1] else 0)
+            for ip, _ in sorted_ips[:len(_rate_limit_store) - 10_000]:
+                _rate_limit_store.pop(ip, None)
     hits = _rate_limit_store.get(client_ip, [])
     # Remove old entries
     hits = [t for t in hits if t > now - _RATE_LIMIT_WINDOW]

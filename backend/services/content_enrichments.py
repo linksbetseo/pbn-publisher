@@ -207,15 +207,13 @@ def _build_checklist(items: list[str], title: str) -> str:
     )
 
 
-def _build_update_box(lang_pl: bool, topic: str = "") -> str:
-    # Deterministic per topic so same article always shows same update date
-    seed = hash(topic) % 10000 if topic else random.randint(0, 9999)
-    days_ago = abs(seed) % 31
-    update_date = (datetime.now() - timedelta(days=days_ago)).strftime("%d.%m.%Y")
+def _build_update_box(lang_pl: bool, topic: str = "", publish_date: str = "") -> str:
+    # Use real publish date (today) — never generate fake past dates (Google spam signal)
+    update_date = publish_date or datetime.now().strftime("%d.%m.%Y")
     if lang_pl:
-        text = f"🔄 Artykuł zaktualizowany: <strong>{update_date}</strong> — treść zweryfikowana i uzupełniona o najnowsze informacje."
+        text = f"🔄 Opublikowano: <strong>{update_date}</strong> — treść zweryfikowana i oparta o aktualne źródła."
     else:
-        text = f"🔄 Last updated: <strong>{update_date}</strong> — content verified and updated with the latest information."
+        text = f"🔄 Published: <strong>{update_date}</strong> — content verified and based on current sources."
     return f'<div {_s("update")}>{text}</div>\n'
 
 
@@ -224,7 +222,7 @@ def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
         return ""
     heading = "Źródła i dodatkowe informacje" if lang_pl else "Sources & Further Reading"
     items = "".join(
-        f'<li><a href="{url}" rel="noopener noreferrer" target="_blank">{url}</a></li>\n'
+        f'<li><a href="{url}" rel="nofollow noopener noreferrer" target="_blank">{url}</a></li>\n'
         for url in urls[:3]
     )
     return (

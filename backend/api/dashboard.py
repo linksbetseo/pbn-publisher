@@ -220,29 +220,35 @@ async def dashboard_stats():
         except Exception:
             pass
 
-        # B2: Avg word count of recent published articles
+        # B2: Avg word count — approximate from content LENGTH (avoids loading full HTML)
         avg_word_count = 0
         try:
             async with db.execute(
-                """SELECT content FROM posts WHERE status='published'
-                   ORDER BY created_at DESC LIMIT 20"""
+                """SELECT AVG(LENGTH(content) - LENGTH(REPLACE(content, ' ', ''))) as avg_spaces
+                   FROM (SELECT content FROM posts WHERE status='published'
+                         ORDER BY created_at DESC LIMIT 20)"""
             ) as cur:
-                import re as _re
-                wc_list = []
-                for row in await cur.fetchall():
-                    plain = _re.sub(r'<[^>]+>', ' ', row[0] or '')
-                    wc_list.append(len(plain.split()))
-                if wc_list:
-                    avg_word_count = round(sum(wc_list) / len(wc_list))
+                row = await cur.fetchone()
+                # word_count ≈ spaces + 1; HTML tags add ~30% overhead
+                avg_spaces = row[0] or 0
+                if avg_spaces > 0:
+                    avg_word_count = round(avg_spaces * 0.7)  # compensate for HTML tag spaces
         except Exception:
             pass
 
-    # Next daily cron: 08:00 UTC
+    # Next daily cron: randomized windows (6-10, 11-14, 19-22 UTC) — show approximate range
     now_utc = datetime.now(timezone.utc)
-    next_run = now_utc.replace(hour=8, minute=0, second=0, microsecond=0)
-    if next_run <= now_utc:
-        next_run = next_run + timedelta(days=1)
-    next_cron_utc = next_run.strftime("%Y-%m-%dT%H:%M:%S")
+    # Show next window start as approximate time
+    _cron_windows = [(6, 10), (11, 14), (19, 22)]
+    next_run = None
+    for w_start, w_end in _cron_windows:
+        candidate = now_utc.replace(hour=w_start, minute=0, second=0, microsecond=0)
+        if candidate > now_utc:
+            next_run = candidate
+            break
+    if not next_run:
+        next_run = (now_utc + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    next_cron_utc = next_run.strftime("%Y-%m-%dT%H:%M:%S") + " (approx)"
 
     result = {
         "total_domains": total_domains,

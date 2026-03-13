@@ -198,7 +198,7 @@ async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
                             logger.info(f"[IndexNow] Submitted {post_url} to {endpoint}")
                     except Exception:
                         pass
-            # Bing sitemap ping (still supported)
+            # Note: Google sitemap ping deprecated 2023 — only Bing remains
             sitemap_url = f"{base_url}/sitemap.xml"
             try:
                 await ping_client.get(f"https://www.bing.com/ping?sitemap={sitemap_url}")
@@ -239,7 +239,8 @@ async def publish_post(
         _plain = re.sub(r'<[^>]+>', ' ', content or "")
         _plain = re.sub(r'\s+', ' ', _plain).strip()
         if _plain:
-            excerpt = _plain[:155].rsplit(' ', 1)[0] + "..."
+            parts = _plain[:155].rsplit(' ', 1)
+            excerpt = (parts[0] if len(parts) > 1 else _plain[:155]) + "..."
 
     urls_to_try = _base_url(domain)
 

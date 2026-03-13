@@ -54,8 +54,8 @@ async def _poll_task(client: httpx.AsyncClient, endpoint: str, task_id: str) -> 
             logger.error(f"[Freepik] COMPLETED but generated empty: {body}")
             raise RuntimeError(f"Freepik task {task_id} completed but no image URL in generated[]")
 
-        if status == "FAILED":
-            raise RuntimeError(f"Freepik task {task_id} FAILED: {body}")
+        if status in ("FAILED", "CANCELLED", "ERROR"):
+            raise RuntimeError(f"Freepik task {task_id} {status}: {body}")
 
     raise RuntimeError(f"Freepik task {task_id} timed out after {_MAX_POLLS * _POLL_INTERVAL}s")
 

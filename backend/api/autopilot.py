@@ -78,7 +78,9 @@ class RunNowRequest(BaseModel):
 
 
 # In-flight map generation guard — prevents double-click race condition
-_map_generating: set = set()
+# Uses dict {schedule_id: timestamp} for auto-cleanup of stale entries (10min timeout)
+_map_generating: dict = {}
+_MAP_GEN_TIMEOUT = 600  # 10 minutes max
 
 # ── DB helpers ───────────────────────────────────────────────────────────────
 
@@ -312,15 +314,22 @@ async def generate_map_for_schedule(schedule_id: int, force_refresh: bool = Fals
     """
     await ensure_tables()
 
+    # Auto-cleanup stale entries (>10min = stuck/crashed)
+    import time as _time
+    now = _time.time()
+    stale = [k for k, ts in _map_generating.items() if now - ts > _MAP_GEN_TIMEOUT]
+    for k in stale:
+        _map_generating.pop(k, None)
+
     # Idempotency guard — prevent concurrent double-generation for same schedule
     if schedule_id in _map_generating:
         from fastapi import HTTPException
         raise HTTPException(409, "Generowanie mapy już w toku dla tego harmonogramu")
-    _map_generating.add(schedule_id)
+    _map_generating[schedule_id] = now
     try:
         return await _do_generate_map(schedule_id, force_refresh=force_refresh)
     finally:
-        _map_generating.discard(schedule_id)
+        _map_generating.pop(schedule_id, None)
 
 
 async def _do_generate_map(schedule_id: int, force_refresh: bool = False):

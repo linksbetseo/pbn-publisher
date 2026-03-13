@@ -3,11 +3,12 @@ import json as _json
 import logging
 import os
 import random
+import time
 import uuid as _uuid
 import aiosqlite
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional
 from config import DB_PATH
 from services.openai_service import generate_article, generate_image, describe_image_and_generate
@@ -16,8 +17,9 @@ from services.freepik_service import generate_image_freepik
 from services.freepik_generate_service import generate_image_zimage, generate_image_flux
 from services.wordpress_service import publish_post
 
-# In-memory job store for SSE progress
+# In-memory job store for SSE progress (max 200 entries — auto-evict oldest finished)
 _publish_jobs: dict = {}
+_PUBLISH_JOBS_MAX = 200
 
 logger = logging.getLogger(__name__)
 DFS_LOGIN = os.getenv("DATAFORSEO_LOGIN", "")
@@ -88,6 +90,13 @@ def _job_append(job_id: str, result: dict, status: str):
 def _job_finish(job_id: str):
     if job_id in _publish_jobs:
         _publish_jobs[job_id]["finished"] = True
+        _publish_jobs[job_id]["_finished_at"] = time.time()
+    # Evict old finished jobs if over limit
+    if len(_publish_jobs) > _PUBLISH_JOBS_MAX:
+        finished = [(k, v.get("_finished_at", 0)) for k, v in _publish_jobs.items() if v.get("finished")]
+        finished.sort(key=lambda x: x[1])
+        for k, _ in finished[:len(_publish_jobs) - _PUBLISH_JOBS_MAX]:
+            _publish_jobs.pop(k, None)
 
 
 class GenerateRequest(BaseModel):
@@ -105,6 +114,20 @@ class GenerateRequest(BaseModel):
     pillar_page_anchor: str = ""
     tone_of_voice: str = "ekspert"
     use_serp_scrape: bool = True
+
+    @field_validator("topic")
+    @classmethod
+    def topic_length(cls, v):
+        if len(v) > 200:
+            raise ValueError("Topic max 200 characters")
+        return v.strip()
+
+    @field_validator("custom_prompt")
+    @classmethod
+    def custom_prompt_length(cls, v):
+        if len(v) > 2000:
+            raise ValueError("Custom prompt max 2000 characters")
+        return v
 
 
 class RegenerateImageRequest(BaseModel):
@@ -655,7 +678,7 @@ async def ping_sitemap(body: dict):
     results = {}
     async with httpx.AsyncClient(timeout=10, verify=False) as client:
         for name, url in [
-            ("google", f"https://www.google.com/ping?sitemap={sitemap_url}"),
+            # Google sitemap ping deprecated 2023 — removed
             ("bing", f"https://www.bing.com/ping?sitemap={sitemap_url}"),
         ]:
             try:

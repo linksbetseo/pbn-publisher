@@ -156,12 +156,12 @@ async def generate_seo_article(
             logger.warning(f"SERP scrape failed: {e}")
 
     # Build anchors
-    main_anchor = f'<a href="{clean_url(client_domain)}">{anchor_text}</a>'
+    main_anchor = f'<a href="{clean_url(client_domain)}" rel="nofollow sponsored">{anchor_text}</a>'
     extra_anchors = []
     if anchor_text2 and anchor_url2:
-        extra_anchors.append(f'<a href="{clean_url(anchor_url2)}">{anchor_text2}</a>')
+        extra_anchors.append(f'<a href="{clean_url(anchor_url2)}" rel="nofollow sponsored">{anchor_text2}</a>')
     if anchor_text3 and anchor_url3:
-        extra_anchors.append(f'<a href="{clean_url(anchor_url3)}">{anchor_text3}</a>')
+        extra_anchors.append(f'<a href="{clean_url(anchor_url3)}" rel="nofollow sponsored">{anchor_text3}</a>')
 
     # Internal linking instructions
     internal_links_info = ""

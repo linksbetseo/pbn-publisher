@@ -475,11 +475,11 @@ async def generate_article(
             rotated_anchor = _rotate_anchor(anchor_text or topic, client_domain, language)
         else:
             rotated_anchor = anchor_text  # user provided explicit anchor — use as-is
-        anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
+        anchors_info = f'<a href="{clean_url(client_domain)}" rel="nofollow sponsored">{rotated_anchor}</a>'
     if anchor_text2 and anchor_url2:
-        anchors_info += f', <a href="{clean_url(anchor_url2)}">{anchor_text2}</a>'
+        anchors_info += f', <a href="{clean_url(anchor_url2)}" rel="nofollow sponsored">{anchor_text2}</a>'
     if anchor_text3 and anchor_url3:
-        anchors_info += f', <a href="{clean_url(anchor_url3)}">{anchor_text3}</a>'
+        anchors_info += f', <a href="{clean_url(anchor_url3)}" rel="nofollow sponsored">{anchor_text3}</a>'
     # PBN inter-link: supporting page → pillar page (internal, no rotation)
     if pillar_page_url and pillar_page_anchor:
         anchors_info += f', <a href="{clean_url(pillar_page_url)}">{pillar_page_anchor}</a>'
