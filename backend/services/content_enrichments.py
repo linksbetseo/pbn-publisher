@@ -683,15 +683,22 @@ async def enrich_article(
     openai_client,
     n_elements: int = None,
     serp_urls: list = None,
+    skip_toc: bool = False,
 ) -> str:
     """
     FIX #42: corrected docstring — wstrzykuje 5-7 elementów do artykułu:
     - 2 gwarantowane (update_box + toc) — nie wymagają GPT, zawsze działają
     - 3-4 losowe z puli GPT-elementów (3 for short, 4 for 6+ sections)
     - source_citations jeśli dostępne SERP URLs
+    - skip_toc=True when WP has a TOC plugin (avoids double table of contents)
     """
+    # Auto-detect existing TOC in content (WP plugin shortcodes / blocks)
+    _has_existing_toc = skip_toc or bool(re.search(
+        r'\[toc\]|\[ez-toc|wp-block-table-of-contents|lwptoc|class="toc[_-]|id="ez-toc|rank-math-toc',
+        content, re.IGNORECASE
+    ))
     # Guaranteed elements (no GPT needed)
-    GUARANTEED = ["update_box", "toc"]
+    GUARANTEED = ["update_box", "toc"] if not _has_existing_toc else ["update_box"]
     # GPT elements pool (exclude guaranteed and source_citations which needs serp_urls)
     GPT_POOL = [e for e in ALL_ELEMENTS if e not in {"update_box", "toc", "source_citations"}]
 

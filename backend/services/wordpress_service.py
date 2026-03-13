@@ -195,6 +195,58 @@ _indexnow_key_cache: dict[str, bool] = {}
 # SEO #93: per-domain SEO plugin detection cache (anti-fingerprint)
 _seo_plugin_cache: dict[str, str] = {}
 
+# TOC plugin detection cache — True if domain has a WP TOC plugin (avoid double TOC)
+_toc_plugin_cache: dict[str, bool] = {}
+
+
+async def detect_toc_plugin(
+    domain: str, wp_login: str, wp_pass: str,
+    http_user: str = "", http_pass: str = ""
+) -> bool:
+    """Check if a WP domain has an active Table of Contents plugin.
+
+    Checks for Easy TOC, LuckyWP TOC, Rank Math TOC, and TOC+ by querying
+    the WP plugins list or checking for known REST endpoints / shortcodes.
+    """
+    base_url = f"https://{domain}"
+    if base_url in _toc_plugin_cache:
+        return _toc_plugin_cache[base_url]
+    auth = _auth_header(wp_login, wp_pass)
+    site_auth = (http_user, http_pass) if http_user and http_pass else None
+    has_toc = False
+    try:
+        async with httpx.AsyncClient(timeout=6, verify=False, auth=site_auth) as client:
+            headers = {"Authorization": auth}
+            # Method 1: check installed plugins list
+            try:
+                r = await client.get(f"{base_url}/wp-json/wp/v2/plugins", headers=headers)
+                if r.status_code == 200:
+                    plugins = r.json()
+                    toc_slugs = ["ez-toc", "table-of-contents", "luckywp-table-of-contents",
+                                 "easy-table-of-contents", "toc-plus", "joli-table-of-contents",
+                                 "flavor-flavor-toc", "rich-table-of-contents"]
+                    for p in plugins:
+                        slug = p.get("textdomain", "") or p.get("plugin", "")
+                        if any(ts in slug.lower() for ts in toc_slugs):
+                            if p.get("status") == "active":
+                                has_toc = True
+                                break
+            except Exception:
+                pass
+            # Method 2: check if Rank Math TOC module is active (common)
+            if not has_toc:
+                try:
+                    r = await client.get(f"{base_url}/wp-json/rankmath/v1/", headers=headers)
+                    if r.status_code in (200, 301):
+                        # Rank Math has built-in TOC block — assume active if RM present
+                        has_toc = True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    _toc_plugin_cache[base_url] = has_toc
+    return has_toc
+
 
 async def _detect_seo_plugin(
     base_url: str, auth: str, http_user: str = "", http_pass: str = ""

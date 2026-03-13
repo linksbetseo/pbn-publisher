@@ -680,7 +680,7 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
   const handleFetch = async (portalId) => {
     setFetchingId(portalId)
     try {
-      await api.post(`/api/news-portals/${portalId}/fetch`)
+      await api.post(`/api/news-portals/${portalId}/fetch`, {}, { timeout: 120000 })
       onRefresh()
     } catch {}
     setFetchingId(null)
@@ -692,7 +692,7 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
     setGeneratingId(portalId)
     setAutoResult(null)
     try {
-      const res = await api.post(`/api/news-portals/${portalId}/auto-generate`)
+      const res = await api.post(`/api/news-portals/${portalId}/auto-generate`, {}, { timeout: 300000 })
       setAutoResult({ portalId, ...res.data })
       onRefresh()
     } catch (err) {
@@ -749,7 +749,17 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
     <>
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {portals.map(p => (
-          <div key={p.id} className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden">
+          <div key={p.id} className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden relative">
+            {/* Loading overlay */}
+            {(fetchingId === p.id || generatingId === p.id) && (
+              <div className="absolute inset-0 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm z-10 flex flex-col items-center justify-center gap-3">
+                <Spinner className="w-8 h-8 text-blue-600" />
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {fetchingId === p.id ? 'Pobieram newsy z RSS...' : 'Generuję artykuły AI...'}
+                </p>
+                <p className="text-xs text-gray-400 dark:text-gray-500">To może potrwać kilka minut</p>
+              </div>
+            )}
             {/* Card header */}
             <div className="p-5">
               <div className="flex items-start justify-between mb-3">
@@ -917,9 +927,12 @@ function ReviewQueueTab({ portals }) {
 
   useEffect(() => { loadDrafts() }, [loadDrafts])
 
+  const [approvingId, setApprovingId] = useState(null)
+
   const handleApprove = async (draftId) => {
+    setApprovingId(draftId)
     try {
-      const res = await api.post(`/api/news-portals/drafts/${draftId}/approve`)
+      const res = await api.post(`/api/news-portals/drafts/${draftId}/approve`, {}, { timeout: 120000 })
       const url = res.data?.wp_post_url
       if (url) {
         setPublishedUrls(prev => [{ url, title: res.data?.title || drafts.find(d => d.id === draftId)?.title || '', id: draftId }, ...prev])
@@ -927,6 +940,7 @@ function ReviewQueueTab({ portals }) {
       setPreviewDraft(null)
       await loadDrafts()
     } catch {}
+    setApprovingId(null)
   }
 
   const handleReject = async (draftId) => {
@@ -1004,7 +1018,13 @@ function ReviewQueueTab({ portals }) {
       ) : (
         <div className="space-y-3">
           {pendingDrafts.map(d => (
-            <div key={d.id} className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 p-5">
+            <div key={d.id} className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 p-5 relative">
+              {approvingId === d.id && (
+                <div className="absolute inset-0 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm z-10 rounded-2xl flex flex-col items-center justify-center gap-2">
+                  <Spinner className="w-6 h-6 text-green-500" />
+                  <p className="text-xs font-medium text-gray-600 dark:text-gray-300">Publikuję na WP + generuję zdjęcie...</p>
+                </div>
+              )}
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 mb-1">
@@ -1030,11 +1050,14 @@ function ReviewQueueTab({ portals }) {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                     </svg>
                   </button>
-                  <button onClick={() => handleApprove(d.id)} title="Zatwierdź"
-                    className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
+                  <button onClick={() => handleApprove(d.id)} disabled={approvingId === d.id}
+                    title={approvingId === d.id ? 'Publikuję + generuję zdjęcie...' : 'Zatwierdź i publikuj'}
+                    className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors disabled:opacity-50">
+                    {approvingId === d.id ? <Spinner className="w-4 h-4 text-green-500" /> : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
                   </button>
                   <button onClick={() => setEditDraft(d)} title="Edytuj"
                     className="p-2 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 dark:hover:bg-yellow-900/20 rounded-lg transition-colors">

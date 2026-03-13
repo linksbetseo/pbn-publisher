@@ -1417,7 +1417,9 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
     except Exception as _e:
         logger.warning(f"[NewsGen] Internal linking failed: {_e}")
 
-    # SEO #88: enrich news articles with TOC + 1-2 random elements
+    # SEO #88: enrich news articles with TOC + random elements
+    # NOTE: do NOT pass serp_urls here — step 6 already adds a "Źródła:" box.
+    # Passing serp_urls would add a duplicate "Źródła i dodatkowe informacje" section.
     try:
         from services.content_enrichments import enrich_article as _enrich_news
         _news_sections = [re.sub(r'<[^>]+>', '', h).strip() for h in re.findall(r'<h2[^>]*>(.*?)</h2>', content, re.DOTALL)][:6]
@@ -1427,7 +1429,7 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
             sections=_news_sections,
             lang_pl=lang_pl,
             openai_client=_openai_client,
-            serp_urls=source_urls[:3] if source_urls else None,
+            serp_urls=None,
         )
     except Exception as _e:
         logger.warning(f"[NewsGen] Enrichment failed: {_e}")
@@ -1638,6 +1640,21 @@ async def approve_draft(draft_id: int):
     # Generate tags from title words
     _news_tags = [w for w in re.findall(r'\w{4,}', draft["title"].lower())][:8]
 
+    # Generate featured image (AI fallback chain: Flux → Gemini → none)
+    _image_b64 = None
+    try:
+        from services.freepik_generate_service import generate_image_flux
+        _image_b64 = await generate_image_flux(draft["title"])
+        logger.info(f"[NewsApprove] Flux image OK for '{draft['title'][:40]}'")
+    except Exception as _img_err:
+        logger.warning(f"[NewsApprove] Flux failed: {_img_err}")
+        try:
+            from services.gemini_image_service import generate_image_gemini
+            _image_b64 = await generate_image_gemini(draft["title"])
+            logger.info(f"[NewsApprove] Gemini image fallback OK")
+        except Exception as _img_err2:
+            logger.warning(f"[NewsApprove] All image sources failed: {_img_err2}")
+
     # Publish to WordPress
     result = await publish_post(
         domain=domain["domain"],
@@ -1645,6 +1662,7 @@ async def approve_draft(draft_id: int):
         wp_pass=domain["wp_pass"],  # publish_post handles decryption internally
         title=draft["title"],
         content=draft["content"],
+        image_b64=_image_b64,
         excerpt=draft.get("excerpt", ""),
         keyword=_news_keyword,
         tags=_news_tags if _news_tags else None,
