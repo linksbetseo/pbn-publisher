@@ -1439,7 +1439,28 @@ async def bulk_create_auto(body: BulkCreateAutoRequest):
     skipped_count = 0
     error_count = 0
 
-    for domain_id in body.domain_ids:
+    async def _dfs_call_safe(coro_fn, *args, retries=2, **kwargs):
+        """Call DataForSEO with retry on rate limit (429 / Too many requests)."""
+        for attempt in range(retries + 1):
+            try:
+                return await coro_fn(*args, **kwargs)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "too many" in err_str or "429" in err_str:
+                    wait = 3 * (attempt + 1)
+                    logger.info(f"[auto-seed] DFS rate limit, waiting {wait}s (attempt {attempt+1})")
+                    await asyncio.sleep(wait)
+                    if attempt == retries:
+                        raise
+                else:
+                    raise
+        return None
+
+    for idx, domain_id in enumerate(body.domain_ids):
+        # Rate limit: wait between domains (skip first)
+        if idx > 0:
+            await asyncio.sleep(3)
+
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT id, domain FROM my_domains WHERE id = ?", (domain_id,)) as cur:
@@ -1453,10 +1474,12 @@ async def bulk_create_auto(body: BulkCreateAutoRequest):
 
         # 1) DataForSEO: what does this PBN domain rank for?
         try:
-            site_keywords = await dfs.keywords_for_site(
+            site_keywords = await _dfs_call_safe(
+                dfs.keywords_for_site,
                 domain_name, location_code=location_code,
                 language_code=body.language, limit=200,
             )
+            site_keywords = site_keywords or []
         except Exception as e:
             logger.warning(f"[auto-seed] DFS keywords_for_site failed for {domain_name}: {e}")
             site_keywords = []
@@ -1488,12 +1511,14 @@ Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason"}
             # New domain — scrape page content to determine niche
             page_content = ""
             try:
-                page_content = await dfs.page_content(f"https://{domain_name}")
+                page_content = await _dfs_call_safe(dfs.page_content, f"https://{domain_name}")
+                page_content = page_content or ""
             except Exception as e:
                 logger.warning(f"[auto-seed] page_content failed for {domain_name}: {e}")
             if not page_content:
                 try:
-                    page_content = await dfs.page_content(f"http://{domain_name}")
+                    page_content = await _dfs_call_safe(dfs.page_content, f"http://{domain_name}")
+                    page_content = page_content or ""
                 except Exception:
                     pass
 
@@ -1571,9 +1596,6 @@ Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason"}
             await db.commit()
             results.append({"domain_id": domain_id, "domain": domain_name, "seed_keyword": chosen_seed, "reason": reason, "schedule_id": cursor.lastrowid})
             created_count += 1
-
-        # Small delay to avoid DataForSEO rate limits
-        await asyncio.sleep(1)
 
     return {
         "created": created_count,
