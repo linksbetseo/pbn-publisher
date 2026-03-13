@@ -573,7 +573,6 @@ export default function Autopilot() {
   const [siteMetrics, setSiteMetrics] = useState({})
   const [previewModal, setPreviewModal] = useState(null) // { keyword, title, content, excerpt } | null
   const [previewLoading, setPreviewLoading] = useState({})
-  const [showLinkFields, setShowLinkFields] = useState(false)
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -581,8 +580,6 @@ export default function Autopilot() {
     language: 'pl',
     min_volume: 10,
     min_coherence: 0,
-    client_domain: '',
-    anchor_text: '',
     image_source: 'freepik_flux',
     custom_prompt: '',
   })
@@ -621,7 +618,7 @@ export default function Autopilot() {
         min_coherence: Number(newForm.min_coherence),
       })
       setShowAdd(false)
-      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, min_coherence: 0, client_domain: '', anchor_text: '', image_source: 'freepik_flux', custom_prompt: '' })
+      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, min_coherence: 0, image_source: 'freepik_flux', custom_prompt: '' })
       await load()
     } catch (e) {
       setAddError(e.response?.data?.detail || e.message)
@@ -992,25 +989,6 @@ export default function Autopilot() {
                 <option value="0.5">0.5 — surowy (~-50% fraz)</option>
               </select>
             </div>
-            <div className="sm:col-span-2 lg:col-span-3">
-              <button type="button" onClick={() => setShowLinkFields(!showLinkFields)}
-                className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 mb-2">
-                <span className={`transform transition-transform ${showLinkFields ? 'rotate-90' : ''}`}>&#9656;</span>
-                Link building (opcjonalne)
-              </button>
-              {showLinkFields && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-3 border-l-2 border-gray-100">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Link sponsorowany (opcjonalne)</label>
-                    <input value={newForm.client_domain} onChange={e => set('client_domain', e.target.value)} placeholder="https://example.com — link w każdym artykule" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Anchor text</label>
-                    <input value={newForm.anchor_text} onChange={e => set('anchor_text', e.target.value)} placeholder="usługi prawne (opcjonalne)" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  </div>
-                </div>
-              )}
-            </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Źródło zdjęć</label>
               <select value={newForm.image_source} onChange={e => set('image_source', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -1078,7 +1056,6 @@ export default function Autopilot() {
                     <span>Frazy: <strong>{sched.published_count || 0}</strong>/{sched.total_keywords || 0} opublikowanych</span>
                     <span>Ostatni run: {fmt(sched.last_run_at)}</span>
                     <span>Język: {sched.language}</span>
-                    {sched.client_domain && <span>→ {sched.client_domain}</span>}
                   </div>
                   {siteMetrics[sched.id] && (
                     <div className="flex gap-3 mt-1 flex-wrap text-xs">

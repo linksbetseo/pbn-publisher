@@ -672,7 +672,7 @@ function EditDraftModal({ draft, onClose, onSaved }) {
 
 // ── Tab: Portale ─────────────────────────────────────────────────────────────
 
-function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSources }) {
+function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSources, onViewPublished }) {
   const [fetchingId, setFetchingId] = useState(null)
   const [generatingId, setGeneratingId] = useState(null)
   const [confirmDelete, setConfirmDelete] = useState(null)
@@ -779,7 +779,9 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
                   <p className="text-lg font-bold text-yellow-600 dark:text-yellow-400">{p.pending_count ?? 0}</p>
                   <p className="text-[10px] text-gray-400 dark:text-gray-500 uppercase">Oczekujące</p>
                 </div>
-                <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-2 text-center">
+                <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-2 text-center cursor-pointer hover:bg-green-100 dark:hover:bg-green-900/40 transition-colors"
+                  onClick={() => (p.published_count ?? 0) > 0 && onViewPublished && onViewPublished(p.id)}
+                  title={`${p.published_count ?? 0} opublikowanych — kliknij by zobaczyć linki`}>
                   <p className="text-lg font-bold text-green-600 dark:text-green-400">{p.published_count ?? 0}</p>
                   <p className="text-[10px] text-gray-400 dark:text-gray-500 uppercase">Opublikowane</p>
                 </div>
@@ -1076,10 +1078,10 @@ function ReviewQueueTab({ portals }) {
 
 // ── Tab: Opublikowane ────────────────────────────────────────────────────────
 
-function PublishedTab({ portals }) {
+function PublishedTab({ portals, initialFilter = '' }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
-  const [portalFilter, setPortalFilter] = useState('')
+  const [portalFilter, setPortalFilter] = useState(initialFilter)
   const [selected, setSelected] = useState(new Set())
   const [indexing, setIndexing] = useState(false)
   const [indexResult, setIndexResult] = useState(null)
@@ -1104,6 +1106,7 @@ function PublishedTab({ portals }) {
   }, [page, portalFilter])
 
   useEffect(() => { loadPublished() }, [loadPublished])
+  useEffect(() => { if (initialFilter) { setPortalFilter(initialFilter); setPage(1) } }, [initialFilter])
 
   const toggleSelect = (id) => {
     setSelected(prev => {
@@ -1330,6 +1333,7 @@ export default function NewsPortals() {
   const [portals, setPortals] = useState([])
   const [domains, setDomains] = useState([])
   const [loading, setLoading] = useState(true)
+  const [publishedPortalFilter, setPublishedPortalFilter] = useState('')
 
   // Modal states
   const [showPortalForm, setShowPortalForm] = useState(false)
@@ -1436,13 +1440,14 @@ export default function NewsPortals() {
           onRefresh={loadPortals}
           onOpenForm={handleOpenForm}
           onOpenSources={handleOpenSources}
+          onViewPublished={(portalId) => { setPublishedPortalFilter(String(portalId)); setActiveTab(2) }}
         />
       )}
       {activeTab === 1 && (
         <ReviewQueueTab portals={portals} />
       )}
       {activeTab === 2 && (
-        <PublishedTab portals={portals} />
+        <PublishedTab portals={portals} initialFilter={publishedPortalFilter} />
       )}
       {activeTab === 3 && (
         <StatsTab />
