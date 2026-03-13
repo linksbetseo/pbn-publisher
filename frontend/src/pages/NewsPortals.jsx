@@ -520,6 +520,296 @@ function SourcesModal({ portal, onClose, onUpdated }) {
   )
 }
 
+// ── Modal: Bulk Create Portals ───────────────────────────────────────────────
+
+function BulkCreateModal({ domains, portals, onSave, onClose }) {
+  const [selectedDomains, setSelectedDomains] = useState(new Set())
+  const [niche, setNiche] = useState('')
+  const [language, setLanguage] = useState('pl')
+  const [postsPerDay, setPostsPerDay] = useState(3)
+  const [checkInterval, setCheckInterval] = useState(60)
+  const [autoPublish, setAutoPublish] = useState(true)
+  const [editorialPrompt, setEditorialPrompt] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [result, setResult] = useState(null)
+  const [search, setSearch] = useState('')
+  const [selectedFeeds, setSelectedFeeds] = useState([])
+  const [showCatalog, setShowCatalog] = useState(false)
+  const [catalog, setCatalog] = useState([])
+  const [catalogLoading, setCatalogLoading] = useState(false)
+
+  // Domains that already have a portal
+  const usedDomainIds = new Set((portals || []).map(p => p.my_domain_id))
+
+  // Filter domains
+  const filteredDomains = domains.filter(d => {
+    if (search && !d.domain.toLowerCase().includes(search.toLowerCase())) return false
+    return true
+  })
+
+  const availableDomains = filteredDomains.filter(d => !usedDomainIds.has(d.id))
+  const usedDomains = filteredDomains.filter(d => usedDomainIds.has(d.id))
+
+  const toggleDomain = (id) => {
+    setSelectedDomains(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const selectAll = () => {
+    setSelectedDomains(new Set(availableDomains.map(d => d.id)))
+  }
+
+  const selectNone = () => setSelectedDomains(new Set())
+
+  const loadCatalog = async () => {
+    setCatalogLoading(true)
+    try {
+      const res = await api.get('/api/news-portals/rss-catalog')
+      setCatalog(res.data || [])
+    } catch {
+      setCatalog([])
+    }
+    setCatalogLoading(false)
+  }
+
+  const toggleFeed = (feed) => {
+    setSelectedFeeds(prev => {
+      const exists = prev.find(f => f.url === feed.url)
+      if (exists) return prev.filter(f => f.url !== feed.url)
+      return [...prev, feed]
+    })
+  }
+
+  const handleSubmit = async () => {
+    if (selectedDomains.size === 0) { setError('Zaznacz co najmniej jedną domenę'); return }
+    setSaving(true)
+    setError('')
+    setResult(null)
+    try {
+      const res = await api.post('/api/news-portals/bulk-create', {
+        domain_ids: [...selectedDomains],
+        niche: niche.trim(),
+        editorial_prompt: editorialPrompt.trim(),
+        language,
+        auto_publish: autoPublish ? 1 : 0,
+        posts_per_day: Number(postsPerDay) || 3,
+        check_interval_min: Number(checkInterval) || 60,
+        rss_feeds: selectedFeeds,
+      })
+      setResult(res.data)
+      if (res.data.created > 0) onSave()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Błąd tworzenia portali')
+    }
+    setSaving(false)
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+        <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Bulk — dodaj portale hurtowo</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Zaznacz domeny i ustaw wspólne parametry autopilota</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {/* Domain selection */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-gray-600 dark:text-gray-400">
+                Domeny ({selectedDomains.size} zaznaczonych / {availableDomains.length} dostępnych)
+              </label>
+              <div className="flex gap-2">
+                <button type="button" onClick={selectAll}
+                  className="text-[11px] text-blue-600 hover:text-blue-800 dark:text-blue-400">Zaznacz wszystkie</button>
+                <button type="button" onClick={selectNone}
+                  className="text-[11px] text-gray-500 hover:text-gray-700 dark:text-gray-400">Odznacz</button>
+              </div>
+            </div>
+            <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Szukaj domeny..."
+              className="w-full border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2" />
+            <div className="border border-gray-200 dark:border-gray-600 rounded-lg max-h-48 overflow-y-auto">
+              {availableDomains.length === 0 && usedDomains.length === 0 ? (
+                <p className="text-center text-gray-400 text-sm py-4">Brak domen</p>
+              ) : (
+                <>
+                  {availableDomains.map(d => (
+                    <label key={d.id}
+                      className="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer text-sm">
+                      <input type="checkbox" checked={selectedDomains.has(d.id)}
+                        onChange={() => toggleDomain(d.id)}
+                        className="rounded border-gray-300 dark:border-gray-600 text-blue-600" />
+                      <span className="text-gray-900 dark:text-white truncate">{d.domain}</span>
+                    </label>
+                  ))}
+                  {usedDomains.map(d => (
+                    <label key={d.id}
+                      className="flex items-center gap-2 px-3 py-1.5 text-sm opacity-40 cursor-not-allowed">
+                      <input type="checkbox" disabled checked className="rounded border-gray-300" />
+                      <span className="text-gray-500 truncate">{d.domain}</span>
+                      <span className="text-[10px] text-gray-400 ml-auto">ma portal</span>
+                    </label>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Settings row */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Nisza</label>
+              <input type="text" value={niche} onChange={e => setNiche(e.target.value)}
+                placeholder="np. polityka"
+                className="w-full border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Język</label>
+              <select value={language} onChange={e => setLanguage(e.target.value)}
+                className="w-full border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="pl">Polski</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Art. / dzień</label>
+              <input type="number" min="1" max="50" value={postsPerDay}
+                onChange={e => setPostsPerDay(e.target.value)}
+                className="w-full border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Interwał (min)</label>
+              <input type="number" min="5" max="1440" value={checkInterval}
+                onChange={e => setCheckInterval(e.target.value)}
+                className="w-full border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+          </div>
+
+          {/* Editorial prompt */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Linia redakcyjna (opcjonalnie)</label>
+            <textarea rows={2} value={editorialPrompt} onChange={e => setEditorialPrompt(e.target.value)}
+              placeholder="Opisz ton i styl artykułów..."
+              className="w-full border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+          </div>
+
+          {/* Auto publish toggle */}
+          <label className="flex items-center gap-3 cursor-pointer">
+            <button type="button" onClick={() => setAutoPublish(!autoPublish)}
+              className={`relative w-10 h-5 rounded-full transition-colors ${autoPublish ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-sm ${autoPublish ? 'translate-x-5' : ''}`} />
+            </button>
+            <div>
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Autopilot</span>
+              <span className="text-xs text-gray-400 ml-2">
+                {autoPublish ? 'Automatycznie pobiera, generuje i publikuje' : 'Tylko ręczne publikowanie'}
+              </span>
+            </div>
+          </label>
+
+          {/* RSS Sources */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-gray-600 dark:text-gray-400">
+                Źródła RSS ({selectedFeeds.length} wybranych)
+              </label>
+              <button type="button" onClick={() => { setShowCatalog(!showCatalog); if (!showCatalog && catalog.length === 0) loadCatalog() }}
+                className="text-[11px] text-purple-600 hover:text-purple-800 dark:text-purple-400 font-medium">
+                {showCatalog ? 'Schowaj katalog' : 'Katalog RSS'}
+              </button>
+            </div>
+
+            {/* Selected feeds chips */}
+            {selectedFeeds.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-2">
+                {selectedFeeds.map(f => (
+                  <span key={f.url}
+                    className="inline-flex items-center gap-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 text-[11px] px-2 py-0.5 rounded-full">
+                    {f.name}
+                    <button onClick={() => toggleFeed(f)} className="hover:text-red-500">&times;</button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Catalog browser */}
+            {showCatalog && (
+              <div className="border border-gray-200 dark:border-gray-600 rounded-lg max-h-48 overflow-y-auto p-2 space-y-2">
+                {catalogLoading ? (
+                  <div className="flex justify-center py-4"><Spinner className="w-5 h-5" /></div>
+                ) : catalog.map((cat, ci) => (
+                  <div key={ci}>
+                    <p className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase mb-1">{cat.category} — {cat.portal}</p>
+                    <div className="space-y-0.5">
+                      {cat.feeds.map(feed => {
+                        const isSel = selectedFeeds.some(f => f.url === feed.url)
+                        return (
+                          <label key={feed.url}
+                            className="flex items-center gap-2 px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded cursor-pointer text-xs">
+                            <input type="checkbox" checked={isSel} onChange={() => toggleFeed(feed)}
+                              className="rounded border-gray-300 dark:border-gray-600 text-purple-600" />
+                            <span className="text-gray-700 dark:text-gray-300">{feed.name}</span>
+                            <span className="text-[10px] text-gray-400 truncate ml-auto">{feed.url.replace(/^https?:\/\//, '').slice(0, 30)}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Result */}
+          {result && (
+            <div className={`p-3 rounded-lg text-sm ${result.created > 0 ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300' : 'bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300'}`}>
+              <p className="font-medium">Utworzono {result.created} portali{result.skipped > 0 && `, pominięto ${result.skipped}`}</p>
+              {result.skipped_details && (
+                <ul className="text-xs mt-1 space-y-0.5">
+                  {result.skipped_details.map((s, i) => (
+                    <li key={i}>{s.domain || `ID ${s.domain_id}`}: {s.reason}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+          {/* Actions */}
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={onClose}
+              className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
+              {result ? 'Zamknij' : 'Anuluj'}
+            </button>
+            {!result && (
+              <button onClick={handleSubmit} disabled={saving || selectedDomains.size === 0}
+                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2">
+                {saving && <Spinner className="w-4 h-4" />}
+                Utwórz {selectedDomains.size} portali
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Modal: Preview Draft ─────────────────────────────────────────────────────
 
 function PreviewDraftModal({ draft, onClose, onApprove, onReject, onEdit }) {
@@ -1461,6 +1751,7 @@ export default function NewsPortals() {
   const [showPortalForm, setShowPortalForm] = useState(false)
   const [editingPortal, setEditingPortal] = useState(null)
   const [sourcesPortal, setSourcesPortal] = useState(null)
+  const [showBulk, setShowBulk] = useState(false)
 
   const loadPortals = useCallback(async () => {
     setLoading(true)
@@ -1525,13 +1816,22 @@ export default function NewsPortals() {
             <p className="text-sm text-gray-500 dark:text-gray-400">Zarządzanie portalami newsowymi</p>
           </div>
         </div>
-        <button onClick={() => handleOpenForm(null)}
-          className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          Dodaj Portal
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowBulk(true)}
+            className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14v6m-3-3h6M6 10h2a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v2a2 2 0 002 2zm10 0h2a2 2 0 002-2V6a2 2 0 00-2-2h-2a2 2 0 00-2 2v2a2 2 0 002 2zM6 20h2a2 2 0 002-2v-2a2 2 0 00-2-2H6a2 2 0 00-2 2v2a2 2 0 002 2z" />
+            </svg>
+            Bulk dodaj
+          </button>
+          <button onClick={() => handleOpenForm(null)}
+            className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Dodaj Portal
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -1591,6 +1891,16 @@ export default function NewsPortals() {
           portal={sourcesPortal}
           onClose={() => setSourcesPortal(null)}
           onUpdated={loadPortals}
+        />
+      )}
+
+      {/* Bulk create modal */}
+      {showBulk && (
+        <BulkCreateModal
+          domains={domains}
+          portals={portals}
+          onSave={() => { loadPortals() }}
+          onClose={() => setShowBulk(false)}
         />
       )}
     </div>

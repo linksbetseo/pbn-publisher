@@ -343,6 +343,17 @@ class SourceUpdate(BaseModel):
     active: Optional[int] = None
 
 
+class BulkCreateRequest(BaseModel):
+    domain_ids: List[int]
+    niche: str = ""
+    editorial_prompt: str = ""
+    language: str = "pl"
+    auto_publish: int = 1
+    posts_per_day: int = 5
+    check_interval_min: int = 30
+    rss_feeds: List[dict] = []  # [{name, url}]
+
+
 class GenerateRequest(BaseModel):
     cluster_id: int
 
@@ -679,6 +690,74 @@ async def manual_autopilot_run():
     """Manually trigger one news autopilot cycle for all auto-publish portals."""
     result = await run_news_autopilot()
     return result
+
+
+@router.post("/bulk-create")
+async def bulk_create_portals(body: BulkCreateRequest):
+    """Create news portals for multiple domains at once with shared settings + RSS sources."""
+    await ensure_tables()
+    if not body.domain_ids:
+        raise HTTPException(status_code=400, detail="domain_ids is required")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Validate domains exist
+        placeholders = ",".join("?" for _ in body.domain_ids)
+        async with db.execute(
+            f"SELECT id, domain FROM my_domains WHERE id IN ({placeholders})", body.domain_ids
+        ) as cur:
+            valid_domains = {r["id"]: r["domain"] for r in await cur.fetchall()}
+
+        # Check which domains already have a portal
+        async with db.execute(
+            f"SELECT my_domain_id FROM news_portals WHERE my_domain_id IN ({placeholders})", body.domain_ids
+        ) as cur:
+            existing = {r["my_domain_id"] for r in await cur.fetchall()}
+
+    created = []
+    skipped = []
+    for did in body.domain_ids:
+        if did not in valid_domains:
+            skipped.append({"domain_id": did, "reason": "not found"})
+            continue
+        if did in existing:
+            skipped.append({"domain_id": did, "domain": valid_domains[did], "reason": "portal exists"})
+            continue
+
+        domain_name = valid_domains[did]
+        portal_name = body.niche.strip() or domain_name.split(".")[0].capitalize()
+        portal_name = f"News {portal_name}" if not portal_name.lower().startswith("news") else portal_name
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                """INSERT INTO news_portals
+                   (name, my_domain_id, niche, editorial_prompt, language, auto_publish, posts_per_day, check_interval_min, active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                (portal_name, did, body.niche, body.editorial_prompt,
+                 body.language, body.auto_publish, body.posts_per_day, body.check_interval_min),
+            )
+            portal_id = cursor.lastrowid
+
+            # Add RSS sources
+            for feed in body.rss_feeds:
+                fname = feed.get("name", "")
+                furl = feed.get("url", "")
+                if furl:
+                    await db.execute(
+                        "INSERT INTO news_sources (portal_id, name, url, source_type, active) VALUES (?, ?, ?, 'rss', 1)",
+                        (portal_id, fname or furl, furl),
+                    )
+            await db.commit()
+
+        created.append({"portal_id": portal_id, "domain_id": did, "domain": domain_name, "name": portal_name})
+
+    logger.info(f"[BulkCreate] Created {len(created)} portals, skipped {len(skipped)}")
+    return {
+        "created": len(created),
+        "skipped": len(skipped),
+        "portals": created,
+        "skipped_details": skipped if skipped else None,
+    }
 
 
 @router.get("/{portal_id}")
