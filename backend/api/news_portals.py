@@ -487,7 +487,8 @@ def _cluster_items(items: list[dict]) -> list[list[int]]:
         for j, (words_j, id_j) in enumerate(word_sets):
             if j <= i or id_j in assigned:
                 continue
-            if _word_overlap(words_i, words_j) > 0.5:
+            # FIX #20: raise clustering threshold from 0.5 to 0.6 — reduces false merges of loosely related news
+            if _word_overlap(words_i, words_j) > 0.6:
                 cluster.append(id_j)
                 assigned.add(id_j)
         clusters.append(cluster)
@@ -1130,13 +1131,17 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
         temperature=0.6, max_tokens=500, model=_resolved_model,
     )
 
-    # Parse JSON output (handle GPT wrapping it in ```json)
+    # FIX #15: more robust JSON extraction — handle nested braces, ```json wrapper, and GPT preamble
     outline_clean = re.sub(r"```(?:json)?\s*", "", outline_raw).strip().rstrip("`")
+    # Strip any text before the first {
+    first_brace = outline_clean.find('{')
+    if first_brace > 0:
+        outline_clean = outline_clean[first_brace:]
     try:
         outline = json.loads(outline_clean)
     except json.JSONDecodeError:
-        # Fallback: try to extract JSON from response
-        json_match = re.search(r'\{[^{}]*"title"[^{}]*\}', outline_clean, re.DOTALL)
+        # FIX #16: use greedy match for nested JSON (sections array has inner strings)
+        json_match = re.search(r'\{.*"title".*\}', outline_clean, re.DOTALL)
         if json_match:
             try:
                 outline = json.loads(json_match.group(0))
@@ -1147,6 +1152,10 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
 
     title = outline.get("title", cluster.get("label", source_titles[0] if source_titles else "News"))
     title = title.strip('"\'').strip()
+    # FIX #17: strip markdown artifacts and enforce max 70 chars for news titles
+    title = re.sub(r'^[#*\s]+', '', title).strip()
+    if len(title) > 70:
+        title = title[:70].rsplit(' ', 1)[0]
     lead = outline.get("lead", "")
     sections = outline.get("sections", [])
 
@@ -1327,7 +1336,11 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
         conclusion_html = _markdown_to_html(conclusion_html)
     conclusion_html = _strip_markdown_remnants(conclusion_html)
 
-    excerpt = excerpt_raw.strip('"\'').strip()[:300]
+    # FIX #18: enforce 155 char limit (was 300 — too long for meta description)
+    excerpt = excerpt_raw.strip('"\'').strip()
+    excerpt = re.sub(r'^(?:Meta\s*(?:description|opis)\s*:?\s*)', '', excerpt, flags=re.IGNORECASE).strip()
+    if len(excerpt) > 155:
+        excerpt = excerpt[:155].rsplit(' ', 1)[0].rstrip('.,;:') + '.'
 
     # ── STEP 6: Source attribution box (E-E-A-T) ──
     if source_urls:
@@ -1336,7 +1349,7 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
         else:
             src_label = "Sources"
         src_links = "".join(
-            f'<li><a href="{url}" target="_blank" rel="noopener noreferrer nofollow">{url.split("//")[-1].split("/")[0]}</a></li>'
+            f'<li><a href="{url}" target="_blank" rel="noopener noreferrer nofollow">{url.split("//")[-1][:60]}</a></li>'
             for url in source_urls[:5]
         )
         _vary_px = random.randint(12, 18)
@@ -1493,12 +1506,16 @@ async def auto_generate(portal_id: int, max_articles: int = Query(5, ge=1, le=20
             new_clusters = [dict(r) for r in await cur.fetchall()]
 
     # Step 3: generate a draft for each cluster
+    # FIX #19: add delay between articles to respect OpenAI rate limits and avoid Firefly velocity flags
     generated = []
     errors = []
-    for cluster in new_clusters:
+    for i, cluster in enumerate(new_clusters):
         try:
             draft = await generate_draft(portal_id, GenerateRequest(cluster_id=cluster["id"]))
             generated.append({"draft_id": draft.get("id"), "title": draft.get("title", "")})
+            # Stagger requests — 2s delay between articles (rate limit + natural publishing pattern)
+            if i < len(new_clusters) - 1:
+                await asyncio.sleep(2)
         except Exception as e:
             errors.append(f"Cluster {cluster['id']}: {str(e)[:100]}")
 

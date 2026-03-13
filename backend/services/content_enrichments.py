@@ -30,7 +30,7 @@ import random
 import re
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -212,8 +212,8 @@ def _build_checklist(items: list[str], title: str) -> str:
 
 
 def _build_update_box(lang_pl: bool, topic: str = "", publish_date: str = "") -> str:
-    # Use real publish date (today) — never generate fake past dates (Google spam signal)
-    update_date = publish_date or datetime.now().strftime("%d.%m.%Y")
+    # FIX #23: use UTC timezone-aware datetime (was naive datetime)
+    update_date = publish_date or datetime.now(timezone.utc).strftime("%d.%m.%Y")
     if lang_pl:
         text = f"🔄 Opublikowano: <strong>{update_date}</strong> — treść zweryfikowana i oparta o aktualne źródła."
     else:
@@ -425,7 +425,9 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"If unsure about exact numbers, use ranges and mark as 'estimated'."
             )
             resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=150)
-            return {"quote": resp.choices[0].message.content.strip().strip('"\''), "name": source, "role": ""}
+            # FIX #24: also strip em-dash, newlines, GPT preamble from quote
+            _raw_quote = resp.choices[0].message.content.strip().strip('"\'').strip('—–-').strip()
+            return {"quote": _raw_quote, "name": source, "role": ""}
 
         elif element == "key_takeaways":
             prompt = (
@@ -684,7 +686,9 @@ async def enrich_article(
     # GPT elements pool (exclude guaranteed and source_citations which needs serp_urls)
     GPT_POOL = [e for e in ALL_ELEMENTS if e not in {"update_box", "toc", "source_citations"}]
 
-    gpt_picks = random.sample(GPT_POOL, min(3, len(GPT_POOL)))
+    # FIX #22: pick 3-4 GPT elements (was always 3; longer articles deserve more enrichment)
+    _n_picks = 4 if len(sections) >= 6 else 3
+    gpt_picks = random.sample(GPT_POOL, min(_n_picks, len(GPT_POOL)))
     chosen = GUARANTEED + gpt_picks
     if serp_urls:
         chosen.append("source_citations")

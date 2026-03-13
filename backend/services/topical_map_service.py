@@ -19,6 +19,7 @@ Implementation:
 - Cluster merging: small, semantically similar clusters are merged (preserves SiteFocus)
 - Pillar selection: highest-volume keyword WITHIN coherence threshold (not just raw volume)
 """
+import asyncio
 import hashlib
 import json as _json
 import logging
@@ -108,9 +109,11 @@ def _clean(text: str) -> str:
 
 def _stem_pl(token: str) -> str:
     """Naive Polish suffix stripper — handles most common case inflections."""
-    for suffix in ("owego", "owej", "owym", "nych", "nego", "nemu",
+    # FIX #27: expanded suffix list for better Polish stemming (added common noun/verb endings)
+    for suffix in ("owania", "owego", "owej", "owym", "nych", "nego", "nemu",
+                   "eniu", "anie", "enie", "ości",
                    "ach", "ami", "iem", "ego", "emu", "owi",
-                   "ie", "ej", "ą", "ę"):
+                   "ie", "ej", "ów", "ą", "ę"):
         if token.endswith(suffix) and len(token) - len(suffix) >= 3:
             return token[:-len(suffix)]
     return token
@@ -420,9 +423,13 @@ def _compute_site_metrics(pillars: list[dict], seed: str, all_keywords: list[dic
     ]
     avg_completeness = round(sum(cluster_completeness) / len(cluster_completeness), 3) if cluster_completeness else 0
 
-    # Firefly-safe velocity recommendation (Google's Firefly system flags publishing spikes)
-    # Recommendation: 2-4 articles/week for new sites, max 6-8 for established
-    recommended_weekly = min(4, max(2, len(pillars)))
+    # FIX #28: Firefly-safe velocity — scale by total content needed, not just pillar count
+    # New sites: 2-3/week, established (>50 total articles): up to 5/week
+    _total_articles = len(pillars) + total_supporting
+    if _total_articles > 50:
+        recommended_weekly = min(5, max(3, len(pillars)))
+    else:
+        recommended_weekly = min(3, max(2, len(pillars)))
 
     return {
         "site_focus": round(site_focus, 3),      # 0–1, higher is better
@@ -483,10 +490,8 @@ async def generate_topical_map(
 
     client = DataForSEOClient(dfs_login, dfs_password)
 
-    # Fetch keywords in parallel (saves ~5-10s vs sequential)
-    import asyncio as _asyncio
     raw = []
-    results_parallel = await _asyncio.gather(
+    results_parallel = await asyncio.gather(
         client.keyword_suggestions(seed, location_code, language_code, 500),
         client.keyword_ideas(seed, location_code, language_code, 300),
         client.related_keywords(seed, location_code, language_code, 150),
@@ -557,8 +562,8 @@ async def generate_topical_map(
         intent_counts = Counter(k.get("intent", "informational") for k in all_cluster_kws)
         intent_dist = {intent: count for intent, count in intent_counts.most_common()}
 
-        # Proportional limit: at least 10, at most 30, scaled to cluster size
-        sup_limit = min(30, max(10, len(supporting)))
+        # FIX #26: proportional limit — at least 5, at most 25 (was 10-30, too many for small clusters)
+        sup_limit = min(25, max(5, len(supporting)))
         pillars.append({
             "anchor": cluster["anchor"],
             "label": cluster["label"],

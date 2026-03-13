@@ -207,6 +207,13 @@ def _fix_heading_hierarchy(html: str) -> str:
         attrs = m.group(2)
         content = m.group(3)
 
+        # FIX #13: promote H1 inside body to H2 (WP theme renders title as H1 — duplicate H1 is SEO error)
+        if level == 1:
+            new_tag = "h2"
+            replacements.append((m.start(), m.end(), m.group(0),
+                                 f"<{new_tag}{attrs}>{content}</{new_tag}>"))
+            last_level = 2
+            continue
         # Fix: heading level skips more than 1 level down from last
         if level > last_level + 1:
             new_level = last_level + 1
@@ -437,7 +444,8 @@ def _rotate_anchor(anchor_text: str, client_domain: str, language: str = "pl") -
             else:
                 return " ".join(words[1:])
         elif len(words) > 1:
-            return " ".join(words[:1])
+            # FIX #14: for 2-word anchors, prefer the second word (more specific) or full phrase
+            return words[-1] if random.random() < 0.5 else anchor_text
         return anchor_text
     elif bucket < 80:
         # Generic
@@ -494,11 +502,15 @@ async def generate_article(
             rotated_anchor = _rotate_anchor(anchor_text or topic, client_domain, language)
         else:
             rotated_anchor = anchor_text  # user provided explicit anchor — use as-is
-        anchors_info = f'<a href="{clean_url(client_domain)}" rel="nofollow sponsored">{rotated_anchor}</a>'
+        # FIX #1: use "noopener noreferrer" with sponsored — correct rel combination
+        anchors_info = f'<a href="{clean_url(client_domain)}" rel="sponsored noopener noreferrer">{rotated_anchor}</a>'
     if anchor_text2 and anchor_url2:
-        anchors_info += f', <a href="{clean_url(anchor_url2)}" rel="nofollow sponsored">{anchor_text2}</a>'
+        # FIX #2: rotate anchor for link 2 as well (was always exact match)
+        rotated2 = _rotate_anchor(anchor_text2, anchor_url2, language) if anchor_text2.strip().lower() == topic.strip().lower() else anchor_text2
+        anchors_info += f', <a href="{clean_url(anchor_url2)}" rel="sponsored noopener noreferrer">{rotated2}</a>'
     if anchor_text3 and anchor_url3:
-        anchors_info += f', <a href="{clean_url(anchor_url3)}" rel="nofollow sponsored">{anchor_text3}</a>'
+        rotated3 = _rotate_anchor(anchor_text3, anchor_url3, language) if anchor_text3.strip().lower() == topic.strip().lower() else anchor_text3
+        anchors_info += f', <a href="{clean_url(anchor_url3)}" rel="sponsored noopener noreferrer">{rotated3}</a>'
     # PBN inter-link: supporting page → pillar page (internal, no rotation)
     if pillar_page_url and pillar_page_anchor:
         anchors_info += f', <a href="{clean_url(pillar_page_url)}">{pillar_page_anchor}</a>'
@@ -523,8 +535,10 @@ async def generate_article(
     paa_questions = serp_data.get("paa_questions", [])
     serp_urls = serp_data.get("serp_urls", [])
 
-    target_words = max(800, avg_words)
-    target_density = round(max(0.5, min(3.0, avg_density)), 1)
+    # FIX #3: target 10-15% ABOVE competitor avg (beat not match), cap at 3000 to avoid fluff
+    target_words = max(800, min(3000, int(avg_words * 1.12)))
+    # FIX #4: tighter density range — 0.8-2.5% optimal per Google leak (not 0.5-3.0)
+    target_density = round(max(0.8, min(2.5, avg_density)), 1)
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
     serp_block = f"\n\n[SEO Scraped Info — top 3 konkurentów]\n{serp_text}" if serp_text else ""
 
@@ -556,7 +570,8 @@ async def generate_article(
     logger.info(f"[Article] Intent: {intent_analysis[:80]}")
 
     # ── STEP 3: Outline ───────────────────────────────────────────────────────
-    n_sections = max(4, min(8, round(target_words / 200)))
+    # FIX #5: section count based on 250-300 words per section (was 200 → too many thin sections)
+    n_sections = max(4, min(8, round(target_words / 280)))
     if lang_pl:
         outline_user = (
             f"Stwórz outline artykułu SEO dla frazy: '{topic}'\n"
@@ -615,6 +630,13 @@ async def generate_article(
         title_user, temperature=0.8, max_tokens=100, model=_resolved_model
     )
     title = title.strip('"\'').strip()
+    # FIX #7: strip markdown artifacts from title (GPT sometimes adds # or *)
+    title = re.sub(r'^[#*\s]+', '', title).strip()
+    # FIX #8: enforce max 65 chars for SERP display (truncated titles lose CTR)
+    if len(title) > 65:
+        # Try to cut at last word boundary before 65 chars
+        cut = title[:65].rsplit(' ', 1)[0]
+        title = cut if len(cut) > 30 else title[:65]
     logger.info(f"[Article] Title: {title}")
 
     # ── STEP 5: Intro (direct answer first) ──────────────────────────────────
@@ -666,7 +688,8 @@ async def generate_article(
     logger.info("[Article] Intro done")
 
     # ── STEP 6: Sections (parallel) ───────────────────────────────────────────
-    words_per_section = max(280, int(target_words * 1.2) // max(1, len(sections)))
+    # FIX #6: removed 1.2x multiplier — target_words already 12% above avg; don't double-inflate
+    words_per_section = max(280, target_words // max(1, len(sections)))
     kw_per_section = max(1, round(words_per_section * target_density / 100))
     # Pick 3-4 LSI terms per section (rotate through the list)
     lsi_per_section = lsi_terms[:15] if lsi_terms else []
@@ -885,6 +908,11 @@ async def generate_article(
 
     # Post-process excerpt
     excerpt = excerpt_raw.strip('"\'').strip()
+    # FIX #9: enforce 150-155 char limit for meta description (Google truncates at ~155)
+    if len(excerpt) > 155:
+        excerpt = excerpt[:155].rsplit(' ', 1)[0].rstrip('.,;:') + '.'
+    # FIX #10: ensure excerpt doesn't start with "Meta description:" or similar GPT artifacts
+    excerpt = re.sub(r'^(?:Meta\s*(?:description|opis)\s*:?\s*)', '', excerpt, flags=re.IGNORECASE).strip()
     logger.info("[Article] Conclusion + FAQ + Excerpt done (parallel)")
 
     # ── STEP 10: Assemble — apply layout variant ──────────────────────────────
@@ -1040,6 +1068,11 @@ async def generate_article(
     if word_count < 600:
         logger.warning(f"[Article] Short article ({word_count} words) for '{topic}' — may indicate GPT truncation")
 
+    # FIX #11: compute keyword density of final article for quality monitoring
+    final_density = _keyword_density(content, topic)
+    if final_density < 0.5 or final_density > 3.0:
+        logger.warning(f"[Article] KW density out of range: {final_density}% for '{topic}'")
+
     return {
         "title": title,
         "content": content,
@@ -1047,6 +1080,7 @@ async def generate_article(
         "fingerprint": fingerprint,
         "lsi_tags": lsi_terms[:5],  # top 5 LSI terms for WP tags
         "word_count": word_count,
+        "keyword_density": final_density,  # FIX #12: return density for dashboard monitoring
     }
 
 

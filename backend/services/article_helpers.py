@@ -63,13 +63,16 @@ async def serp_cache_set(key: str, data: dict) -> None:
         logger.warning(f"[SERP] Cache write failed: {e}")
 
 
+# FIX #29: expanded skip list — added gov.pl, edu.pl, major e-commerce, social media, forums
 BLOG_SKIP = re.compile(
-    r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|tiktok\.com"
+    r"(youtube\.com|facebook\.com|twitter\.com|x\.com|instagram\.com|tiktok\.com"
     r"|wikipedia\.org|reddit\.com|pinterest\.com|allegro\.pl|amazon\.|ebay\."
     r"|olx\.pl|ceneo\.pl|linkedin\.com|quora\.com|wykop\.pl|money\.pl"
     r"|bankier\.pl|wp\.pl|onet\.pl|interia\.pl|gazeta\.pl|tvn24\.pl"
     r"|polsatnews\.pl|rmf24\.pl|trojmiasto\.pl|gratka\.pl|otodom\.pl"
-    r"|otomoto\.pl|morele\.net|x-kom\.pl|mediaexpert\.pl)",
+    r"|otomoto\.pl|morele\.net|x-kom\.pl|mediaexpert\.pl"
+    r"|gov\.pl|sejm\.gov\.pl|\.edu\.pl|empik\.com|zalando\.pl"
+    r"|threads\.net|mastodon\.social|medium\.com|substack\.com)",
     re.IGNORECASE,
 )
 
@@ -79,14 +82,18 @@ def is_blog_url(url: str) -> bool:
 
 
 def count_words(text: str) -> int:
-    return len(re.findall(r'\w+', text))
+    # FIX #30: strip HTML tags before counting (was counting tag attribute words too)
+    clean = re.sub(r'<[^>]+>', ' ', text)
+    return len(re.findall(r'\w+', clean))
 
 
 def keyword_density(text: str, keyword: str) -> float:
+    # FIX #31: strip HTML before computing density (was matching keywords inside tag attributes)
+    clean = re.sub(r'<[^>]+>', ' ', text)
     words = count_words(text)
     if not words:
         return 0.0
-    count = len(re.findall(re.escape(keyword.lower()), text.lower()))
+    count = len(re.findall(re.escape(keyword.lower()), clean.lower()))
     return round((count * len(keyword.split())) / words * 100, 2)
 
 
@@ -122,12 +129,18 @@ def extract_lsi(text: str, keyword: str, top_n: int = 20) -> list[str]:
 
 
 def content_fingerprint(content: str) -> str:
-    words = re.findall(r'\w+', content.lower())
+    # FIX #32: strip HTML before fingerprinting (was including schema JSON-LD in fingerprint)
+    clean = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
+    clean = re.sub(r'<[^>]+>', ' ', clean)
+    words = re.findall(r'\w+', clean.lower())
     total = len(words)
     start = words[:100]
     mid_start = total // 3
     middle = words[mid_start:mid_start + 100]
-    combined = start + middle
+    # FIX #33: also include end segment for better dedup (articles can share intros but differ at end)
+    end_start = max(0, total - 100)
+    end = words[end_start:]
+    combined = start + middle + end
     return hashlib.md5(" ".join(combined).encode()).hexdigest()
 
 
@@ -168,6 +181,8 @@ def markdown_to_html(text: str) -> str:
 def strip_markdown_remnants(html: str) -> str:
     html = re.sub(r"```(?:html|HTML)?\s*", "", html)
     html = re.sub(r"```\s*$", "", html, flags=re.MULTILINE)
+    # FIX #34: remove markdown horizontal rules (GPT sometimes inserts ---)
+    html = re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "", html)
     html = re.sub(r"(?m)^\s*####\s+(.+)$", r"<h4>\1</h4>", html)
     html = re.sub(r"(?m)^\s*###\s+(.+)$", r"<h3>\1</h3>", html)
     html = re.sub(r"(?m)^\s*##\s+(.+)$", r"<h2>\1</h2>", html)
