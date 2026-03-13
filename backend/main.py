@@ -410,14 +410,14 @@ app.add_middleware(
 )
 
 
-# Simple rate limiter — per IP, max 60 requests per minute for API endpoints
+# Simple rate limiter — per IP, configurable per minute for API endpoints
 import time as _time
 _rate_limit_store: dict[str, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60  # seconds
-_RATE_LIMIT_MAX = 60  # requests per window
+_RATE_LIMIT_MAX = 300  # requests per window (UI makes many API calls per click)
 _rate_limit_last_cleanup = _time.time()
 # Stricter limits for expensive endpoints (article generation, publishing)
-_RATE_LIMIT_STRICT = {"/api/publish": 10, "/api/content-writer/generate": 10, "/api/autopilot/run": 5}
+_RATE_LIMIT_STRICT = {"/api/publish/post": 20, "/api/content-writer/generate": 20, "/api/autopilot/run": 30}
 
 
 @app.middleware("http")
