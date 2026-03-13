@@ -798,10 +798,29 @@ async def fetch_and_cluster(portal_id: int):
     new_items_total = 0
     fetch_errors = []
 
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True, verify=False) as http:
+    # Rotate User-Agent to avoid 403 blocks from portals like TVN24
+    _RSS_HEADERS_POOL = [
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        },
+        {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "pl-PL,pl;q=0.9",
+        },
+        {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "pl,en-US;q=0.7,en;q=0.3",
+        },
+    ]
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, verify=False) as http:
         for source in sources:
             try:
-                resp = await http.get(source["url"])
+                _headers = random.choice(_RSS_HEADERS_POOL)
+                resp = await http.get(source["url"], headers=_headers)
                 resp.raise_for_status()
                 feed_items = _parse_rss_xml(resp.text)
                 if not feed_items:
