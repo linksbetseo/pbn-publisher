@@ -1602,6 +1602,54 @@ async def auto_generate(portal_id: int, max_articles: int = Query(5, ge=1, le=20
     }
 
 
+async def _safe_image_prompt(title: str) -> str:
+    """Transform a news title into a safe, visual image prompt.
+
+    Strips sensitive terms (war, weapons, attacks, violence, politicians)
+    and rephrases into a neutral editorial/journalistic illustration prompt
+    that won't trigger content policy filters on Flux/Gemini/DALL-E.
+    """
+    # Quick GPT call to rephrase — cheaper than a failed image generation
+    try:
+        _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        _model = await get_gpt_model()
+        resp = await _client.chat.completions.create(
+            model=_model,
+            max_tokens=80,
+            temperature=0.3,
+            messages=[{
+                "role": "system",
+                "content": (
+                    "You convert news article titles into safe image generation prompts. "
+                    "Rules: 1) Describe a calm, editorial-style photo or illustration that represents the topic. "
+                    "2) NEVER mention weapons, explosions, blood, death, specific politicians by name, military attacks, or violence. "
+                    "3) Replace conflict topics with diplomatic/symbolic imagery (flags, handshakes, maps, city skylines, press conferences). "
+                    "4) Replace crime/disaster with neutral scenes (courtroom, emergency services, community). "
+                    "5) Keep it under 60 words. 6) Output ONLY the prompt, no quotes or explanation. "
+                    "7) Start with a visual style like 'Editorial photo:', 'News illustration:', or 'Journalistic photograph:'."
+                ),
+            }, {
+                "role": "user",
+                "content": title,
+            }],
+        )
+        prompt = resp.choices[0].message.content.strip()
+        if prompt and len(prompt) > 10:
+            logger.info(f"[NewsApprove] Safe prompt: '{title[:40]}' → '{prompt[:60]}'")
+            return prompt
+    except Exception as e:
+        logger.warning(f"[NewsApprove] Safe prompt GPT failed: {e}")
+    # Fallback: generic editorial prompt based on stripped title
+    _stripped = re.sub(
+        r'\b(wojna|atak|uderzenie|rakiet|bomb|zabił|śmierć|broń|strzelani|terror|iran|rosj|ukrain|putin|trump|hamas|gaza)\w*\b',
+        '', title, flags=re.IGNORECASE
+    ).strip()
+    _stripped = re.sub(r'\s{2,}', ' ', _stripped).strip(' -—:,.')
+    if len(_stripped) < 10:
+        _stripped = "current events news editorial"
+    return f"Editorial news photograph: {_stripped}, professional journalism, neutral tone, press agency style"
+
+
 @router.post("/drafts/{draft_id}/approve")
 async def approve_draft(draft_id: int):
     """Approve a draft and publish it to the portal's linked WordPress domain."""
@@ -1641,16 +1689,19 @@ async def approve_draft(draft_id: int):
     _news_tags = [w for w in re.findall(r'\w{4,}', draft["title"].lower())][:8]
 
     # Generate featured image (AI fallback chain: Flux → Gemini → none)
+    # Sanitize title into a safe, visual image prompt (avoid content policy blocks
+    # on war/violence/politics topics — rephrase to neutral editorial illustration)
     _image_b64 = None
+    _image_prompt = await _safe_image_prompt(draft["title"])
     try:
         from services.freepik_generate_service import generate_image_flux
-        _image_b64 = await generate_image_flux(draft["title"])
+        _image_b64 = await generate_image_flux(_image_prompt)
         logger.info(f"[NewsApprove] Flux image OK for '{draft['title'][:40]}'")
     except Exception as _img_err:
         logger.warning(f"[NewsApprove] Flux failed: {_img_err}")
         try:
             from services.gemini_image_service import generate_image_gemini
-            _image_b64 = await generate_image_gemini(draft["title"])
+            _image_b64 = await generate_image_gemini(_image_prompt)
             logger.info(f"[NewsApprove] Gemini image fallback OK")
         except Exception as _img_err2:
             logger.warning(f"[NewsApprove] All image sources failed: {_img_err2}")
