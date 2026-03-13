@@ -389,7 +389,21 @@ function LiveTab() {
   }, [load])
 
   useEffect(() => {
-    load(0)
+    load(0).then(() => {
+      // After initial load, check if we have any snapshot data
+      // If no domains have snapshots, auto-trigger a quick snapshot
+      setTimeout(() => {
+        setDomains(prev => {
+          const hasAnySnapshot = prev.some(d => d.from_snapshot)
+          if (!hasAnySnapshot && prev.length > 0 && !snapping) {
+            setSnapMsg('Brak danych o zdrowiu — uruchamiam pierwszy szybki snapshot...')
+            setSnapping(true)
+            api.post('/api/health/snapshot-quick').then(() => startPolling()).catch(() => setSnapping(false))
+          }
+          return prev
+        })
+      }, 500)
+    })
     // Check if snapshot already running
     api.get('/api/health/snapshot-progress').then(res => {
       if (res.data.running) {

@@ -150,7 +150,18 @@ export default function Sidebar() {
   const [expiringCount, setExpiringCount] = useState(0)
   const [failedKeywords, setFailedKeywords] = useState(0)
   const [failedPosts, setFailedPosts] = useState(0)
+  const [dismissed, setDismissed] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('pbn_dismissed_badges') || '{}') } catch { return {} }
+  })
   const [dark, setDark] = useState(() => localStorage.getItem('pbn_dark') === '1')
+
+  const dismiss = (key, e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const next = { ...dismissed, [key]: Date.now() }
+    setDismissed(next)
+    localStorage.setItem('pbn_dismissed_badges', JSON.stringify(next))
+  }
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
@@ -163,14 +174,42 @@ export default function Sidebar() {
         const count = (res.data.domains || []).filter(d =>
           d.days_to_expiry !== null && d.days_to_expiry !== undefined && d.days_to_expiry < 30
         ).length
+        if (count !== expiringCount) {
+          // Reset dismiss when count changes (new data)
+          const prev = dismissed['health']
+          if (prev && count > 0) {
+            const next = { ...dismissed }
+            delete next['health']
+            setDismissed(next)
+            localStorage.setItem('pbn_dismissed_badges', JSON.stringify(next))
+          }
+        }
         setExpiringCount(count)
       })
       .catch(() => {})
     api.get('/api/autopilot/stats')
-      .then(res => setFailedKeywords(res.data.failed_keywords || 0))
+      .then(res => {
+        const f = res.data.failed_keywords || 0
+        if (f !== failedKeywords && dismissed['autopilot']) {
+          const next = { ...dismissed }
+          delete next['autopilot']
+          setDismissed(next)
+          localStorage.setItem('pbn_dismissed_badges', JSON.stringify(next))
+        }
+        setFailedKeywords(f)
+      })
       .catch(() => {})
     api.get('/api/history/failed-count')
-      .then(res => setFailedPosts(res.data.count || 0))
+      .then(res => {
+        const c = res.data.count || 0
+        if (c !== failedPosts && dismissed['history']) {
+          const next = { ...dismissed }
+          delete next['history']
+          setDismissed(next)
+          localStorage.setItem('pbn_dismissed_badges', JSON.stringify(next))
+        }
+        setFailedPosts(c)
+      })
       .catch(() => {})
   }, [])
 
@@ -199,19 +238,34 @@ export default function Sidebar() {
                 >
                   {item.icon}
                   <span className="flex-1">{item.label}</span>
-                  {item.to === '/domain-health' && expiringCount > 0 && (
-                    <span className="bg-orange-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
-                      {expiringCount > 9 ? '9+' : expiringCount}
+                  {item.to === '/domain-health' && expiringCount > 0 && !dismissed['health'] && (
+                    <span className="relative group">
+                      <span className="bg-orange-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                        {expiringCount > 9 ? '9+' : expiringCount}
+                      </span>
+                      <button onClick={(e) => dismiss('health', e)}
+                        className="absolute -top-1.5 -right-1.5 bg-slate-600 text-white rounded-full w-3.5 h-3.5 text-[8px] leading-none items-center justify-center hidden group-hover:flex hover:bg-slate-500"
+                        title="Ukryj">×</button>
                     </span>
                   )}
-                  {item.to === '/autopilot' && failedKeywords > 0 && (
-                    <span className="bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
-                      {failedKeywords > 9 ? '9+' : failedKeywords}
+                  {item.to === '/autopilot' && failedKeywords > 0 && !dismissed['autopilot'] && (
+                    <span className="relative group">
+                      <span className="bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                        {failedKeywords > 9 ? '9+' : failedKeywords}
+                      </span>
+                      <button onClick={(e) => dismiss('autopilot', e)}
+                        className="absolute -top-1.5 -right-1.5 bg-slate-600 text-white rounded-full w-3.5 h-3.5 text-[8px] leading-none items-center justify-center hidden group-hover:flex hover:bg-slate-500"
+                        title="Ukryj">×</button>
                     </span>
                   )}
-                  {item.to === '/history' && failedPosts > 0 && (
-                    <span className="bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
-                      {failedPosts > 9 ? '9+' : failedPosts}
+                  {item.to === '/history' && failedPosts > 0 && !dismissed['history'] && (
+                    <span className="relative group">
+                      <span className="bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                        {failedPosts > 9 ? '9+' : failedPosts}
+                      </span>
+                      <button onClick={(e) => dismiss('history', e)}
+                        className="absolute -top-1.5 -right-1.5 bg-slate-600 text-white rounded-full w-3.5 h-3.5 text-[8px] leading-none items-center justify-center hidden group-hover:flex hover:bg-slate-500"
+                        title="Ukryj">×</button>
                     </span>
                   )}
                 </NavLink>
