@@ -528,19 +528,22 @@ FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend_dist")
 if os.path.exists(FRONTEND_DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
 
+    _index_path = os.path.join(FRONTEND_DIST, "index.html")
+    _no_cache_headers = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
+
     @app.get("/")
     async def serve_index():
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+        return FileResponse(_index_path, headers=_no_cache_headers)
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         file_path = os.path.join(FRONTEND_DIST, full_path)
         # Prevent path traversal — resolved path must stay within FRONTEND_DIST
         if not os.path.realpath(file_path).startswith(os.path.realpath(FRONTEND_DIST)):
-            return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+            return FileResponse(_index_path, headers=_no_cache_headers)
         if os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+        return FileResponse(_index_path, headers=_no_cache_headers)
 else:
     @app.get("/")
     async def root():
