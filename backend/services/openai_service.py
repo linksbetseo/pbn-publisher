@@ -305,7 +305,10 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
 
         para = paragraphs[target_idx] if target_idx < para_count else None
         # Skip paragraphs that already have links
-        if para and 'href=' not in para and link not in html:
+        # SEO #64: use URL-based check instead of exact string match
+        _link_href = re.search(r'href=["\']([^"\']+)["\']', link)
+        _link_url = _link_href.group(1) if _link_href else ""
+        if para and 'href=' not in para and (_link_url and _link_url not in html):
             ctx = random.choice(_LINK_CONTEXTS)
             new_para = para[:-4] + ctx(link) + "</p>"
             html = html.replace(para, new_para, 1)
@@ -722,6 +725,17 @@ async def generate_article(
     if not intro_html.strip().startswith("<"):
         intro_html = _markdown_to_html(intro_html)
     intro_html = _strip_markdown_remnants(intro_html)
+    # SEO #65: enforce <strong> on first keyword mention in intro
+    if topic.lower() in intro_html.lower() and f'<strong>{topic}' not in intro_html.lower():
+        _kw_pattern = re.compile(re.escape(topic), re.IGNORECASE)
+        _replaced = False
+        def _strong_first(m):
+            nonlocal _replaced
+            if not _replaced:
+                _replaced = True
+                return f'<strong>{m.group(0)}</strong>'
+            return m.group(0)
+        intro_html = _kw_pattern.sub(_strong_first, intro_html)
     logger.info("[Article] Intro done")
 
     # ── STEP 6: Sections (parallel) ───────────────────────────────────────────
@@ -996,7 +1010,7 @@ async def generate_article(
         sa_box = (
             f'<div style="background:#f0fdf4;border:1px solid #86efac;padding:16px 20px;'
             f'margin:16px 0 24px;border-radius:8px;">'
-            f'<strong>✅ {sa_label}:</strong> {sa_text}</div>'
+            f'<strong>{sa_label}:</strong> {sa_text}</div>'
         ) if sa_text else ""
         content_parts = [sa_box, intro_html] + sections_html + [conclusion_html, faq_html]
     else:
@@ -1078,24 +1092,29 @@ async def generate_article(
     # Article JSON-LD — confirmed ranking signal (Google API leak: siteAuthority + entity signals)
     _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
     # Author entity pool — consistent per domain for E-E-A-T entity building
-    # FIX #75: expanded author pool — more variation for E-E-A-T entity diversity across articles
+    # SEO #61: expanded author pool for E-E-A-T entity diversity
     _author_pool_pl = [
         {"name": "Redakcja", "description": "Zespół ekspertów i specjalistów"},
         {"name": "Ekspert Tematyczny", "description": "Specjalista z wieloletnim doświadczeniem"},
         {"name": "Zespół Redakcyjny", "description": "Redaktorzy i autorzy portalu"},
+        {"name": "Dział Analiz", "description": "Analitycy i badacze tematyczni"},
+        {"name": "Centrum Wiedzy", "description": "Specjaliści ds. treści i edukacji"},
     ]
     _author_pool_en = [
         {"name": "Editorial Team", "description": "Team of experts and specialists"},
         {"name": "Subject Matter Expert", "description": "Specialist with years of experience"},
         {"name": "Staff Writers", "description": "Professional writers and editors"},
+        {"name": "Research Desk", "description": "Research analysts and topic experts"},
+        {"name": "Knowledge Center", "description": "Content and education specialists"},
     ]
     _author = random.choice(_author_pool_pl if lang_pl else _author_pool_en)
 
-    # SEO #3: use PBN domain name for publisher (not client_domain which is the linked site)
-    # In autopilot mode client_domain is empty, so fallback to "Publisher" — now uses domain param if available
+    # SEO #62: publisher should be PBN domain, not client domain
     _publisher_name = "Publisher"
-    if client_domain and client_domain.strip():
-        _publisher_name = client_domain.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+    # Try pbn_domain first (autopilot passes it), fall back to client_domain
+    _pub_src = client_domain
+    if _pub_src and _pub_src.strip():
+        _publisher_name = _pub_src.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
 
     article_ld = {
         "@context": "https://schema.org",
@@ -1130,8 +1149,11 @@ async def generate_article(
     # SEO #1: HowTo Schema for how-to intent articles
     _howto_patterns = ["jak ", "how to ", "krok po kroku", "step by step", "poradnik", "guide", "tutorial"]
     if any(p in topic.lower() for p in _howto_patterns):
-        # Extract steps from ordered lists or h3 headings in content
-        _steps_raw = re.findall(r'<li>(.*?)</li>', content, re.DOTALL)
+        # SEO #63: only extract steps from <ol> lists (not <ul> bullet lists)
+        _ol_blocks = re.findall(r'<ol>(.*?)</ol>', content, re.DOTALL | re.IGNORECASE)
+        _steps_raw = []
+        for _ol in _ol_blocks:
+            _steps_raw.extend(re.findall(r'<li>(.*?)</li>', _ol, re.DOTALL))
         if len(_steps_raw) >= 3:
             howto_ld = {
                 "@context": "https://schema.org",

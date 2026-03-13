@@ -22,8 +22,11 @@ client_ai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 _SKIP_DOMAINS = re.compile(
-    r"(youtube\.com|facebook\.com|twitter\.com|instagram\.com|wikipedia\.org"
-    r"|reddit\.com|allegro\.pl|amazon\.|ebay\.|olx\.pl|ceneo\.pl|linkedin\.com)",
+    r"(youtube\.com|facebook\.com|twitter\.com|x\.com|instagram\.com|tiktok\.com"
+    r"|wikipedia\.org|reddit\.com|pinterest\.com|allegro\.pl|amazon\.|ebay\."
+    r"|olx\.pl|ceneo\.pl|linkedin\.com|quora\.com|wykop\.pl|money\.pl"
+    r"|bankier\.pl|wp\.pl|onet\.pl|interia\.pl|gazeta\.pl"
+    r"|gov\.pl|\.edu\.pl|medium\.com|substack\.com)",
     re.IGNORECASE,
 )
 
@@ -156,12 +159,12 @@ async def generate_seo_article(
             logger.warning(f"SERP scrape failed: {e}")
 
     # Build anchors
-    main_anchor = f'<a href="{clean_url(client_domain)}" rel="nofollow sponsored">{anchor_text}</a>'
+    main_anchor = f'<a href="{clean_url(client_domain)}" rel="nofollow sponsored noopener noreferrer" target="_blank">{anchor_text}</a>'
     extra_anchors = []
     if anchor_text2 and anchor_url2:
-        extra_anchors.append(f'<a href="{clean_url(anchor_url2)}" rel="nofollow sponsored">{anchor_text2}</a>')
+        extra_anchors.append(f'<a href="{clean_url(anchor_url2)}" rel="nofollow sponsored noopener noreferrer" target="_blank">{anchor_text2}</a>')
     if anchor_text3 and anchor_url3:
-        extra_anchors.append(f'<a href="{clean_url(anchor_url3)}" rel="nofollow sponsored">{anchor_text3}</a>')
+        extra_anchors.append(f'<a href="{clean_url(anchor_url3)}" rel="nofollow sponsored noopener noreferrer" target="_blank">{anchor_text3}</a>')
 
     # Internal linking instructions
     internal_links_info = ""
@@ -235,7 +238,7 @@ Zwróć JSON z polami:
 - "meta_description": meta opis (150-160 znaków, CTA na końcu)
 - "content": pełny HTML artykułu
 - "category": 1 główna kategoria bloga (1-3 słowa, np. "Poradniki", "Finanse", "Zdrowie")
-- "tags": lista 5 tagów WP (krótkie frazy LSI, tematycznie powiązane z '{keyword}')
+- "tags": lista 10 tagów WP (krótkie frazy LSI, tematycznie powiązane z '{keyword}')
 Tylko JSON, bez markdown."""
     else:
         system_prompt = (
@@ -274,7 +277,7 @@ Return JSON with:
 - "meta_description": meta description (150-160 chars, with CTA at the end)
 - "content": full HTML article
 - "category": 1 main blog category (1-3 words, e.g. "Guides", "Finance", "Health")
-- "tags": list of 5 WP tags (short LSI phrases related to '{keyword}')
+- "tags": list of 10 WP tags (short LSI phrases related to '{keyword}')
 JSON only, no markdown."""
 
     _step(2, "gpt", "Generowanie artykulu (GPT)...")
@@ -306,13 +309,15 @@ JSON only, no markdown."""
     if content and not re.search(r"<h1", content, re.IGNORECASE):
         content = f"<h1>{title_out}</h1>\n\n" + content
 
-    # Deduplicate links
+    # SEO #45: improved link dedup — URL-normalized, also remove empty/broken hrefs
     seen_hrefs = set()
     def dedup_link(m):
         href = re.search(r'href=["\']([^"\']+)["\']', m.group(0))
         if not href:
             return m.group(0)
         url = href.group(1).rstrip("/")
+        if not url or url in ("#", "javascript:void(0)"):
+            return re.sub(r"<[^>]+>", "", m.group(0))
         if url in seen_hrefs:
             return re.sub(r"<[^>]+>", "", m.group(0))
         seen_hrefs.add(url)
@@ -338,9 +343,65 @@ JSON only, no markdown."""
             ]
         }
         faq_schema = f'<script type="application/ld+json">{json.dumps(faq_ld, ensure_ascii=False)}</script>'
-        content = faq_schema + "\n" + content
+        content = content + "\n" + faq_schema
+    # SEO #39: Article JSON-LD schema for rich snippets
+    import random as _rnd_cw
+    from datetime import datetime as _dt_cw, timezone as _tz_cw
+    _now_iso = _dt_cw.now(_tz_cw.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    _author_pool = [
+        {"name": "Redakcja", "desc": "Zespół ekspertów"},
+        {"name": "Ekspert Tematyczny", "desc": "Specjalista z doświadczeniem"},
+        {"name": "Zespół Redakcyjny", "desc": "Autorzy portalu"},
+    ] if language == "pl" else [
+        {"name": "Editorial Team", "desc": "Team of experts"},
+        {"name": "Subject Expert", "desc": "Specialist with experience"},
+        {"name": "Staff Writers", "desc": "Professional writers"},
+    ]
+    _auth = _rnd_cw.choice(_author_pool)
+    from services.article_helpers import count_words as _cw_count
+    article_ld = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": title_out[:110],
+        "description": data.get("meta_description", "")[:155],
+        "datePublished": _now_iso,
+        "dateModified": _now_iso,
+        "author": {"@type": "Person", "name": _auth["name"], "description": _auth["desc"]},
+        "publisher": {"@type": "Organization", "name": client_domain.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if client_domain else "Publisher"},
+        "mainEntityOfPage": {"@type": "WebPage"},
+        "wordCount": _cw_count(content),
+        "inLanguage": language,
+    }
+    article_schema = f'<script type="application/ld+json">{json.dumps(article_ld, ensure_ascii=False)}</script>'
+    content = content + "\n" + article_schema
+
+    # SEO #40: BreadcrumbList schema
+    breadcrumb_ld = {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "/"},
+            {"@type": "ListItem", "position": 2, "name": keyword[:50]},
+        ],
+    }
+    content = content + "\n" + f'<script type="application/ld+json">{json.dumps(breadcrumb_ld, ensure_ascii=False)}</script>'
+
     excerpt = data.get("meta_description", "")
+    # SEO #44: enforce 155 char limit for meta description
+    if excerpt and len(excerpt) > 155:
+        excerpt = excerpt[:155].rsplit(' ', 1)[0].rstrip('.,;:') + '.'
+    excerpt = re.sub(r'^(?:Meta\s*(?:description|opis)\s*:?\s*)', '', excerpt, flags=re.IGNORECASE).strip()
     sections = [re.sub(r"<[^>]+>", "", m).strip() for m in re.findall(r"<h2[^>]*>(.*?)</h2>", content, re.DOTALL)][:8]
+
+    # SEO #41: content freshness signal
+    from datetime import datetime as _dt41, timezone as _tz41
+    _freshness_date = _dt41.now(_tz41.utc).strftime("%d.%m.%Y")
+    _freshness_label = "Ostatnia aktualizacja" if language == "pl" else "Last updated"
+    _freshness_tag = f'<p style="font-size:0.85em;color:#666;margin-bottom:16px;"><time datetime="{_dt41.now(_tz41.utc).strftime("%Y-%m-%d")}">{_freshness_label}: {_freshness_date}</time></p>'
+    content = _freshness_tag + "\n" + content
+
+    # SEO #42: wrap content in lang div
+    content = f'<div lang="{language}">\n{content}\n</div>'
 
     _step(3, "enrichment", "Wzbogacanie tresci (TOC, FAQ)...")
     # ── Enrichments (TOC + update_box + 2 random elements) ─────────────────
@@ -362,7 +423,7 @@ JSON only, no markdown."""
 
     _step(4, "done", "Gotowe!")
     raw_tags = data.get("tags", [])
-    tags_out = [t for t in raw_tags if isinstance(t, str) and t.strip()][:5]
+    tags_out = [t for t in raw_tags if isinstance(t, str) and t.strip()][:10]
 
     return {
         "title": data.get("title", keyword),

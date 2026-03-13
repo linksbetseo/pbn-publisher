@@ -770,7 +770,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                         logger.warning(f"[Autopilot] Quality gate: '{keyword}' too short ({_wc} words) — skipping")
                         _results.append({"status": "skipped", "keyword": keyword, "error": f"Too short: {_wc} words"})
                         continue
-                    if _kd > 0 and (_kd < 0.3 or _kd > 3.5):
+                    if _kd > 0 and (_kd < 0.5 or _kd > 3.0):
                         logger.warning(f"[Autopilot] Quality gate: '{keyword}' KW density {_kd}% out of range — publishing anyway")
 
                     # SEO #26: check for duplicate slug on WP before publishing
@@ -785,7 +785,10 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                                     _sr = await _sc.get(f"{_wb}/wp-json/wp/v2/posts", params={"slug": _check_slug, "per_page": 1})
                                     if _sr.status_code == 200 and _sr.json():
                                         logger.warning(f"[Autopilot] Duplicate slug '{_check_slug}' on {sched['domain']} — appending suffix")
-                                        title = title + f" ({datetime.now().strftime('%m/%Y')})"
+                                        # SEO #67: use clean slug suffix instead of date in parens
+                                        import hashlib as _hs
+                                        _suffix = _hs.md5(keyword.encode()).hexdigest()[:4]
+                                        title = f"{title} — {_suffix}"
                                     break
                                 except Exception:
                                     continue

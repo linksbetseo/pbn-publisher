@@ -48,7 +48,7 @@ from pydantic import BaseModel
 from config import DB_PATH, OPENAI_API_KEY
 from services.crypto_service import get_plain_password
 from services.wordpress_service import publish_post
-from services.openai_service import get_gpt_model
+from services.openai_service import get_gpt_model, _fix_heading_hierarchy
 from services.article_helpers import (
     markdown_to_html as _markdown_to_html,
     strip_markdown_remnants as _strip_markdown_remnants,
@@ -1343,6 +1343,13 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
     excerpt = re.sub(r'^(?:Meta\s*(?:description|opis)\s*:?\s*)', '', excerpt, flags=re.IGNORECASE).strip()
     if len(excerpt) > 155:
         excerpt = excerpt[:155].rsplit(' ', 1)[0].rstrip('.,;:') + '.'
+    # SEO #52: ensure excerpt contains at least a key term from the title
+    _title_words = set(re.findall(r'\w{4,}', title.lower()))
+    _excerpt_lower = excerpt.lower()
+    if _title_words and not any(w in _excerpt_lower for w in _title_words):
+        _main_word = max(_title_words, key=len) if _title_words else ""
+        if _main_word and len(excerpt) + len(_main_word) + 5 < 155:
+            excerpt = f"{_main_word.capitalize()}: {excerpt}"
 
     # ── STEP 6: Source attribution box (E-E-A-T) ──
     if source_urls:
@@ -1362,7 +1369,7 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
         _vary_px = random.randint(12, 18)
         _vary_radius = random.randint(4, 8)
         source_box = (
-            f'<div style="background:#f8fafc;border:1px solid #e2e8f0;'
+            f'<div role="complementary" aria-label="{src_label}" style="background:#f8fafc;border:1px solid #e2e8f0;'
             f'padding:{_vary_px}px {_vary_px + 4}px;margin:20px 0;'
             f'border-radius:{_vary_radius}px;font-size:0.9em;">'
             f'<strong>{src_label}:</strong>'
@@ -1395,6 +1402,8 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
 
     # Final cleanup
     content = _strip_markdown_remnants(content)
+    # SEO #46: fix heading hierarchy in news articles
+    content = _fix_heading_hierarchy(content)
 
     # ── STEP 8: NewsArticle + FAQPage JSON-LD Schema ──
     _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
@@ -1466,6 +1475,31 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
             for s in schema_blocks
         )
         content = all_schema + "\n" + content
+
+    # SEO #47: content freshness signal for news articles
+    from datetime import datetime as _dt47, timezone as _tz47
+    _freshness_date = _dt47.now(_tz47.utc).strftime("%d.%m.%Y" if lang_pl else "%Y-%m-%d")
+    _freshness_label = "Opublikowano" if lang_pl else "Published"
+    _freshness_tag = f'<p style="font-size:0.85em;color:#666;margin-bottom:16px;"><time datetime="{_dt47.now(_tz47.utc).strftime("%Y-%m-%d")}">{_freshness_label}: {_freshness_date}</time></p>'
+    content = _freshness_tag + "\n" + content
+
+    # SEO #48: wrap content in lang div for NLP entity recognition
+    content = f'<div lang="{portal_language}">\n{content}\n</div>'
+
+    # SEO #51: deduplicate links in news article
+    _seen_hrefs_news: set = set()
+    def _dedup_news_link(m):
+        href = re.search(r'href=["\']([^"\']+)["\']', m.group(0))
+        if not href:
+            return m.group(0)
+        url = href.group(1).rstrip("/")
+        if not url or url in ("#", "javascript:void(0)"):
+            return re.sub(r"<[^>]+>", "", m.group(0))
+        if url in _seen_hrefs_news:
+            return re.sub(r"<[^>]+>", "", m.group(0))
+        _seen_hrefs_news.add(url)
+        return m.group(0)
+    content = re.sub(r'<a\s[^>]*?>.*?</a>', _dedup_news_link, content, flags=re.DOTALL | re.IGNORECASE)
 
     # Fingerprint for dedup
     fingerprint = _content_fingerprint(content)

@@ -399,9 +399,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PBN Publisher API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# SEO #81: tighten CORS — allow configured origins or fallback to permissive for dev
+_CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

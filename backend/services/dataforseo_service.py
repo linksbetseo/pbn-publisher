@@ -60,7 +60,7 @@ class DataForSEOClient:
         return results[:10]
 
     async def page_content(self, url: str, _client: httpx.AsyncClient = None) -> str:
-        """Fetch page content via DataForSEO on_page."""
+        """Fetch page content via DataForSEO on_page. SEO #76: respects robots via DataForSEO."""
         try:
             data = await self.request(
                 "on_page/instant_pages",
@@ -141,7 +141,15 @@ class DataForSEOClient:
                             q = paa_item.get("title") or paa_item.get("question", "")
                             if q:
                                 paa.append(q)
-        return {"organic": organic[:10], "paa": list(dict.fromkeys(paa))[:8]}
+        # SEO #75: deduplicate organic results by URL (featured snippets can duplicate)
+        _seen_urls: set = set()
+        _deduped_organic = []
+        for item in organic:
+            _u = item.get("url", "").rstrip("/")
+            if _u and _u not in _seen_urls:
+                _seen_urls.add(_u)
+                _deduped_organic.append(item)
+        return {"organic": _deduped_organic[:10], "paa": list(dict.fromkeys(paa))[:8]}
 
     async def keyword_ideas(self, seed: str, location_code: int = 2616, language_code: str = "pl", limit: int = 200) -> list[dict]:
         """Get keyword ideas from DataForSEO."""

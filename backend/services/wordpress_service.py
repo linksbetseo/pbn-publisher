@@ -179,6 +179,9 @@ async def _upload_image(
     return None, ""
 
 
+# SEO #55: IndexNow key file check cache (avoid re-checking every publish)
+_indexnow_key_cache: dict[str, bool] = {}
+
 async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
     """Notify search engines about new/updated content via IndexNow + Bing sitemap ping."""
     try:
@@ -189,12 +192,17 @@ async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
                 indexnow_key = clean_domain.replace(".", "")[:32]
                 # Validate key file exists on domain (required by IndexNow protocol)
                 key_file_url = f"{base_url}/{indexnow_key}.txt"
-                key_file_ok = False
-                try:
-                    kf_resp = await ping_client.get(key_file_url)
-                    key_file_ok = kf_resp.status_code == 200 and indexnow_key in (kf_resp.text or "")
-                except Exception:
-                    pass
+                # SEO #55: use cache for key file check
+                if key_file_url in _indexnow_key_cache:
+                    key_file_ok = _indexnow_key_cache[key_file_url]
+                else:
+                    key_file_ok = False
+                    try:
+                        kf_resp = await ping_client.get(key_file_url)
+                        key_file_ok = kf_resp.status_code == 200 and indexnow_key in (kf_resp.text or "")
+                    except Exception:
+                        pass
+                    _indexnow_key_cache[key_file_url] = key_file_ok
                 if not key_file_ok:
                     logger.warning(
                         f"[IndexNow] Key file missing or invalid at {key_file_url} — "
@@ -275,7 +283,9 @@ async def publish_post(
     _alt_variations_en = ["illustration", "image", "photo", "graphic"]
     import random as _rnd
     _alt_suffix = _rnd.choice(_alt_variations_pl) if (keyword and any(c in keyword for c in "ąćęłńóśźż")) else _rnd.choice(_alt_variations_en)
-    alt_text = f"{keyword or title} — {_alt_suffix}"
+    # SEO #56: alt text includes year for freshness signal in image search
+    _year = datetime.now(timezone.utc).year
+    alt_text = f"{keyword or title} — {_alt_suffix} {_year}"
     # SEO #35: prefer WebP format for smaller files and better Core Web Vitals
     _use_webp = True
     try:
@@ -331,6 +341,7 @@ async def publish_post(
                     "status": "publish",
                     "slug": slug,
                     "date_gmt": _now_gmt,
+                    "comment_status": "closed",  # SEO #54: disable comments (spam magnet on PBN)
                 }
                 if media_id:
                     post_data["featured_media"] = media_id
@@ -347,7 +358,7 @@ async def publish_post(
                 if excerpt:
                     meta.update({
                         "_yoast_wpseo_metadesc": excerpt[:160],
-                        "_yoast_wpseo_title": title,
+                        "_yoast_wpseo_title": f"{title} %%sep%% %%sitename%%",
                         "rank_math_description": excerpt[:160],
                         "rank_math_title": title,
                         "_aioseop_description": excerpt[:160],
@@ -361,6 +372,10 @@ async def publish_post(
                         "_yoast_wpseo_twitter-title": title,
                         "_yoast_wpseo_twitter-description": excerpt[:200],
                         "_yoast_wpseo_twitter-card-type": "summary_large_image",
+                        # SEO #53: RankMath Twitter meta
+                        "rank_math_twitter_title": title,
+                        "rank_math_twitter_description": excerpt[:200],
+                        "rank_math_twitter_card_type": "summary_large_image",
                         # SEO #8: OG article metadata for Facebook/Pinterest
                         "article:published_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
                         "article:section": keyword or title[:50],
@@ -408,8 +423,8 @@ async def publish_post(
                     data = resp.json()
                     post_url = data.get("link", "")
                     post_id = data.get("id")
-                    # Set canonical after publish — use actual WP post URL (correct scheme)
-                    if post_url and post_id and meta is not None:
+                    # SEO #57: set canonical via meta update (uses post URL after publish)
+                    if post_url and post_id:
                         canonical = post_url.rstrip("/") + "/"
                         try:
                             await client.post(
@@ -417,6 +432,8 @@ async def publish_post(
                                 json={"meta": {
                                     "_yoast_wpseo_canonical": canonical,
                                     "rank_math_canonical_url": canonical,
+                                    # SEO #58: explicit robots meta
+                                    "rank_math_robots": ["index", "follow", "max-snippet:-1", "max-image-preview:large"],
                                 }},
                                 headers=headers,
                                 timeout=10,

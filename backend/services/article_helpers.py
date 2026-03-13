@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 # FIX #78: extended SERP cache TTL from 24h to 48h — reduces DataForSEO API costs
 # (SERP data for most keywords doesn't change significantly within 48h)
-_SERP_CACHE_TTL = 172800  # 48 hours
+import os as _os_helpers
+_SERP_CACHE_TTL = int(_os_helpers.getenv("SERP_CACHE_TTL", "172800"))  # default 48h, configurable
 
 _SERP_CACHE_TABLE_CREATED = False
 
@@ -119,7 +120,7 @@ def extract_lsi(text: str, keyword: str, top_n: int = 20) -> list[str]:
     words = re.findall(r'\b[a-ząćęłńóśźżA-ZĄĆĘŁŃÓŚŹŻ]{3,}\b', clean.lower())
     freq: dict[str, int] = {}
     for w in words:
-        if w not in STOPWORDS and w not in kw_words and len(w) >= 4:
+        if w not in STOPWORDS and w not in kw_words and len(w) >= 4 and not w.isdigit():
             freq[w] = freq.get(w, 0) + 1
     for i in range(len(words) - 1):
         w1, w2 = words[i], words[i + 1]
@@ -195,7 +196,10 @@ def markdown_to_html(text: str) -> str:
 
 def slugify_heading(text: str) -> str:
     """FIX #38: generate URL-safe anchor slugs from headings (handles Polish chars)."""
-    nfkd = unicodedata.normalize("NFKD", text.lower())
+    # SEO #73: explicit Polish char mapping (NFKD doesn't handle ł→l)
+    _pl_map = str.maketrans({"ł": "l", "Ł": "L"})
+    text_mapped = text.lower().translate(_pl_map)
+    nfkd = unicodedata.normalize("NFKD", text_mapped)
     ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_str).strip("-")
     return slug[:60]

@@ -160,13 +160,13 @@ class PublishRequest(BaseModel):
 
 
 def _drip_delay_range(domain_count: int) -> tuple[int, int]:
-    """Return (min_seconds, max_seconds) delay range based on number of domains."""
+    """Return (min_seconds, max_seconds) delay range based on number of domains. SEO #79: wider ranges."""
     if domain_count <= 5:
-        return (20, 60)
+        return (30, 90)
     elif domain_count <= 15:
-        return (45, 120)
-    else:
         return (60, 180)
+    else:
+        return (90, 300)
 
 
 @router.get("/check-duplicate")
@@ -233,6 +233,8 @@ async def generate_content(body: GenerateRequest):
         "title": article["title"],
         "content": article["content"],
         "excerpt": article.get("excerpt", ""),
+        "lsi_tags": article.get("lsi_tags", []),
+        "category": article.get("category", ""),
         "image_b64": image_b64,
         "image_provider": image_provider,
     }
