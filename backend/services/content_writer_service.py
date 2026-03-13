@@ -358,7 +358,11 @@ JSON only, no markdown."""
         {"name": "Staff Writers", "desc": "Professional writers"},
     ]
     _auth = _rnd_cw.choice(_author_pool)
+    # SEO #120: author URL for E-E-A-T
+    _auth_slug_cw = re.sub(r'[^a-z0-9]+', '-', _auth["name"].lower()).strip('-')
     from services.article_helpers import count_words as _cw_count
+    # SEO #101: extract first image from content for Article schema
+    _first_img_cw = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE)
     article_ld = {
         "@context": "https://schema.org",
         "@type": "Article",
@@ -366,14 +370,31 @@ JSON only, no markdown."""
         "description": data.get("meta_description", "")[:155],
         "datePublished": _now_iso,
         "dateModified": _now_iso,
-        "author": {"@type": "Person", "name": _auth["name"], "description": _auth["desc"]},
+        "author": {"@type": "Person", "name": _auth["name"], "description": _auth["desc"], "url": f"/author/{_auth_slug_cw}"},
         "publisher": {"@type": "Organization", "name": client_domain.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if client_domain else "Publisher"},
         "mainEntityOfPage": {"@type": "WebPage"},
         "wordCount": _cw_count(content),
         "inLanguage": language,
     }
+    # SEO #101: add image field (required for Google rich results)
+    if _first_img_cw:
+        article_ld["image"] = _first_img_cw.group(1)
     article_schema = f'<script type="application/ld+json">{json.dumps(article_ld, ensure_ascii=False)}</script>'
     content = content + "\n" + article_schema
+    # SEO #104: VideoObject schema for YouTube embeds
+    _yt_cw = re.findall(r'(?:src=["\'])(?:https?://)?(?:www\.)?(?:youtube\.com/embed/|youtu\.be/)([a-zA-Z0-9_-]{11})', content)
+    if _yt_cw:
+        for _yt_id in _yt_cw[:2]:
+            _vid_ld = {
+                "@context": "https://schema.org",
+                "@type": "VideoObject",
+                "name": title_out[:110],
+                "description": data.get("meta_description", "")[:155] or keyword,
+                "thumbnailUrl": f"https://img.youtube.com/vi/{_yt_id}/maxresdefault.jpg",
+                "uploadDate": _now_iso,
+                "embedUrl": f"https://www.youtube.com/embed/{_yt_id}",
+            }
+            content = content + "\n" + f'<script type="application/ld+json">{json.dumps(_vid_ld, ensure_ascii=False)}</script>'
 
     # SEO #40: BreadcrumbList schema
     breadcrumb_ld = {
@@ -391,6 +412,23 @@ JSON only, no markdown."""
     if excerpt and len(excerpt) > 155:
         excerpt = excerpt[:155].rsplit(' ', 1)[0].rstrip('.,;:') + '.'
     excerpt = re.sub(r'^(?:Meta\s*(?:description|opis)\s*:?\s*)', '', excerpt, flags=re.IGNORECASE).strip()
+    # SEO #103: dynamic CTA in meta description based on detected intent
+    _cw_intent = "informational"
+    for _it, _ip in [("transactional", ["kup", "cena", "sklep", "buy", "price", "shop"]),
+                     ("commercial", ["porównanie", "ranking", "najlepsze", "compare", "best", "review"]),
+                     ("navigational", ["login", "kontakt", "strona", "contact", "official"])]:
+        if any(p in keyword.lower() for p in _ip):
+            _cw_intent = _it
+            break
+    _cta_map_cw = {"informational": "Dowiedz się więcej", "transactional": "Sprawdź ofertę",
+                   "commercial": "Porównaj opcje", "navigational": "Przejdź na stronę"} if language == "pl" else {
+                   "informational": "Learn more", "transactional": "Shop now",
+                   "commercial": "Compare options", "navigational": "Visit the page"}
+    _cta_cw = _cta_map_cw.get(_cw_intent, _cta_map_cw["informational"])
+    if excerpt and not any(cta in excerpt for cta in _cta_map_cw.values()):
+        _space = len(excerpt) + len(_cta_cw) + 3
+        if _space <= 155:
+            excerpt = excerpt.rstrip('.!') + f". {_cta_cw}."
     sections = [re.sub(r"<[^>]+>", "", m).strip() for m in re.findall(r"<h2[^>]*>(.*?)</h2>", content, re.DOTALL)][:8]
 
     # SEO #41: content freshness signal
@@ -400,8 +438,20 @@ JSON only, no markdown."""
     _freshness_tag = f'<p style="font-size:0.85em;color:#666;margin-bottom:16px;"><time datetime="{_dt41.now(_tz41.utc).strftime("%Y-%m-%d")}">{_freshness_label}: {_freshness_date}</time></p>'
     content = _freshness_tag + "\n" + content
 
+    # SEO #119: layout_variant for content_writer (same as openai_service: faq_top/tldr/short_answer/standard)
+    _rv_cw = random.random()
+    _layout_cw = "faq_top" if _rv_cw < 0.30 else ("tldr" if _rv_cw < 0.50 else ("short_answer" if _rv_cw < 0.75 else "standard"))
+    # Reorder FAQ block if faq_top layout selected
+    _faq_match = re.search(r'(<h2[^>]*>(?:FAQ|Najczęściej|Frequently|Pytania).*)', content, re.DOTALL | re.IGNORECASE)
+    if _layout_cw == "faq_top" and _faq_match:
+        _faq_block = _faq_match.group(0)
+        content = _faq_block + "\n" + content[:_faq_match.start()] + content[_faq_match.end():]
+
     # SEO #42: wrap content in lang div
     content = f'<div lang="{language}">\n{content}\n</div>'
+
+    # SEO #122: robots meta hint in HTML comment (SEO plugins read from post meta, not HTML)
+    content = f'<!-- robots: index, follow, max-snippet:-1, max-image-preview:large -->\n{content}'
 
     _step(3, "enrichment", "Wzbogacanie tresci (TOC, FAQ)...")
     # ── Enrichments (TOC + update_box + 2 random elements) ─────────────────

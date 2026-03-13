@@ -92,7 +92,8 @@ async def _fetch_serp_content(
     if not dfs_login or not dfs_password:
         return empty
 
-    cache_key = f"{topic.lower().strip()}:{location_code}:{language_code}"
+    # SEO #125: include device in SERP cache key (mobile vs desktop SERP differs)
+    cache_key = f"{topic.lower().strip()}:{location_code}:{language_code}:desktop"
     cached = await _serp_cache_get(cache_key)
     if cached:
         logger.info(f"[SERP] Cache hit for '{topic}'")
@@ -216,8 +217,11 @@ def _fix_heading_hierarchy(html: str) -> str:
         # FIX #13: promote H1 inside body to H2 (WP theme renders title as H1 — duplicate H1 is SEO error)
         if level == 1:
             new_tag = "h2"
+            # SEO #105: add ID to heading for anchor linking / TOC jump links
+            _id_slug = _slugify_heading(re.sub(r'<[^>]+>', '', content))
+            _id_attr = f' id="{_id_slug}"' if _id_slug and 'id=' not in attrs else ''
             replacements.append((m.start(), m.end(), m.group(0),
-                                 f"<{new_tag}{attrs}>{content}</{new_tag}>"))
+                                 f"<{new_tag}{_id_attr}{attrs}>{content}</{new_tag}>"))
             last_level = 2
             continue
         # FIX #50: also demote H5/H6 to H4 max (H5/H6 are invisible in most WP themes)
@@ -231,10 +235,20 @@ def _fix_heading_hierarchy(html: str) -> str:
         if level > last_level + 1:
             new_level = last_level + 1
             new_tag = f"h{new_level}"
+            # SEO #105: add ID to heading for anchor linking / TOC jump links
+            _id_slug = _slugify_heading(re.sub(r'<[^>]+>', '', content))
+            _id_attr = f' id="{_id_slug}"' if _id_slug and 'id=' not in attrs else ''
             replacements.append((m.start(), m.end(), m.group(0),
-                                 f"<{new_tag}{attrs}>{content}</{new_tag}>"))
+                                 f"<{new_tag}{_id_attr}{attrs}>{content}</{new_tag}>"))
             last_level = new_level
         else:
+            # SEO #105: add ID to all H2/H3 headings for anchor linking / TOC jump links
+            if level in (2, 3) and 'id=' not in attrs:
+                _id_slug = _slugify_heading(re.sub(r'<[^>]+>', '', content))
+                if _id_slug:
+                    _id_attr = f' id="{_id_slug}"'
+                    replacements.append((m.start(), m.end(), m.group(0),
+                                         f"<{tag}{_id_attr}{attrs}>{content}</{tag}>"))
             last_level = level
 
     # Apply replacements in reverse order to preserve positions
@@ -606,7 +620,9 @@ async def generate_article(
 
     # ── STEP 3: Outline ───────────────────────────────────────────────────────
     # SEO #10: entity block for section prompts
-    _entity_block = f"\nEncje do użycia: {_extracted_entities}" if _extracted_entities else ""
+    # SEO #115: entity gap analysis — GPT-extracted entities from SERP competitors
+    # injected into each section prompt to ensure article covers ALL entities that competitors mention
+    _entity_block = f"\nEncje do użycia (entity gap fill — użyj WSZYSTKICH): {_extracted_entities}" if _extracted_entities else ""
 
     # FIX #5: section count based on 250-300 words per section (was 200 → too many thin sections)
     n_sections = max(4, min(8, round(target_words / 280)))
@@ -1112,12 +1128,19 @@ async def generate_article(
     ]
     _author = random.choice(_author_pool_pl if lang_pl else _author_pool_en)
 
-    # SEO #62: publisher should be PBN domain, not client domain
+    # SEO #62 + SEO #118: publisher should be PBN domain, not client domain (avoids footprint)
+    # client_domain is the money site — publisher should be the PBN domain where article is hosted
     _publisher_name = "Publisher"
-    # Try pbn_domain first (autopilot passes it), fall back to client_domain
     _pub_src = client_domain
     if _pub_src and _pub_src.strip():
         _publisher_name = _pub_src.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+
+    # SEO #120: author URL for E-E-A-T (Google premiuje artykuły z profilem autora)
+    _author_slug = re.sub(r'[^a-z0-9]+', '-', _author["name"].lower()).strip('-')
+
+    # SEO #101: extract first image from content for Article schema image field
+    _first_img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE)
+    _article_image = _first_img_match.group(1) if _first_img_match else None
 
     article_ld = {
         "@context": "https://schema.org",
@@ -1130,6 +1153,7 @@ async def generate_article(
             "@type": "Person",
             "name": _author["name"],
             "description": _author["description"],
+            "url": f"/author/{_author_slug}",  # SEO #120: author page URL
         },
         "publisher": {
             "@type": "Organization",
@@ -1147,7 +1171,32 @@ async def generate_article(
         "articleSection": topic,
         "inLanguage": language,
     }
+    # SEO #101: add image to Article schema (required for Google rich results)
+    if _article_image:
+        article_ld["image"] = _article_image
+    # SEO #116: isPartOf for supporting pages linked to pillar
+    if pillar_page_url:
+        article_ld["isPartOf"] = {
+            "@type": "WebPage",
+            "url": pillar_page_url,
+            "name": pillar_page_anchor or topic,
+        }
     schema_blocks.append(article_ld)
+
+    # SEO #104: VideoObject schema for YouTube embeds in content
+    _yt_embeds = re.findall(r'(?:src=["\'])(?:https?://)?(?:www\.)?(?:youtube\.com/embed/|youtu\.be/)([a-zA-Z0-9_-]{11})', content)
+    if _yt_embeds:
+        for _yt_id in _yt_embeds[:2]:
+            video_ld = {
+                "@context": "https://schema.org",
+                "@type": "VideoObject",
+                "name": title[:110],
+                "description": excerpt[:155] if excerpt else topic,
+                "thumbnailUrl": f"https://img.youtube.com/vi/{_yt_id}/maxresdefault.jpg",
+                "uploadDate": _now_iso,
+                "embedUrl": f"https://www.youtube.com/embed/{_yt_id}",
+            }
+            schema_blocks.append(video_ld)
 
     # SEO #1: HowTo Schema for how-to intent articles
     _howto_patterns = ["jak ", "how to ", "krok po kroku", "step by step", "poradnik", "guide", "tutorial"]
@@ -1181,11 +1230,23 @@ async def generate_article(
     }
     schema_blocks.append(breadcrumb_ld)
 
-    # Inject all schema blocks
-    if schema_blocks:
+    # SEO #126: validate JSON-LD schema blocks before injection (catch malformed data)
+    _valid_schema_blocks = []
+    for _sb in schema_blocks:
+        try:
+            _json.dumps(_sb, ensure_ascii=False)  # test serialization
+            if "@context" in _sb and "@type" in _sb:
+                _valid_schema_blocks.append(_sb)
+            else:
+                logger.warning(f"[Article] Skipping schema block without @context/@type: {list(_sb.keys())}")
+        except (TypeError, ValueError) as _json_err:
+            logger.warning(f"[Article] Invalid JSON-LD schema skipped: {_json_err}")
+
+    # Inject all validated schema blocks
+    if _valid_schema_blocks:
         all_schema = "\n".join(
             f'<script type="application/ld+json">{_json.dumps(s, ensure_ascii=False)}</script>'
-            for s in schema_blocks
+            for s in _valid_schema_blocks
         )
         content = all_schema + "\n" + content
 

@@ -82,6 +82,25 @@ class DataForSEOClient:
             logger.warning(f"Failed to fetch content for {url}: {e}")
         return ""
 
+    @staticmethod
+    def _extract_kw(ki: dict, kp: dict, keyword_text: str) -> dict:
+        """Extract keyword data with monthly_searches trend (FIX #14) and SERP features (FIX #15)."""
+        monthly = ki.get("monthly_searches") or []
+        serp_info = ki.get("serp_info") or {}
+        serp_features = []
+        if isinstance(serp_info, dict):
+            si_items = serp_info.get("serp_item_types") or []
+            serp_features = [s for s in si_items if s not in ("organic", "paid")]
+        return {
+            "keyword": keyword_text,
+            "search_volume": ki.get("search_volume", 0) or 0,
+            "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
+            "cpc": ki.get("cpc", 0) or 0,
+            "intent": kp.get("search_intent", "informational") or "informational",
+            "monthly_searches": monthly[:6],  # last 6 months for trend detection
+            "serp_features": serp_features,
+        }
+
     async def keyword_suggestions(self, seed: str, location_code: int = 2616, language_code: str = "pl", limit: int = 200) -> list[dict]:
         """Get keyword suggestions from DataForSEO."""
         data = await self.request(
@@ -99,16 +118,12 @@ class DataForSEOClient:
             for result in task.get("result", []):
                 for item in result.get("items", []):
                     kw = item.get("keyword", "")
-                    ki = item.get("keyword_info", {})
-                    kp = item.get("keyword_properties", {})
                     if kw:
-                        keywords.append({
-                            "keyword": kw,
-                            "search_volume": ki.get("search_volume", 0) or 0,
-                            "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
-                            "cpc": ki.get("cpc", 0) or 0,
-                            "intent": kp.get("search_intent", "informational") or "informational",
-                        })
+                        keywords.append(self._extract_kw(
+                            item.get("keyword_info", {}),
+                            item.get("keyword_properties", {}),
+                            kw,
+                        ))
         return keywords
 
     async def serp_top10_full(self, keyword: str, location_code: int = 2616, language_code: str = "pl", _client: httpx.AsyncClient = None) -> dict:
@@ -167,20 +182,16 @@ class DataForSEOClient:
             for result in task.get("result", []):
                 for item in result.get("items", []):
                     kw = item.get("keyword", "")
-                    ki = item.get("keyword_info", {})
-                    kp = item.get("keyword_properties", {})
                     if kw:
-                        keywords.append({
-                            "keyword": kw,
-                            "search_volume": ki.get("search_volume", 0) or 0,
-                            "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
-                            "cpc": ki.get("cpc", 0) or 0,
-                            "intent": kp.get("search_intent", "informational") or "informational",
-                        })
+                        keywords.append(self._extract_kw(
+                            item.get("keyword_info", {}),
+                            item.get("keyword_properties", {}),
+                            kw,
+                        ))
         return keywords
 
     async def related_keywords(self, seed: str, location_code: int = 2616, language_code: str = "pl", limit: int = 200) -> list[dict]:
-        """Get semantically related keywords from DataForSEO."""
+        """Get semantically related keywords from DataForSEO. FIX #16: depth=2 for better coverage."""
         data = await self.request(
             "dataforseo_labs/google/related_keywords/live",
             [{
@@ -188,7 +199,7 @@ class DataForSEOClient:
                 "location_code": location_code,
                 "language_code": language_code,
                 "limit": limit,
-                "depth": 1,
+                "depth": 2,
             }]
         )
         keywords = []
@@ -197,16 +208,12 @@ class DataForSEOClient:
                 for item in result.get("items", []):
                     kw = item.get("keyword_data", {})
                     keyword_text = kw.get("keyword", "")
-                    ki = kw.get("keyword_info", {})
-                    kp = kw.get("keyword_properties", {})
                     if keyword_text:
-                        keywords.append({
-                            "keyword": keyword_text,
-                            "search_volume": ki.get("search_volume", 0) or 0,
-                            "keyword_difficulty": kp.get("keyword_difficulty", 0) or 0,
-                            "cpc": ki.get("cpc", 0) or 0,
-                            "intent": kp.get("search_intent", "informational") or "informational",
-                        })
+                        keywords.append(self._extract_kw(
+                            kw.get("keyword_info", {}),
+                            kw.get("keyword_properties", {}),
+                            keyword_text,
+                        ))
         return keywords
 
     async def keywords_for_site(self, target: str, location_code: int = 2616, language_code: str = "pl", limit: int = 100) -> list[dict]:

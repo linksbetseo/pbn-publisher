@@ -68,26 +68,40 @@ def _vary(base: int, delta: int = 3) -> int:
     """Add small random variation to px values for anti-footprint."""
     return base + random.randint(-delta, delta)
 
+
+def _vary_hex(hex_color: str, delta: int = 12) -> str:
+    """SEO #121: Add small random variation to hex colors for anti-footprint.
+    Shifts each RGB channel by ±delta to create visually similar but unique colors.
+    """
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) != 6:
+        return f"#{hex_color}"
+    r = max(0, min(255, int(hex_color[0:2], 16) + random.randint(-delta, delta)))
+    g = max(0, min(255, int(hex_color[2:4], 16) + random.randint(-delta, delta)))
+    b = max(0, min(255, int(hex_color[4:6], 16) + random.randint(-delta, delta)))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
 # Base styles — used via _s() which adds small random px variations per article
+# SEO #121: _vary_hex on all hex colors for anti-footprint (each article gets unique color scheme)
 _STYLES = {
-    "takeaways":  lambda: f'style="background:#f0f7ff;border-left:4px solid #1a73e8;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
-    "pro_tip":    lambda: f'style="background:#fff8e1;border-left:4px solid #f9a825;padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
-    "blockquote": lambda: f'style="background:#f8f9fa;border-left:4px solid #34a853;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;font-style:italic;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
-    "update":     lambda: f'style="background:#e8f5e9;border:1px solid #a5d6a7;padding:{_vary(10)}px {_vary(16)}px;margin:0 0 {_vary(24)}px 0;border-radius:{_vary(6)}px;font-size:0.9em;color:#2e7d32;"',
-    "stats":      lambda: f'style="background:#fafafa;border:1px solid #e0e0e0;padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
+    "takeaways":  lambda: f'style="background:{_vary_hex("f0f7ff")};border-left:4px solid {_vary_hex("1a73e8")};padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "pro_tip":    lambda: f'style="background:{_vary_hex("fff8e1")};border-left:4px solid {_vary_hex("f9a825")};padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "blockquote": lambda: f'style="background:{_vary_hex("f8f9fa")};border-left:4px solid {_vary_hex("34a853")};padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;font-style:italic;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "update":     lambda: f'style="background:{_vary_hex("e8f5e9")};border:1px solid {_vary_hex("a5d6a7")};padding:{_vary(10)}px {_vary(16)}px;margin:0 0 {_vary(24)}px 0;border-radius:{_vary(6)}px;font-size:0.9em;color:{_vary_hex("2e7d32")};"',
+    "stats":      lambda: f'style="background:{_vary_hex("fafafa")};border:1px solid {_vary_hex("e0e0e0")};padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
     "table":      lambda: f'style="width:100%;border-collapse:collapse;margin:{_vary(20)}px 0;"',
-    "th":         lambda: f'style="background:#1a73e8;color:#fff;padding:{_vary(10)}px {_vary(14)}px;text-align:left;"',
-    "td":         lambda: f'style="padding:{_vary(10)}px {_vary(14)}px;border-bottom:1px solid #e0e0e0;"',
-    "tr_alt":     lambda: 'style="background:#f8f9fa;"',
-    "checklist":  lambda: f'style="background:#fff;border:1px solid #e0e0e0;padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
-    "warning":    lambda: f'style="background:#fff3e0;border-left:4px solid #e65100;padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
-    "quick_ans":  lambda: f'style="background:#e8f5e9;border:2px solid #43a047;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
-    "did_know":   lambda: f'style="background:#f3e5f5;border-left:4px solid #7b1fa2;padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
-    "time":       lambda: f'style="background:#e3f2fd;border:1px solid #90caf9;padding:{_vary(12)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:{_vary(8)}px;display:flex;gap:{_vary(24)}px;flex-wrap:wrap;"',
-    "case":       lambda: f'style="background:#fafafa;border:1px solid #e0e0e0;border-top:4px solid #1a73e8;padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 0 {_vary(8)}px {_vary(8)}px;"',
-    "action":     lambda: f'style="background:#e8f5e9;border-left:4px solid #43a047;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
-    "methodology":lambda: f'style="background:#fce4ec;border-left:4px solid #c62828;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
-    "insight":    lambda: f'style="background:#e0f2f1;border:2px solid #00897b;padding:{_vary(18)}px {_vary(22)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
+    "th":         lambda: f'style="background:{_vary_hex("1a73e8")};color:#fff;padding:{_vary(10)}px {_vary(14)}px;text-align:left;"',
+    "td":         lambda: f'style="padding:{_vary(10)}px {_vary(14)}px;border-bottom:1px solid {_vary_hex("e0e0e0")};"',
+    "tr_alt":     lambda: f'style="background:{_vary_hex("f8f9fa")};"',
+    "checklist":  lambda: f'style="background:#fff;border:1px solid {_vary_hex("e0e0e0")};padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
+    "warning":    lambda: f'style="background:{_vary_hex("fff3e0")};border-left:4px solid {_vary_hex("e65100")};padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "quick_ans":  lambda: f'style="background:{_vary_hex("e8f5e9")};border:2px solid {_vary_hex("43a047")};padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
+    "did_know":   lambda: f'style="background:{_vary_hex("f3e5f5")};border-left:4px solid {_vary_hex("7b1fa2")};padding:{_vary(14)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "time":       lambda: f'style="background:{_vary_hex("e3f2fd")};border:1px solid {_vary_hex("90caf9")};padding:{_vary(12)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:{_vary(8)}px;display:flex;gap:{_vary(24)}px;flex-wrap:wrap;"',
+    "case":       lambda: f'style="background:{_vary_hex("fafafa")};border:1px solid {_vary_hex("e0e0e0")};border-top:4px solid {_vary_hex("1a73e8")};padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 0 {_vary(8)}px {_vary(8)}px;"',
+    "action":     lambda: f'style="background:{_vary_hex("e8f5e9")};border-left:4px solid {_vary_hex("43a047")};padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "methodology":lambda: f'style="background:{_vary_hex("fce4ec")};border-left:4px solid {_vary_hex("c62828")};padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "insight":    lambda: f'style="background:{_vary_hex("e0f2f1")};border:2px solid {_vary_hex("00897b")};padding:{_vary(18)}px {_vary(22)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
 }
 
 def _s(name: str) -> str:

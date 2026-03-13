@@ -225,13 +225,35 @@ function BulkTab() {
     setActionLog([])
     log(`Uruchamiam publikację dla ${selectedList.length} harmonogramów (${runLimit} artykuł/domena)...`)
     try {
-      const res = await api.post('/api/autopilot/bulk-run', { schedule_ids: selectedList, limit: Number(runLimit) }, { timeout: 600000 })
-      log(`✓ Łącznie: ${res.data.total_published} opublikowanych, ${res.data.total_failed} błędów`, 'ok')
-      res.data.results.forEach(r => {
-        if (r.skipped) log(`  ⚠ ${r.domain}: pominięto (${r.reason})`, 'warn')
-        else if (r.error) log(`  ✗ ${r.domain}: ${r.error}`, 'err')
-        else log(`  ✓ ${r.domain}: ${r.published} pub, ${r.failed} err`, r.failed > 0 ? 'warn' : 'ok')
-      })
+      const res = await api.post('/api/autopilot/bulk-run', { schedule_ids: selectedList, limit: Number(runLimit) })
+      const { job_id } = res.data
+      if (!job_id) throw new Error('Brak job_id w odpowiedzi')
+      log(`Job ${job_id.slice(0, 8)}... uruchomiony w tle`)
+      // Poll status every 5s
+      let lastResultsLen = 0
+      while (true) {
+        await new Promise(r => setTimeout(r, 5000))
+        const st = await api.get(`/api/autopilot/bulk-run-status/${job_id}`)
+        const data = st.data
+        const results = data.results || []
+        // Log new results as they come in
+        if (results.length > lastResultsLen) {
+          results.slice(lastResultsLen).forEach(r => {
+            if (r.skipped) log(`  ⚠ ${r.domain}: pominięto (${r.reason})`, 'warn')
+            else if (r.error) log(`  ✗ ${r.domain || r.schedule_id}: ${r.error}`, 'err')
+            else log(`  ✓ ${r.domain}: ${r.published} pub, ${r.failed} err`, r.failed > 0 ? 'warn' : 'ok')
+          })
+          lastResultsLen = results.length
+        }
+        if (data.done) {
+          if (data.error) {
+            log(`✗ Błąd: ${data.error}`, 'err')
+          } else {
+            log(`✓ Zakończono: ${data.published || 0} opublikowanych, ${data.failed || 0} błędów`, 'ok')
+          }
+          break
+        }
+      }
       await load()
     } catch (e) {
       log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')

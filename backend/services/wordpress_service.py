@@ -185,6 +185,9 @@ async def _upload_image(
                 )
             except Exception:
                 pass
+        # SEO #109: set srcset sizes hint via WP image meta (WP generates srcset automatically from uploaded sizes)
+        # No extra work needed — WP REST API auto-generates srcset from uploaded media.
+        # The key is uploading high-res images (1792x1024 from DALL-E) so WP has material to create multiple sizes.
         return media_id, source_url
     return None, ""
 
@@ -281,12 +284,20 @@ async def _detect_seo_plugin(
     _seo_plugin_cache[base_url] = plugin
     return plugin
 
-async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
-    """Notify search engines about new/updated content via IndexNow + Bing sitemap ping."""
+async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "", extra_urls: list[str] = None) -> None:
+    """Notify search engines about new/updated content via IndexNow + Bing sitemap ping.
+    SEO #110: supports batch URL submission via extra_urls parameter.
+    """
     try:
         async with httpx.AsyncClient(timeout=8, follow_redirects=True) as ping_client:
             # IndexNow — instant indexing for Bing, Yandex, Seznam, Naver
+            # SEO #110: batch URL list (post_url + any extra_urls)
+            _url_list = []
             if post_url:
+                _url_list.append(post_url)
+            if extra_urls:
+                _url_list.extend([u for u in extra_urls if u and u not in _url_list])
+            if _url_list:
                 clean_domain = base_url.replace("https://", "").replace("http://", "").rstrip("/")
                 indexnow_key = clean_domain.replace(".", "")[:32]
                 # Validate key file exists on domain (required by IndexNow protocol)
@@ -307,10 +318,11 @@ async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
                         f"[IndexNow] Key file missing or invalid at {key_file_url} — "
                         f"create a file '{indexnow_key}.txt' containing '{indexnow_key}' in WP root"
                     )
+                # SEO #110: batch all URLs in one IndexNow submission (up to 10k per spec)
                 indexnow_payload = {
                     "host": clean_domain,
                     "key": indexnow_key,
-                    "urlList": [post_url],
+                    "urlList": _url_list[:100],
                 }
                 for endpoint in [
                     "https://api.indexnow.org/indexnow",
@@ -480,6 +492,8 @@ async def publish_post(
                     if _is_aioseo:
                         meta["_aioseop_description"] = excerpt[:160]
                         meta["_aioseop_title"] = title
+                        # SEO #106: og:type for AIOSEO (defaults to website, should be article)
+                        meta["_aioseop_opengraph_settings"] = '{"object_type":"article"}'
                     # SEO #8: OG article metadata for Facebook/Pinterest
                     meta["article:published_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
                     meta["article:section"] = keyword or title[:50]
@@ -494,6 +508,15 @@ async def publish_post(
                         if tags:
                             kw_with_lsi = ",".join([keyword] + list(tags[:4]))
                         meta["rank_math_focus_keyword"] = kw_with_lsi
+                        # SEO #107: reading_time meta for Rank Math (improves snippet + schema)
+                        _word_count_est = len(re.sub(r'<[^>]+>', ' ', content or '').split())
+                        _reading_time = max(1, _word_count_est // 250)
+                        meta["rank_math_readtime"] = str(_reading_time)
+                    # SEO #122: robots meta on post level for max snippet/image preview
+                    if _is_rankmath:
+                        meta["rank_math_robots"] = ["index", "follow", "max-snippet:-1", "max-image-preview:large", "max-video-preview:-1"]
+                    if _is_yoast:
+                        meta["_yoast_wpseo_meta-robots-adv"] = "max-snippet:-1,max-image-preview:large,max-video-preview:-1"
                 # OG image from uploaded featured image
                 _og_img = og_image_url or f"{base_url}/wp-content/uploads/site-og-default.jpg"
                 if _is_yoast:

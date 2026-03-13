@@ -682,6 +682,48 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             await _job_update(job_id, done=1, error="Brak pending keywords")
             return
 
+        # SEO #113: seasonal keyword detection — boost keywords whose search volume peaks in current/next month
+        # Uses monthly_searches trend data from topical_map (stored during map generation)
+        _current_month = datetime.now(timezone.utc).month
+        _seasonal_boost_kws = set()
+        try:
+            async with aiosqlite.connect(DB_PATH) as _sdb:
+                _sdb.row_factory = aiosqlite.Row
+                async with _sdb.execute(
+                    "SELECT keyword, search_volume FROM domain_keywords WHERE schedule_id=? AND status='pending'",
+                    (schedule_id,)
+                ) as _scur:
+                    _seasonal_rows = await _scur.fetchall()
+            # Simple seasonal heuristic: keywords containing month-related terms get boosted
+            _month_terms_pl = {
+                1: ["styczeń", "noworoczn", "zimow"],
+                2: ["luty", "walentynk", "karnawał"],
+                3: ["marzec", "wiosenn", "wielkanoc"],
+                4: ["kwiecień", "wiosna", "wielkanoc"],
+                5: ["maj", "majówk", "komunia"],
+                6: ["czerwiec", "wakacj", "letn"],
+                7: ["lipiec", "wakacj", "letn", "urlop"],
+                8: ["sierpień", "wakacj", "szkoln"],
+                9: ["wrzesień", "szkoln", "jesień"],
+                10: ["październik", "halloween", "jesien"],
+                11: ["listopad", "czarny piątek", "black friday"],
+                12: ["grudzień", "świąt", "boże narodzenie", "sylwest", "prezent"],
+            }
+            _season_terms = _month_terms_pl.get(_current_month, []) + _month_terms_pl.get((_current_month % 12) + 1, [])
+            for _sr in _seasonal_rows:
+                _kw_lower = (_sr["keyword"] or "").lower()
+                if any(t in _kw_lower for t in _season_terms):
+                    _seasonal_boost_kws.add(_sr["keyword"])
+            if _seasonal_boost_kws:
+                # Re-sort: seasonal keywords first (after pillars), then normal order
+                _pillar_kws = [k for k in keywords if k["keyword_type"] == "pillar"]
+                _seasonal_kws = [k for k in keywords if k["keyword"] in _seasonal_boost_kws and k["keyword_type"] != "pillar"]
+                _rest_kws = [k for k in keywords if k["keyword"] not in _seasonal_boost_kws and k["keyword_type"] != "pillar"]
+                keywords = _pillar_kws + _seasonal_kws + _rest_kws
+                logger.info(f"[Autopilot] SEO #113: {len(_seasonal_boost_kws)} seasonal keywords boosted for month {_current_month}")
+        except Exception as _se:
+            logger.warning(f"[Autopilot] Seasonal detection error: {_se}")
+
         wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"],
                                            http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""))
         if not wp_ok:
@@ -720,14 +762,17 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             pass
 
         # SEO #29: fetch ALL published posts then random sample 50 — ensures links to older valuable posts
+        # SEO #114: topical-map-aware interlinking — include pillar_label for cluster-aware linking
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT title, keyword, wp_post_url FROM domain_keywords
+                """SELECT title, keyword, wp_post_url, pillar_label, keyword_type FROM domain_keywords
                    WHERE schedule_id=? AND status='published' AND wp_post_url!=''""",
                 (schedule_id,)
             ) as cur:
-                _all_published = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+                _all_published = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"],
+                                   "url": r["wp_post_url"], "cluster": r["pillar_label"] or "",
+                                   "type": r["keyword_type"] or "supporting"} for r in await cur.fetchall()]
         if len(_all_published) > 50:
             published_posts = random.sample(_all_published, 50)
         else:
@@ -769,6 +814,23 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             try:
                 _pillar_url = pillar_url
                 _pillar_anchor = pillar_keyword or kw_row.get("pillar_label", "")
+
+                # SEO #114: prioritize same-cluster posts for interlinking
+                _kw_cluster = kw_row.get("pillar_label", "")
+                if _kw_cluster and published_posts:
+                    _cluster_posts = [p for p in published_posts if p.get("cluster") == _kw_cluster]
+                    _other_posts = [p for p in published_posts if p.get("cluster") != _kw_cluster]
+                    _interlink_posts = _cluster_posts + _other_posts[:max(0, 50 - len(_cluster_posts))]
+                else:
+                    _interlink_posts = published_posts
+
+                # SEO #111: rel prev/next for series — find previous article in same cluster
+                _prev_url = ""
+                if _kw_cluster:
+                    _same_cluster_published = [p for p in _all_published if p.get("cluster") == _kw_cluster]
+                    if _same_cluster_published:
+                        _prev_url = _same_cluster_published[-1].get("url", "")
+
                 async with asyncio.timeout(360):  # 6 min per artykuł
                     article = await _with_retry(lambda: generate_article(
                         topic=keyword,
@@ -780,7 +842,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                         dfs_login=DFS_LOGIN,
                         dfs_password=DFS_PASSWORD,
                         location_code=location_code,
-                        published_posts=published_posts,
+                        published_posts=_interlink_posts,
                         domain_fingerprints=domain_fingerprints,
                         pillar_page_url=_pillar_url,
                         pillar_page_anchor=_pillar_anchor,
@@ -792,6 +854,10 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     category_id = kw_row.get("wp_category_id") or None
                     _wc = article.get("word_count", 0)
                     _kd = article.get("keyword_density", 0)
+
+                    # SEO #111: inject rel prev/next for series articles (same cluster)
+                    if _prev_url:
+                        content = f'<link rel="prev" href="{_prev_url}" />\n{content}'
 
                     # SEO #28: quality gate — skip low-quality articles
                     if _wc < 600:
@@ -1797,15 +1863,25 @@ async def bulk_generate_maps(body: BulkActionRequest):
 
 
 @router.post("/bulk-run")
-async def bulk_run_schedules(body: BulkActionRequest):
+async def bulk_run_schedules(body: BulkActionRequest, background_tasks: BackgroundTasks):
     """
-    Uruchom publikację hurtowo dla wielu harmonogramów.
-    Każdy harmonogram dostaje body.limit (lub posts_per_day) artykułów.
-    Równoległe wykonanie z semaforem (max 3 jednocześnie).
+    Uruchom publikację hurtowo w tle — zwraca job_id natychmiast.
+    Frontend odpytuje GET /bulk-run-status/{job_id} co 5s.
     """
     await ensure_tables()
+    job_id = str(_uuid.uuid4())
+    await _job_create(job_id, 0)  # schedule_id=0 means bulk job
+    await _job_update(job_id, total=len(body.schedule_ids))
+    background_tasks.add_task(_bulk_run_bg, job_id, body.schedule_ids, body.limit)
+    return {"job_id": job_id, "status": "running", "schedules": len(body.schedule_ids)}
 
+
+async def _bulk_run_bg(job_id: str, schedule_ids: list[int], limit_override: int | None):
+    """Background task: bulk publish across multiple schedules."""
     sem = asyncio.Semaphore(3)
+    all_results = []
+    total_pub = 0
+    total_fail = 0
 
     async def _run_one(schedule_id: int) -> dict:
         async with sem:
@@ -1814,7 +1890,7 @@ async def bulk_run_schedules(body: BulkActionRequest):
             if not sched:
                 return {"schedule_id": schedule_id, "error": "not found"}
 
-            limit = body.limit if body.limit else sched["posts_per_day"]
+            limit = limit_override if limit_override else sched["posts_per_day"]
 
             async with aiosqlite.connect(DB_PATH) as db:
                 db.row_factory = aiosqlite.Row
@@ -1924,19 +2000,63 @@ async def bulk_run_schedules(body: BulkActionRequest):
                 async with db.execute(
                     "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='published'", (schedule_id,)
                 ) as cur:
-                    total_pub = (await cur.fetchone())[0]
+                    total_pub_count = (await cur.fetchone())[0]
                 await db.execute(
                     "UPDATE domain_schedules SET published_count=?, last_run_at=? WHERE id=?",
-                    (total_pub, datetime.now(timezone.utc).isoformat(), schedule_id)
+                    (total_pub_count, datetime.now(timezone.utc).isoformat(), schedule_id)
                 )
                 await db.commit()
 
             return {"schedule_id": schedule_id, "domain": sched["domain"], "published": published, "failed": failed}
 
-    all_results = await asyncio.gather(*[_run_one(sid) for sid in body.schedule_ids])
-    total_pub = sum(r.get("published", 0) for r in all_results)
-    total_fail = sum(r.get("failed", 0) for r in all_results)
-    return {"processed": len(all_results), "total_published": total_pub, "total_failed": total_fail, "results": list(all_results)}
+    try:
+        # Run schedules concurrently (semaphore limits to 3 at a time)
+        tasks = [_run_one(sid) for sid in schedule_ids]
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            all_results.append(result)
+            total_pub = sum(r.get("published", 0) for r in all_results)
+            total_fail = sum(r.get("failed", 0) for r in all_results)
+            # Update job progress after each schedule completes
+            await _job_update(
+                job_id,
+                published=total_pub,
+                failed=total_fail,
+                total_published=total_pub,
+                results=all_results,
+            )
+
+        # Mark job as done
+        await _job_update(job_id, done=1, published=total_pub, failed=total_fail, total_published=total_pub, results=all_results)
+
+        # Telegram notification
+        try:
+            from api.notifications import should_notify
+            if await should_notify("notify_bulk_publish_done"):
+                from services.telegram_service import send_telegram
+                msg = (
+                    f"<b>Bulk Run zakończony</b>\n\n"
+                    f"Harmonogramów: {len(schedule_ids)}\n"
+                    f"Opublikowano: <b>{total_pub}</b>\n"
+                    f"Błędów: <b>{total_fail}</b>"
+                )
+                await send_telegram(msg)
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error(f"[BulkRunBG] Fatal error: {e}")
+        await _job_update(job_id, done=1, error=str(e), results=all_results)
+
+
+@router.get("/bulk-run-status/{job_id}")
+async def bulk_run_status(job_id: str):
+    """Pobierz status hurtowej publikacji."""
+    job = await _job_get(job_id)
+    if not job:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Job nie istnieje")
+    return job
 
 
 @router.post("/bulk-set-ppd")

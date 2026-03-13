@@ -420,6 +420,15 @@ _rate_limit_last_cleanup = _time.time()
 _RATE_LIMIT_STRICT = {"/api/publish/post": 20, "/api/content-writer/generate": 20, "/api/autopilot/run": 30}
 
 
+# SEO #124: X-Robots-Tag noindex on API responses (prevent search engines from indexing API endpoints)
+@app.middleware("http")
+async def robots_tag_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api"):
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     global _rate_limit_last_cleanup
@@ -467,7 +476,7 @@ async def basic_auth_middleware(request: Request, call_next):
     # Skip auth for health check and static assets
     path = request.url.path
     # Pass-through: health, static assets, login endpoint, and all frontend SPA routes
-    if (path in ("/health", "/", "/api/auth/login", "/api/news-portals/debug-drafts")
+    if (path in ("/health", "/", "/api/auth/login")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -528,7 +537,24 @@ async def health():
 # Serve frontend static files (after API routes)
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend_dist")
 if os.path.exists(FRONTEND_DIST):
-    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+    # SEO #123: long cache headers on /assets/* (Vite hashed filenames = safe to cache forever)
+    from starlette.staticfiles import StaticFiles as _CachedStatic
+
+    class CachedStaticFiles(_CachedStatic):
+        """StaticFiles with immutable cache headers for hashed assets."""
+        async def __call__(self, scope, receive, send):
+            async def _send_with_cache(message):
+                if message.get("type") == "http.response.start":
+                    headers = dict(message.get("headers", []))
+                    # Add 1-year cache + immutable for hashed Vite assets
+                    cache_header = b"public, max-age=31536000, immutable"
+                    existing_headers = list(message.get("headers", []))
+                    existing_headers.append((b"cache-control", cache_header))
+                    message["headers"] = existing_headers
+                await send(message)
+            await super().__call__(scope, receive, _send_with_cache)
+
+    app.mount("/assets", CachedStaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
 
     _index_path = os.path.join(FRONTEND_DIST, "index.html")
     _no_cache_headers = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}

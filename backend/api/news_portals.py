@@ -567,25 +567,6 @@ async def list_portals():
     return [dict(r) for r in rows]
 
 
-@router.get("/debug-drafts")
-async def debug_drafts():
-    """Debug: show draft statuses and wp_post_url."""
-    await ensure_tables()
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT id, portal_id, status, wp_post_url, published_at,
-                      SUBSTR(title, 1, 60) as title_short
-               FROM news_drafts ORDER BY id DESC LIMIT 30"""
-        ) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
-        async with db.execute(
-            "SELECT status, COUNT(*) as cnt FROM news_drafts GROUP BY status"
-        ) as cur:
-            stats = {r["status"]: r["cnt"] for r in await cur.fetchall()}
-    return {"stats": stats, "recent": rows}
-
-
 @router.post("/")
 async def create_portal(body: PortalCreate):
     """Create a new news portal."""

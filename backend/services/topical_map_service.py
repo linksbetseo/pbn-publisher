@@ -18,6 +18,8 @@ Implementation:
 - Outlier pruning: keywords with very low coherence (high SiteRadius) are dropped
 - Cluster merging: small, semantically similar clusters are merged (preserves SiteFocus)
 - Pillar selection: highest-volume keyword WITHIN coherence threshold (not just raw volume)
+
+FIX-30: comprehensive rewrite addressing 30 identified issues.
 """
 import asyncio
 import hashlib
@@ -26,6 +28,7 @@ import logging
 import re
 import time
 import unicodedata
+import zlib
 from collections import Counter, defaultdict
 
 import aiosqlite
@@ -65,19 +68,34 @@ async def _map_cache_get(key: str):
             ) as cur:
                 row = await cur.fetchone()
         if row:
-            return _json.loads(row[0])
+            raw = row[0]
+            # FIX #29: support both compressed (bytes) and legacy plain JSON
+            if isinstance(raw, bytes):
+                try:
+                    raw = zlib.decompress(raw).decode("utf-8")
+                except zlib.error:
+                    raw = raw.decode("utf-8")
+            return _json.loads(raw)
     except Exception:
         pass
     return None
 
 
 async def _map_cache_set(key: str, data: dict) -> None:
+    """Store cache entry with zlib compression (FIX #29) and clean expired (FIX #28)."""
     await _ensure_map_cache_table()
     try:
+        json_str = _json.dumps(data, ensure_ascii=False)
+        # FIX #29: compress JSON before storing — typically 3-5x smaller
+        compressed = zlib.compress(json_str.encode("utf-8"), level=6)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO topical_map_cache (cache_key, data_json, expires_at) VALUES (?,?,?)",
-                (key, _json.dumps(data, ensure_ascii=False), time.time() + _MAP_CACHE_TTL)
+                (key, compressed, time.time() + _MAP_CACHE_TTL)
+            )
+            # FIX #28: clean expired cache entries to prevent unbounded growth
+            await db.execute(
+                "DELETE FROM topical_map_cache WHERE expires_at < ?", (time.time(),)
             )
             await db.commit()
     except Exception as e:
@@ -86,6 +104,7 @@ async def _map_cache_set(key: str, data: dict) -> None:
 
 # ── Stopwords ──────────────────────────────────────────────────────────────────
 
+# FIX #3: expanded stopwords with pronouns, numerals, demonstratives
 STOP_WORDS = {
     "i", "w", "z", "na", "do", "po", "o", "a", "się", "nie", "jak", "co",
     "czy", "że", "to", "jest", "są", "dla", "przez", "przy", "za", "od",
@@ -93,14 +112,21 @@ STOP_WORDS = {
     "który", "która", "które", "tego", "tej", "ten", "ta", "te", "być",
     "mieć", "móc", "by", "też", "już", "jeszcze", "tylko", "właśnie",
     "np", "tzw", "itp", "wg",
+    # pronouns / demonstratives
+    "tym", "tych", "ich", "jego", "jej", "sam", "sama", "sobie", "swój",
+    "każdy", "każda", "inne", "innych", "inny", "inna", "wszystkie", "wszystko",
+    # numerals
+    "jeden", "dwa", "trzy", "cztery", "pięć",
+    # misc function words
+    "więc", "jednak", "ponad", "między", "przed", "nad", "pod", "temu",
+    "bardzo", "może", "nawet", "gdyż", "choć", "mimo", "aby", "żeby",
+    "sie",  # ascii-folded version of "się"
 }
 
 
 # ── Text helpers ───────────────────────────────────────────────────────────────
 
 def _ascii_fold(text: str) -> str:
-    # FIX #54: use NFKD normalization (decomposes ligatures like ﬁ→fi, ﬂ→fl, ½→1/2)
-    # NFD only decomposes canonical forms — NFKD also handles compatibility forms
     normalized = unicodedata.normalize("NFKD", text)
     return "".join(c for c in normalized if unicodedata.category(c) != "Mn").lower()
 
@@ -109,23 +135,38 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+# FIX #4: ó→o normalization for Polish alternation (urlop/urlopów)
+def _normalize_pl(token: str) -> str:
+    """Normalize common Polish vowel alternations before stemming."""
+    return token.replace("ó", "o").replace("ą", "a").replace("ę", "e")
+
+
+# FIX #1: removed dangerous prefix stripping, only strip "nie" (negation) which is safe
+# FIX #2: added adjectival suffixes -owy/-owa/-owe/-ski/-ska/-czny/-czna/-ny/-na
 def _stem_pl(token: str) -> str:
-    """Naive Polish suffix stripper — handles most common case inflections.
-    SEO #23: also handles common prefixes and compound word splits."""
-    # FIX #27: expanded suffix list for better Polish stemming (added common noun/verb endings)
-    # SEO #23: strip common prefixes first for better matching
-    _core = token
-    for prefix in ("nie", "prze", "za", "na", "pod", "roz", "wy", "do"):
-        if _core.startswith(prefix) and len(_core) - len(prefix) >= 4:
-            _core_candidate = _core[len(prefix):]
-            # Only strip prefix if remainder is long enough to be meaningful
-            if len(_core_candidate) >= 4:
-                _core = _core_candidate
-                break
-    for suffix in ("owania", "owego", "owej", "owym", "nych", "nego", "nemu",
-                   "eniu", "anie", "enie", "ości",
-                   "ach", "ami", "iem", "ego", "emu", "owi",
-                   "ie", "ej", "ów", "ą", "ę"):
+    """Polish suffix stripper — handles case inflections and adjectival forms."""
+    _core = _normalize_pl(token)
+
+    # Only strip "nie" prefix (negation) — other prefixes are too destructive
+    # "niebezpieczny" → "bezpieczny", but "naprawa" stays "naprawa"
+    if _core.startswith("nie") and len(_core) >= 7:
+        _core = _core[3:]
+
+    for suffix in (
+        # nominal/verbal long suffixes
+        "owania", "owego", "owej", "owym", "owych",
+        "nych", "nego", "nemu",
+        "eniu", "anie", "enie", "osci",
+        # adjectival suffixes (FIX #2)
+        "iczne", "iczny", "iczna", "owego", "cznym", "cznej",
+        "czny", "czna", "czne",
+        "skim", "skie", "skiej",
+        "owym", "owej", "owe", "owy", "owa",
+        "ski", "ska",
+        # case suffixes
+        "ach", "ami", "iem", "ego", "emu", "owi",
+        "ie", "ej", "ow", "om",
+    ):
         if _core.endswith(suffix) and len(_core) - len(suffix) >= 3:
             return _core[:-len(suffix)]
     return _core
@@ -153,28 +194,24 @@ def _seed_tokens(seed: str) -> set:
 
 # ── SiteRadius proxy: token coherence score ───────────────────────────────────
 
+# FIX #10: coherence now uses weighted overlap that doesn't penalize long-tail keywords
 def _coherence_score(keyword: str, seed_toks: set, seed: str) -> float:
     """
     Measures semantic proximity of a keyword to the seed (SiteRadius proxy).
-    Score in [0, 1]:
-      1.0 = keyword is fully within the seed's semantic field (low SiteRadius)
-      0.0 = keyword is a semantic outlier (high SiteRadius → should be pruned)
-
-    Formula:
-      overlap_ratio  = |intersection(kw_tokens, seed_tokens)| / |kw_tokens|
-      containment    = bonus if seed is contained within keyword (compound queries)
-      substring_bonus = partial credit for substring matches
-      result = weighted combination
+    FIX #10: uses seed_coverage (how much of seed is in kw) instead of kw_coverage
+    (how much of kw is seed). This stops penalizing informative long-tail phrases.
     """
     kw_toks = set(_tokenize(keyword))
-    if not kw_toks:
+    if not kw_toks or not seed_toks:
         return 0.0
     overlap = len(kw_toks & seed_toks)
-    overlap_ratio = overlap / len(kw_toks)
+    # How much of the SEED is covered by this keyword (not the other way around)
+    seed_coverage = overlap / len(seed_toks)
+    # Bonus for extra relevant tokens (long tail is fine if seed is covered)
+    length_bonus = min(0.15, 0.03 * len(kw_toks - seed_toks)) if seed_coverage > 0.5 else 0.0
     # Partial credit: seed words appearing as substrings in keyword tokens
-    substring_bonus = 0.2 if any(st in _ascii_fold(keyword) for st in seed_toks if len(st) > 3) else 0.0
+    substring_bonus = 0.15 if any(st in _ascii_fold(keyword) for st in seed_toks if len(st) > 3) else 0.0
     # Containment bonus: if the seed phrase is fully contained in the keyword
-    # e.g. seed="prawo pracy" → keyword="prawo pracy urlop" → high relevance
     containment_bonus = 0.0
     seed_folded = _ascii_fold(seed)
     kw_folded = _ascii_fold(keyword)
@@ -182,20 +219,16 @@ def _coherence_score(keyword: str, seed_toks: set, seed: str) -> float:
         containment_bonus = 0.3
     elif all(st in kw_folded for st in seed_folded.split() if len(st) > 2):
         containment_bonus = 0.15
-    score = min(1.0, overlap_ratio + substring_bonus + containment_bonus)
+    score = min(1.0, seed_coverage + substring_bonus + containment_bonus + length_bonus)
     return round(score, 3)
 
 
 def _differentiators(keyword: str, seed_toks: set) -> list[str]:
     """
     Tokens and bigrams that DIFFERENTIATE the keyword from the seed.
-    Returns both single tokens and consecutive 2-token bigrams.
-    Seed='prawo pracy', keyword='prawo pracy urlop macierzyński' → ['urlop', 'macierzynski', 'urlop macierzynski']
-    Bigrams produce more precise cluster anchors (e.g. 'urlop macierzynski' vs just 'urlop').
     """
     tokens = _tokenize(keyword)
     diff_tokens = [t for t in tokens if t not in seed_toks]
-    # Build bigrams from consecutive diff tokens in original order
     bigrams = []
     for i in range(len(tokens) - 1):
         a, b = tokens[i], tokens[i + 1]
@@ -209,11 +242,6 @@ def _differentiators(keyword: str, seed_toks: set) -> list[str]:
 def _cluster_focus_score(kw_list: list[dict], anchor: str) -> float:
     """
     Measures how tight (focused) a cluster is around its anchor (SiteFocus proxy).
-    High score = all keywords share the same differentiator → high topical focus.
-    Low score = keywords are loosely related → cluster is diluting SiteFocus.
-    Supports both single-token and bigram anchors (e.g. 'urlop macierzynski').
-
-    Returns score in [0, 1].
     """
     if not kw_list:
         return 0.0
@@ -233,23 +261,23 @@ def _cluster(
     keywords: list[dict],
     seed: str,
     max_clusters: int = 8,
-    min_coherence: float = 0.0,  # SiteRadius cutoff — keywords below this are dropped
+    min_coherence: float = 0.0,
 ) -> list[dict]:
     """
     Groups keywords into topical clusters (pillar pages).
-
-    SiteFocus strategy:
-    - Only keep keywords with coherence >= min_coherence (prune high-SiteRadius outliers)
-    - Score clusters by (keyword_count * focus_score * total_volume) — favours tight clusters
-    - Merge clusters that are too similar (prefix overlap > 4 chars) to avoid duplication
-    - Unassigned keywords go to their best-matching cluster by token overlap (not just biggest)
+    FIX #5: lowered singleton threshold to 1
+    FIX #6: zero-overlap keywords go to highest-coherence cluster, not largest
+    FIX #7: tiny cluster merge considers volume, not just count
+    FIX #8: Jaccard always uses stemmed tokens, never raw chars
+    FIX #9: focus_score recalculated after merge
+    FIX #30: uses pre-computed coherence from kw dict instead of recalculating
     """
     seed_toks = _seed_tokens(seed)
 
-    # SiteRadius filter: remove semantic outliers (coherence < threshold)
+    # FIX #30: SiteRadius filter uses pre-computed coherence
     if min_coherence > 0:
         before = len(keywords)
-        keywords = [k for k in keywords if _coherence_score(k["keyword"], seed_toks, seed) >= min_coherence]
+        keywords = [k for k in keywords if k.get("coherence", 0) >= min_coherence]
         pruned = before - len(keywords)
         if pruned:
             logger.info(f"[TopicalMap] SiteRadius pruning: removed {pruned} outlier keywords (coherence < {min_coherence})")
@@ -264,33 +292,38 @@ def _cluster(
         for d in diffs:
             token_to_kws[d].append(kw)
 
-    # Score each differentiator (token or bigram) combining:
-    # - breadth (how many keywords use it) → SiteFocus: more coverage = better
-    # - volume (total search demand) → commercial value
-    # - cluster_focus_score → how tight the cluster is (SiteFocus proxy)
-    # Bigrams get a 1.5x bonus because they produce more precise clusters
+    # FIX #11: normalize volume by median instead of magic /500
+    all_volumes = [k.get("search_volume", 0) for k in keywords]
+    all_volumes.sort()
+    median_vol = all_volumes[len(all_volumes) // 2] if all_volumes else 100
+    median_vol = max(median_vol, 10)  # floor
+
     token_scores: dict[str, float] = {}
     for token, kws in token_to_kws.items():
-        if len(kws) < 2:
+        # FIX #5: allow singletons with high volume (was < 2, now < 1 never triggers; instead score them lower)
+        if len(kws) < 1:
             continue
         total_vol = sum(k.get("search_volume", 0) for k in kws)
         focus = _cluster_focus_score(kws, token)
-        # SiteFocus-weighted score: focus score amplifies well-defined clusters
-        base_score = (len(kws) * 2 + total_vol / 500) * (0.5 + focus)
-        # Bigram bonus: multi-token anchors are more specific → better SiteFocus
+        # FIX #11: volume normalized to median
+        base_score = (len(kws) * 2 + total_vol / median_vol) * (0.5 + focus)
+        # Singleton penalty: single-keyword anchors score lower
+        if len(kws) == 1:
+            base_score *= 0.3
         bigram_bonus = 1.5 if " " in token else 1.0
         token_scores[token] = base_score * bigram_bonus
 
-    # Select top anchors, deduplicate via Jaccard similarity (not prefix-4)
     top_tokens = sorted(token_scores, key=lambda x: token_scores[x], reverse=True)
 
     selected_anchors: list[str] = []
     clusters: dict[str, list] = {}
 
+    # FIX #8: Jaccard always on stemmed tokens, never on raw chars
     def _jaccard(a: str, b: str) -> float:
-        # FIX #55: Jaccard on tokens (split by space) instead of chars for multi-word anchors
-        sa = set(a.split()) if " " in a else set(a)
-        sb = set(b.split()) if " " in b else set(b)
+        sa = set(_tokenize(a))
+        sb = set(_tokenize(b))
+        if not sa or not sb:
+            return 0.0
         inter = len(sa & sb)
         union = len(sa | sb)
         return inter / union if union else 0.0
@@ -298,18 +331,15 @@ def _cluster(
     for token in top_tokens:
         if len(selected_anchors) >= max_clusters:
             break
-        # Check similarity: Jaccard on chars OR bigram subsumes single token
         too_similar = False
         for a in selected_anchors:
-            # Bigram subsumption: "urlop macierzynski" subsumes "urlop"
             if " " in token and a in token.split():
                 too_similar = True
                 break
             if " " in a and token in a.split():
                 too_similar = True
                 break
-            # Jaccard > 0.6 = too similar (covers inflections: urlop/urlopów, prawo/prawa)
-            if len(token) > 3 and len(a) > 3 and _jaccard(token, a) > 0.6:
+            if _jaccard(token, a) > 0.6:
                 too_similar = True
                 break
         if too_similar:
@@ -318,19 +348,17 @@ def _cluster(
         clusters[token] = []
 
     # Assign each keyword to best-matching cluster
-    # For bigram anchors: check if all bigram tokens appear in keyword's differentiators
     assigned: set[str] = set()
     for kw in sorted(keywords, key=lambda x: x.get("search_volume", 0), reverse=True):
         kw_text = kw["keyword"]
         if kw_text in assigned:
             continue
         diffs = kw_to_diffs.get(kw_text, [])
-        diff_tokens_set = set(t for t in diffs if " " not in t)  # only single tokens
+        diff_tokens_set = set(t for t in diffs if " " not in t)
         best_anchor = None
         best_score = -1
         for anchor in selected_anchors:
             if " " in anchor:
-                # Bigram anchor: all parts must be in diff tokens
                 parts = anchor.split()
                 if all(p in diff_tokens_set for p in parts):
                     score = token_scores.get(anchor, 0)
@@ -338,7 +366,6 @@ def _cluster(
                         best_score = score
                         best_anchor = anchor
             else:
-                # Single token anchor
                 if anchor in diffs:
                     score = token_scores.get(anchor, 0)
                     if score > best_score:
@@ -348,13 +375,18 @@ def _cluster(
             clusters[best_anchor].append(kw)
             assigned.add(kw_text)
 
-    # Unassigned keywords → best-matching cluster by token overlap
-    # If zero overlap with all anchors → assign to largest cluster (safest fallback)
+    # FIX #6: unassigned keywords go to highest-coherence cluster, not largest
     unassigned = [kw for kw in keywords if kw["keyword"] not in assigned]
     if unassigned and selected_anchors:
         kw_toks_cache = {kw["keyword"]: set(_tokenize(kw["keyword"])) for kw in unassigned}
         anchor_toks_cache = {a: set(_tokenize(a)) for a in selected_anchors}
-        largest_anchor = max(selected_anchors, key=lambda a: len(clusters[a]))
+        # Fallback: cluster with highest avg coherence (not largest)
+        avg_coherence_by_anchor = {}
+        for a in selected_anchors:
+            coh_vals = [k.get("coherence", 0) for k in clusters[a]]
+            avg_coherence_by_anchor[a] = sum(coh_vals) / len(coh_vals) if coh_vals else 0
+        best_coherence_anchor = max(selected_anchors, key=lambda a: avg_coherence_by_anchor[a])
+
         for kw in unassigned:
             kw_toks = kw_toks_cache[kw["keyword"]]
             overlaps = {a: len(kw_toks & anchor_toks_cache[a]) for a in selected_anchors}
@@ -362,32 +394,38 @@ def _cluster(
             if max_overlap > 0:
                 best_a = max(selected_anchors, key=lambda a: overlaps[a])
             else:
-                best_a = largest_anchor  # zero overlap → safest fallback
+                best_a = best_coherence_anchor
             clusters[best_a].append(kw)
 
-    # FIX #56: merge tiny clusters into BEST-MATCHING cluster by token overlap (was always merging into largest)
-    MIN_CLUSTER_SIZE = 3
+    # FIX #7: merge considers volume, not just count
+    # FIX #9: focus_score recalculated after merge
+    MIN_CLUSTER_VOL = 50  # volume threshold instead of count
+    MIN_CLUSTER_SIZE = 2
     if len(clusters) > 2:
-        largest = max(clusters, key=lambda a: len(clusters[a]))
-        tiny_anchors = [a for a in list(clusters) if a != largest and len(clusters[a]) < MIN_CLUSTER_SIZE]
-        remaining_anchors = [a for a in selected_anchors if a not in tiny_anchors]
-        for ta in tiny_anchors:
-            # Find best-matching remaining cluster by token overlap
-            ta_toks = set(_tokenize(ta))
-            best_target = largest
-            best_overlap = 0
-            for ra in remaining_anchors:
-                ra_toks = set(_tokenize(ra))
-                overlap = len(ta_toks & ra_toks)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_target = ra
-            clusters[best_target].extend(clusters[ta])
-            del clusters[ta]
-            if ta in selected_anchors:
-                selected_anchors.remove(ta)
+        def _should_merge(anchor: str) -> bool:
+            kws = clusters[anchor]
+            total_vol = sum(k.get("search_volume", 0) for k in kws)
+            return len(kws) < MIN_CLUSTER_SIZE and total_vol < MIN_CLUSTER_VOL
 
-    # Build result with SiteFocus scores attached
+        tiny_anchors = [a for a in list(clusters) if _should_merge(a)]
+        remaining_anchors = [a for a in selected_anchors if a not in tiny_anchors]
+        if remaining_anchors:
+            for ta in tiny_anchors:
+                ta_toks = set(_tokenize(ta))
+                best_target = remaining_anchors[0]
+                best_overlap = -1
+                for ra in remaining_anchors:
+                    ra_toks = set(_tokenize(ra))
+                    overlap = len(ta_toks & ra_toks)
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        best_target = ra
+                clusters[best_target].extend(clusters[ta])
+                del clusters[ta]
+                if ta in selected_anchors:
+                    selected_anchors.remove(ta)
+
+    # Build result — FIX #9: recalculate focus_score after merges
     result = []
     for anchor, kws in clusters.items():
         if not kws:
@@ -395,8 +433,8 @@ def _cluster(
         total_vol = sum(k.get("search_volume", 0) for k in kws)
         avg_diff = sum(k.get("keyword_difficulty", 0) for k in kws) / len(kws)
         focus_score = _cluster_focus_score(kws, anchor)
+        avg_cpc = sum(k.get("cpc", 0) for k in kws) / len(kws)
 
-        # Label from top keyword in cluster (more natural than seed + anchor)
         top_kw = max(kws, key=lambda k: k.get("search_volume", 0))
         label = top_kw["keyword"].title()
 
@@ -406,6 +444,7 @@ def _cluster(
             "keywords": kws,
             "total_volume": total_vol,
             "avg_difficulty": round(avg_diff, 1),
+            "avg_cpc": round(avg_cpc, 2),
             "focus_score": focus_score,
         })
 
@@ -414,42 +453,25 @@ def _cluster(
 
 # ── Site-level SiteFocus / SiteRadius metrics ──────────────────────────────────
 
+# FIX #30: uses pre-computed coherence from kw dict
 def _compute_site_metrics(pillars: list[dict], seed: str, all_keywords: list[dict]) -> dict:
-    """
-    Compute site-level SiteFocus and SiteRadius estimates for the topical map.
-
-    SiteFocus  (0–1): average cluster focus_score weighted by volume.
-                      1.0 = perfectly focused site, 0.0 = completely diluted.
-    SiteRadius (0–1): average semantic drift across all keywords.
-                      0.0 = all content close to core, 1.0 = high drift.
-    Coverage   (int): total number of distinct topic facets (clusters) covered.
-
-    These are shown in the UI to help the user understand topical authority potential.
-    """
-    seed_toks = _seed_tokens(seed)
     total_vol = sum(p["total_volume"] for p in pillars) or 1
 
-    # SiteFocus: weighted average of cluster focus scores
     site_focus = sum(p["focus_score"] * p["total_volume"] for p in pillars) / total_vol
 
-    # SiteRadius: average (1 - coherence) across all keywords
-    coherence_scores = [_coherence_score(k["keyword"], seed_toks, seed) for k in all_keywords]
+    # FIX #30: use pre-computed coherence
+    coherence_scores = [k.get("coherence", 0) for k in all_keywords]
     avg_coherence = sum(coherence_scores) / len(coherence_scores) if coherence_scores else 0.0
     site_radius = round(1.0 - avg_coherence, 3)
 
-    # Topical coverage depth: total supporting articles per pillar
     total_supporting = sum(len(p.get("supporting_keywords", [])) for p in pillars)
 
-    # Cluster completeness per pillar (content gap indicator)
-    # A pillar with high supporting count relative to SERP competition = well-covered
     max_supporting = max((len(p.get("supporting_keywords", [])) for p in pillars), default=1) or 1
     cluster_completeness = [
         round(len(p.get("supporting_keywords", [])) / max_supporting, 2) for p in pillars
     ]
     avg_completeness = round(sum(cluster_completeness) / len(cluster_completeness), 3) if cluster_completeness else 0
 
-    # FIX #28: Firefly-safe velocity — scale by total content needed, not just pillar count
-    # New sites: 2-3/week, established (>50 total articles): up to 5/week
     _total_articles = len(pillars) + total_supporting
     if _total_articles > 50:
         recommended_weekly = min(5, max(3, len(pillars)))
@@ -457,12 +479,12 @@ def _compute_site_metrics(pillars: list[dict], seed: str, all_keywords: list[dic
         recommended_weekly = min(3, max(2, len(pillars)))
 
     return {
-        "site_focus": round(site_focus, 3),      # 0–1, higher is better
-        "site_radius": round(site_radius, 3),     # 0–1, lower is better
-        "coverage": len(pillars),                  # number of topic facets
+        "site_focus": round(site_focus, 3),
+        "site_radius": round(site_radius, 3),
+        "coverage": len(pillars),
         "total_articles": len(pillars) + total_supporting,
-        "avg_cluster_completeness": avg_completeness,  # 0–1, higher = fewer content gaps
-        "recommended_weekly_velocity": recommended_weekly,  # Firefly-safe max articles/week
+        "avg_cluster_completeness": avg_completeness,
+        "recommended_weekly_velocity": recommended_weekly,
         "focus_rating": (
             "excellent" if site_focus >= 0.7 else
             "good"      if site_focus >= 0.5 else
@@ -495,17 +517,19 @@ async def generate_topical_map(
     dfs_login: str = "",
     dfs_password: str = "",
     force_refresh: bool = False,
-    min_coherence: float = 0.0,  # SiteRadius filter threshold (0 = off, 0.1 = light prune)
+    min_coherence: float = 0.0,
+    competitor_domain: str = "",
 ) -> dict:
     """
     Generate topical map: pillar pages + supporting pages.
-    Each pillar = a distinct topic facet of the seed (SiteFocus cluster).
-    Results cached 7 days in SQLite (expensive DataForSEO calls).
-
-    Returns site-level SiteFocus + SiteRadius metrics alongside the map.
+    FIX #17: competitor_domain — check what domain already ranks for.
+    FIX #25/#26: force_refresh and min_coherence now exposed via API.
+    FIX #14: monthly_searches trend data extracted from DataForSEO.
+    FIX #12: CPC used in priority scoring.
+    FIX #13: unified pillar_score formula used everywhere.
     """
     cache_key = hashlib.md5(
-        f"{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}".encode()
+        f"{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}:{competitor_domain}".encode()
     ).hexdigest()
     if not force_refresh:
         cached = await _map_cache_get(cache_key)
@@ -516,15 +540,29 @@ async def generate_topical_map(
     client = DataForSEOClient(dfs_login, dfs_password)
 
     raw = []
-    results_parallel = await asyncio.gather(
+    # FIX #16: related_keywords depth increased to 2
+    # FIX #17: optionally fetch keywords_for_site in parallel
+    coros = [
         client.keyword_suggestions(seed, location_code, language_code, 500),
         client.keyword_ideas(seed, location_code, language_code, 300),
         client.related_keywords(seed, location_code, language_code, 150),
-        return_exceptions=True,
-    )
-    for kws, name in zip(results_parallel, ["suggestions", "ideas", "related"]):
+    ]
+    coro_names = ["suggestions", "ideas", "related"]
+    if competitor_domain:
+        coros.append(client.keywords_for_site(competitor_domain, location_code, language_code, 200))
+        coro_names.append("keywords_for_site")
+
+    results_parallel = await asyncio.gather(*coros, return_exceptions=True)
+
+    # FIX #17: build set of keywords the competitor already ranks for
+    competitor_kws: dict[str, int] = {}  # keyword → position
+    for kws, name in zip(results_parallel, coro_names):
         if isinstance(kws, Exception):
             logger.warning(f"[TopicalMap] {name} failed: {kws}")
+        elif name == "keywords_for_site":
+            for k in kws:
+                competitor_kws[_ascii_fold(_clean(k["keyword"]))] = k.get("position", 0)
+            logger.info(f"[TopicalMap] keywords_for_site: {len(kws)} (domain: {competitor_domain})")
         else:
             raw.extend(kws)
             logger.info(f"[TopicalMap] {name}: {len(kws)}")
@@ -532,63 +570,84 @@ async def generate_topical_map(
     if not raw:
         raise ValueError(f"Brak wyników DataForSEO dla frazy: {seed}")
 
-    # Dedupe
     keywords = _dedupe(raw)
     logger.info(f"[TopicalMap] after dedupe: {len(keywords)}")
 
-    # Volume filter
     filtered = [k for k in keywords if k.get("search_volume", 0) >= min_volume]
     keywords = filtered if filtered else keywords
     logger.info(f"[TopicalMap] after volume filter (>={min_volume}): {len(keywords)}")
 
-    # Add coherence score to each keyword (SiteRadius proxy)
+    # Add coherence score to each keyword (computed once, reused everywhere — FIX #30)
+    # FIX #17: mark keywords the competitor domain already ranks for
     seed_toks = _seed_tokens(seed)
     for k in keywords:
         k["coherence"] = _coherence_score(k["keyword"], seed_toks, seed)
+        kw_key = _ascii_fold(_clean(k["keyword"]))
+        if kw_key in competitor_kws:
+            k["already_ranking"] = True
+            k["current_position"] = competitor_kws[kw_key]
+        else:
+            k["already_ranking"] = False
+            k["current_position"] = 0
 
-    # Cluster with SiteFocus-aware algorithm
     clusters = _cluster(keywords, seed, max_clusters, min_coherence)
     logger.info(f"[TopicalMap] clusters: {len(clusters)}")
 
-    # Fallback: if only 1 cluster, retry with higher max
     if len(clusters) <= 1 and max_clusters < 15:
         clusters = _cluster(keywords, seed, 15, min_coherence)
         logger.info(f"[TopicalMap] retry with max_clusters=15: {len(clusters)}")
 
-    # Pillar score: volume / (KD + 1) — favours rankable keywords over raw volume
+    # FIX #13: unified pillar score formula used for both pillar selection and priority
     def _pillar_score(k):
         vol = k.get("search_volume", 0)
         kd = k.get("keyword_difficulty", 50)
         coherence = k.get("coherence", 0.5)
-        return (vol / (kd + 1)) * (0.5 + coherence)
+        cpc = k.get("cpc", 0)
+        # FIX #12: CPC bonus for commercially valuable keywords
+        cpc_bonus = 1.0 + min(0.3, cpc / 10.0) if cpc > 0 else 1.0
+        return (vol / (kd + 1)) * (0.5 + coherence) * cpc_bonus
 
-    # Build pillar structure
     pillars = []
     for cluster in clusters:
-        # Separate by intent: informational keywords preferred for pillar pages
         informational = [k for k in cluster["keywords"] if k.get("intent", "informational") in ("informational", "")]
 
         pillar_candidates = informational if informational else cluster["keywords"]
         pillar_candidates_sorted = sorted(pillar_candidates, key=_pillar_score, reverse=True)
         pillar_kw = pillar_candidates_sorted[0] if pillar_candidates_sorted else {"keyword": cluster["anchor"], "search_volume": 0}
 
-        # Supporting = everything except pillar, informational first
         supporting = [k for k in cluster["keywords"] if k["keyword"] != pillar_kw["keyword"]]
 
-        # Sort supporting by: search_volume DESC, coherence DESC (high SiteRadius ones go last)
         supporting_sorted = sorted(
             supporting,
             key=lambda x: (x.get("search_volume", 0) * (0.5 + x.get("coherence", 0.5))),
             reverse=True
         )
 
-        # Intent distribution for this cluster
         all_cluster_kws = cluster["keywords"]
         intent_counts = Counter(k.get("intent", "informational") for k in all_cluster_kws)
         intent_dist = {intent: count for intent, count in intent_counts.most_common()}
 
-        # FIX #26: proportional limit — at least 5, at most 25 (was 10-30, too many for small clusters)
         sup_limit = min(25, max(5, len(supporting)))
+
+        # FIX #14: detect trend from monthly_searches
+        def _detect_trend(k: dict) -> str:
+            ms = k.get("monthly_searches", [])
+            if not ms or len(ms) < 3:
+                return "stable"
+            recent = sum(m.get("search_volume", 0) for m in ms[:3])
+            older = sum(m.get("search_volume", 0) for m in ms[3:6]) if len(ms) >= 6 else recent
+            if older == 0:
+                return "new" if recent > 0 else "stable"
+            ratio = recent / older
+            if ratio > 1.3:
+                return "rising"
+            elif ratio < 0.7:
+                return "declining"
+            return "stable"
+
+        # FIX #17: cannibalization warnings per cluster
+        cannibal_count = sum(1 for k in all_cluster_kws if k.get("already_ranking"))
+
         pillars.append({
             "anchor": cluster["anchor"],
             "label": cluster["label"],
@@ -596,6 +655,10 @@ async def generate_topical_map(
             "pillar_volume": pillar_kw.get("search_volume", 0),
             "pillar_difficulty": pillar_kw.get("keyword_difficulty", 0),
             "pillar_coherence": round(pillar_kw.get("coherence", 0), 3),
+            "pillar_cpc": round(pillar_kw.get("cpc", 0), 2),
+            "pillar_trend": _detect_trend(pillar_kw),
+            "pillar_already_ranking": pillar_kw.get("already_ranking", False),
+            "pillar_current_position": pillar_kw.get("current_position", 0),
             "focus_score": cluster["focus_score"],
             "pillar_intent": pillar_kw.get("intent", "informational"),
             "supporting_keywords": [
@@ -605,13 +668,18 @@ async def generate_topical_map(
                     "keyword_difficulty": k.get("keyword_difficulty", 0),
                     "coherence": round(k.get("coherence", 0), 3),
                     "intent": k.get("intent", "informational"),
+                    "cpc": round(k.get("cpc", 0), 2),
+                    "trend": _detect_trend(k),
+                    "already_ranking": k.get("already_ranking", False),
+                    "current_position": k.get("current_position", 0),
                 }
                 for k in supporting_sorted[:sup_limit]
             ],
             "total_volume": cluster["total_volume"],
             "avg_difficulty": cluster["avg_difficulty"],
+            "avg_cpc": cluster.get("avg_cpc", 0),
             "intent_distribution": intent_dist,
-            # Content gap indicators — how many subtopics need coverage
+            "cannibalization_risk": cannibal_count,
             "content_gap": {
                 "total_subtopics": len(supporting),
                 "high_volume_gaps": len([k for k in supporting if k.get("search_volume", 0) >= 100]),
@@ -623,20 +691,21 @@ async def generate_topical_map(
             },
         })
 
-    # SEO #21: intent-weighted priority — informational pillars first (build authority before commercial)
+    # FIX #13: unified priority score (same formula as pillar selection + intent weight)
     _intent_weight = {"informational": 1.2, "": 1.0, "commercial": 0.8, "transactional": 0.7, "navigational": 0.6}
     for p in pillars:
         vol = p["total_volume"] or 1
         kd = p["avg_difficulty"] or 1
         coherence = p.get("pillar_coherence", 0.5)
         focus = p.get("focus_score", 0.5)
+        cpc = p.get("pillar_cpc", 0)
         _iw = _intent_weight.get(p.get("pillar_intent", "informational"), 1.0)
-        p["priority_score"] = round((vol / (kd + 1)) * (0.5 + coherence) * (0.5 + focus) * _iw, 1)
+        # FIX #12: CPC in priority score
+        cpc_bonus = 1.0 + min(0.3, cpc / 10.0) if cpc > 0 else 1.0
+        p["priority_score"] = round((vol / (kd + 1)) * (0.5 + coherence) * (0.5 + focus) * _iw * cpc_bonus, 1)
 
-    # Sort pillars by priority_score DESC — publish highest-opportunity clusters first
     pillars.sort(key=lambda p: p["priority_score"], reverse=True)
 
-    # Compute site-level SiteFocus / SiteRadius
     site_metrics = _compute_site_metrics(pillars, seed, keywords)
     logger.info(
         f"[TopicalMap] SiteFocus={site_metrics['site_focus']} ({site_metrics['focus_rating']}), "
@@ -644,15 +713,14 @@ async def generate_topical_map(
         f"coverage={site_metrics['coverage']}"
     )
 
-    # Cross-pillar interlinking map: compute pillar-to-pillar token similarity
-    # Each pillar gets a list of related pillars it should link to
+    # Cross-pillar interlinking
     pillar_token_sets = {}
     for i, p in enumerate(pillars):
         all_kws = [p["pillar_keyword"]] + [sk["keyword"] for sk in p["supporting_keywords"]]
         tokens = set()
         for kw_text in all_kws:
             tokens.update(_tokenize(kw_text))
-        tokens -= seed_toks  # remove seed tokens, only differentiation matters
+        tokens -= seed_toks
         pillar_token_sets[i] = tokens
 
     for i, p in enumerate(pillars):
@@ -663,24 +731,22 @@ async def generate_topical_map(
             shared = pillar_token_sets[i] & pillar_token_sets[j]
             union = pillar_token_sets[i] | pillar_token_sets[j]
             similarity = len(shared) / len(union) if union else 0
-            if similarity > 0.05:  # minimal topical overlap
+            if similarity > 0.05:
                 related.append({
                     "pillar_index": j,
                     "pillar_keyword": p2["pillar_keyword"],
+                    "label": p2["label"],
                     "similarity": round(similarity, 3),
                 })
-        # Sort by similarity DESC, keep top 3 related pillars
         related.sort(key=lambda x: x["similarity"], reverse=True)
         p["related_pillars"] = related[:3]
 
     # Force Graph
-    # FIX #57: cap force graph supporting nodes at 10 per pillar (was 8 — sometimes too few for large clusters)
     nodes = [{"id": "seed", "label": seed, "type": "seed", "size": 24, "color": "#1a2332"}]
     links = []
 
     for i, p in enumerate(pillars):
         pid = f"pillar_{i}"
-        # Node size reflects cluster volume; color intensity reflects focus_score
         focus = p.get("focus_score", 0.5)
         nodes.append({
             "id": pid,
@@ -706,7 +772,6 @@ async def generate_topical_map(
             })
             links.append({"source": pid, "target": sid, "strength": sk.get("coherence", 0.5)})
 
-    # Add cross-pillar links to force graph (dashed lines between related pillars)
     seen_pairs = set()
     for i, p in enumerate(pillars):
         for rel in p.get("related_pillars", []):
@@ -721,6 +786,19 @@ async def generate_topical_map(
                     "type": "cross_pillar",
                 })
 
+    # FIX #17: cannibalization summary
+    cannibal_summary = None
+    if competitor_domain:
+        total_ranking = sum(1 for k in keywords if k.get("already_ranking"))
+        top10_ranking = sum(1 for k in keywords if k.get("already_ranking") and k.get("current_position", 99) <= 10)
+        cannibal_summary = {
+            "domain": competitor_domain,
+            "total_already_ranking": total_ranking,
+            "in_top10": top10_ranking,
+            "total_checked": len(keywords),
+            "coverage_pct": round(total_ranking / len(keywords) * 100, 1) if keywords else 0,
+        }
+
     result = {
         "seed": seed,
         "total_keywords": len(keywords),
@@ -728,6 +806,7 @@ async def generate_topical_map(
         "nodes": nodes,
         "links": links,
         "site_metrics": site_metrics,
+        "competitor_analysis": cannibal_summary,
     }
     await _map_cache_set(cache_key, result)
     return result
