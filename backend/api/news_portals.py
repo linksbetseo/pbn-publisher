@@ -615,6 +615,52 @@ async def create_portal(body: PortalCreate):
     return dict(portal)
 
 
+@router.get("/published-urls")
+async def list_published_urls(
+    portal_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+):
+    """List all published news articles with their WordPress URLs."""
+    await ensure_tables()
+    offset = (page - 1) * per_page
+    conditions = ["nd.status = 'published'"]
+    params: list = []
+    if portal_id:
+        conditions.append("nd.portal_id = ?")
+        params.append(portal_id)
+    where = " AND ".join(conditions)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT COUNT(*) as cnt FROM news_drafts nd WHERE {where}", params
+        ) as cur:
+            total = (await cur.fetchone())["cnt"]
+
+        query_params = params + [per_page, offset]
+        async with db.execute(
+            f"""SELECT nd.id, nd.title, nd.wp_post_url, nd.published_at, nd.portal_id,
+                       np.name AS portal_name
+                FROM news_drafts nd
+                LEFT JOIN news_portals np ON np.id = nd.portal_id
+                WHERE {where}
+                ORDER BY nd.published_at DESC
+                LIMIT ? OFFSET ?""",
+            query_params,
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    logger.info(f"[PublishedURLs] portal_id={portal_id} total={total} returned={len(rows)} where={where}")
+    return {
+        "items": rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page if per_page else 1,
+    }
+
+
 @router.get("/{portal_id}")
 async def get_portal(portal_id: int):
     """Get portal detail with sources and stats."""
@@ -1814,49 +1860,5 @@ async def edit_draft(draft_id: int, body: DraftUpdate):
     return dict(updated)
 
 
-@router.get("/published-urls")
-async def list_published_urls(
-    portal_id: Optional[int] = Query(None),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=200),
-):
-    """List all published news articles with their WordPress URLs."""
-    await ensure_tables()
-    offset = (page - 1) * per_page
-    conditions = ["nd.status = 'published'"]
-    params: list = []
-    if portal_id:
-        conditions.append("nd.portal_id = ?")
-        params.append(portal_id)
-    where = " AND ".join(conditions)
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            f"SELECT COUNT(*) as cnt FROM news_drafts nd WHERE {where}", params
-        ) as cur:
-            total = (await cur.fetchone())["cnt"]
-
-        query_params = params + [per_page, offset]
-        async with db.execute(
-            f"""SELECT nd.id, nd.title, nd.wp_post_url, nd.published_at, nd.portal_id,
-                       np.name AS portal_name
-                FROM news_drafts nd
-                LEFT JOIN news_portals np ON np.id = nd.portal_id
-                WHERE {where}
-                ORDER BY nd.published_at DESC
-                LIMIT ? OFFSET ?""",
-            query_params,
-        ) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
-
-    logger.info(f"[PublishedURLs] portal_id={portal_id} total={total} returned={len(rows)} where={where}")
-    return {
-        "items": rows,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page if per_page else 1,
-    }
 
 
