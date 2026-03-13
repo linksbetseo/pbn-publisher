@@ -52,6 +52,163 @@ router = APIRouter(prefix="/api/news-portals", tags=["news-portals"])
 _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # ---------------------------------------------------------------------------
+# Predefined RSS Feed Catalog (Polish & international portals)
+# ---------------------------------------------------------------------------
+
+RSS_CATALOG = [
+    # Polskie portale ogólne
+    {"category": "ogólne", "portal": "Onet.pl", "feeds": [
+        {"name": "Onet Wiadomości", "url": "https://wiadomosci.onet.pl/.feed"},
+        {"name": "Onet Biznes", "url": "https://businessinsider.com.pl/.feed"},
+        {"name": "Onet Sport", "url": "https://sport.onet.pl/.feed"},
+    ]},
+    {"category": "ogólne", "portal": "Wirtualna Polska", "feeds": [
+        {"name": "WP Wiadomości", "url": "https://wiadomosci.wp.pl/rss.xml"},
+        {"name": "WP Finanse", "url": "https://finanse.wp.pl/rss.xml"},
+        {"name": "WP Tech", "url": "https://tech.wp.pl/rss.xml"},
+    ]},
+    {"category": "ogólne", "portal": "Interia", "feeds": [
+        {"name": "Interia Fakty", "url": "https://fakty.interia.pl/feed"},
+        {"name": "Interia Biznes", "url": "https://biznes.interia.pl/feed"},
+        {"name": "Interia Sport", "url": "https://sport.interia.pl/feed"},
+    ]},
+    # Wiadomości
+    {"category": "wiadomości", "portal": "TVN24", "feeds": [
+        {"name": "TVN24 Najnowsze", "url": "https://tvn24.pl/najnowsze.xml"},
+        {"name": "TVN24 Polska", "url": "https://tvn24.pl/polska.xml"},
+        {"name": "TVN24 Świat", "url": "https://tvn24.pl/swiat.xml"},
+        {"name": "TVN24 Biznes", "url": "https://tvn24.pl/biznes/najnowsze.xml"},
+    ]},
+    {"category": "wiadomości", "portal": "Polsat News", "feeds": [
+        {"name": "Polsat News", "url": "https://www.polsatnews.pl/rss/wszystkie.xml"},
+    ]},
+    {"category": "wiadomości", "portal": "Gazeta.pl", "feeds": [
+        {"name": "Gazeta.pl Wiadomości", "url": "https://wiadomosci.gazeta.pl/pub/rss/wiadomosci.xml"},
+    ]},
+    # Technologia
+    {"category": "technologia", "portal": "Dobreprogramy", "feeds": [
+        {"name": "Dobreprogramy", "url": "https://www.dobreprogramy.pl/feed"},
+    ]},
+    {"category": "technologia", "portal": "Benchmark.pl", "feeds": [
+        {"name": "Benchmark Aktualności", "url": "https://www.benchmark.pl/rss/aktualnosci.xml"},
+    ]},
+    {"category": "technologia", "portal": "AntyWeb", "feeds": [
+        {"name": "AntyWeb", "url": "https://antyweb.pl/feed"},
+    ]},
+    {"category": "technologia", "portal": "Spider's Web", "feeds": [
+        {"name": "Spider's Web", "url": "https://spidersweb.pl/feed"},
+    ]},
+    {"category": "technologia", "portal": "Niebezpiecznik", "feeds": [
+        {"name": "Niebezpiecznik", "url": "https://niebezpiecznik.pl/feed/"},
+    ]},
+    {"category": "technologia", "portal": "Komputer Świat", "feeds": [
+        {"name": "Komputer Świat", "url": "https://www.komputerswiat.pl/rss"},
+    ]},
+    # Finanse / Biznes
+    {"category": "finanse", "portal": "Bankier.pl", "feeds": [
+        {"name": "Bankier Wiadomości", "url": "https://www.bankier.pl/rss/wiadomosci.xml"},
+        {"name": "Bankier Giełda", "url": "https://www.bankier.pl/rss/gielda.xml"},
+    ]},
+    {"category": "finanse", "portal": "Money.pl", "feeds": [
+        {"name": "Money.pl", "url": "https://www.money.pl/rss/rss.xml"},
+    ]},
+    {"category": "biznes", "portal": "PulsHR", "feeds": [
+        {"name": "PulsHR", "url": "https://www.pulshr.pl/rss.xml"},
+    ]},
+    {"category": "biznes", "portal": "Forbes.pl", "feeds": [
+        {"name": "Forbes Polska", "url": "https://www.forbes.pl/feed"},
+    ]},
+    # Sport
+    {"category": "sport", "portal": "Sport.pl", "feeds": [
+        {"name": "Sport.pl", "url": "https://sport.pl/rss.xml"},
+    ]},
+    {"category": "sport", "portal": "Meczyki.pl", "feeds": [
+        {"name": "Meczyki.pl", "url": "https://www.meczyki.pl/rss"},
+    ]},
+    {"category": "sport", "portal": "Przegląd Sportowy", "feeds": [
+        {"name": "Przegląd Sportowy", "url": "https://www.przegladsportowy.pl/rss.xml"},
+    ]},
+    # Zdrowie
+    {"category": "zdrowie", "portal": "Medonet", "feeds": [
+        {"name": "Medonet", "url": "https://www.medonet.pl/rss.xml"},
+    ]},
+    # Motoryzacja
+    {"category": "motoryzacja", "portal": "Autokult", "feeds": [
+        {"name": "Autokult", "url": "https://autokult.pl/feed"},
+    ]},
+    {"category": "motoryzacja", "portal": "Moto.pl", "feeds": [
+        {"name": "Moto.pl", "url": "https://moto.pl/rss.xml"},
+    ]},
+    # Budownictwo / Nieruchomości
+    {"category": "budownictwo", "portal": "Murator Dom", "feeds": [
+        {"name": "Murator Dom", "url": "https://www.muratordom.pl/rss.xml"},
+    ]},
+    # Kultura / Rozrywka
+    {"category": "kultura", "portal": "Filmweb", "feeds": [
+        {"name": "Filmweb News", "url": "https://www.filmweb.pl/feed/news/latest"},
+    ]},
+    # Międzynarodowe
+    {"category": "international", "portal": "BBC News", "feeds": [
+        {"name": "BBC Top Stories", "url": "https://feeds.bbci.co.uk/news/rss.xml"},
+        {"name": "BBC Technology", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml"},
+        {"name": "BBC Business", "url": "https://feeds.bbci.co.uk/news/business/rss.xml"},
+        {"name": "BBC Science", "url": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"},
+    ]},
+    {"category": "international", "portal": "Reuters", "feeds": [
+        {"name": "Reuters", "url": "https://www.reutersagency.com/feed/"},
+    ]},
+    {"category": "international", "portal": "TechCrunch", "feeds": [
+        {"name": "TechCrunch", "url": "https://techcrunch.com/feed/"},
+    ]},
+    {"category": "international", "portal": "The Verge", "feeds": [
+        {"name": "The Verge", "url": "https://www.theverge.com/rss/index.xml"},
+    ]},
+]
+
+
+@router.get("/rss-catalog")
+async def get_rss_catalog(category: Optional[str] = Query(None)):
+    """Return the predefined RSS feed catalog for quick-add."""
+    if category:
+        return [c for c in RSS_CATALOG if c["category"] == category]
+    return RSS_CATALOG
+
+
+@router.post("/{portal_id}/sources/bulk-add")
+async def bulk_add_sources(portal_id: int, feeds: List[dict]):
+    """Bulk-add multiple RSS sources to a portal from the catalog.
+    Expects list of {name, url} objects.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM news_portals WHERE id = ?", (portal_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Portal not found")
+
+        # Get existing source URLs to avoid duplicates
+        async with db.execute(
+            "SELECT url FROM news_sources WHERE portal_id = ?", (portal_id,)
+        ) as cur:
+            existing_urls = {row["url"] for row in await cur.fetchall()}
+
+        added = 0
+        for feed in feeds:
+            url = (feed.get("url") or "").strip()
+            name = (feed.get("name") or url).strip()
+            if not url or url in existing_urls:
+                continue
+            await db.execute(
+                "INSERT INTO news_sources (portal_id, name, url, source_type, active) VALUES (?, ?, ?, 'rss', 1)",
+                (portal_id, name, url),
+            )
+            existing_urls.add(url)
+            added += 1
+        await db.commit()
+    return {"added": added}
+
+
+# ---------------------------------------------------------------------------
 # DB table creation
 # ---------------------------------------------------------------------------
 

@@ -227,6 +227,13 @@ function SourcesModal({ portal, onClose, onUpdated }) {
   const [adding, setAdding] = useState(false)
   const [toggling, setToggling] = useState(null)
   const [error, setError] = useState('')
+  // RSS Catalog state
+  const [showCatalog, setShowCatalog] = useState(false)
+  const [catalog, setCatalog] = useState([])
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogCategory, setCatalogCategory] = useState('all')
+  const [catalogSelected, setCatalogSelected] = useState([])
+  const [bulkAdding, setBulkAdding] = useState(false)
 
   const loadSources = useCallback(async () => {
     setLoading(true)
@@ -241,6 +248,23 @@ function SourcesModal({ portal, onClose, onUpdated }) {
   }, [portal.id])
 
   useEffect(() => { loadSources() }, [loadSources])
+
+  const loadCatalog = useCallback(async () => {
+    setCatalogLoading(true)
+    try {
+      const res = await api.get('/api/news-portals/rss-catalog')
+      setCatalog(res.data || [])
+    } catch {
+      setCatalog([])
+    } finally {
+      setCatalogLoading(false)
+    }
+  }, [])
+
+  const handleOpenCatalog = () => {
+    setShowCatalog(true)
+    if (catalog.length === 0) loadCatalog()
+  }
 
   const handleAdd = async () => {
     if (!newUrl.trim()) { setError('URL jest wymagany'); return }
@@ -282,27 +306,161 @@ function SourcesModal({ portal, onClose, onUpdated }) {
     setToggling(null)
   }
 
+  const toggleCatalogFeed = (feed) => {
+    setCatalogSelected(prev => {
+      const exists = prev.find(f => f.url === feed.url)
+      if (exists) return prev.filter(f => f.url !== feed.url)
+      return [...prev, feed]
+    })
+  }
+
+  const selectAllFromPortal = (portalFeeds) => {
+    setCatalogSelected(prev => {
+      const existingUrls = new Set(prev.map(f => f.url))
+      const newFeeds = portalFeeds.filter(f => !existingUrls.has(f.url))
+      return [...prev, ...newFeeds]
+    })
+  }
+
+  const handleBulkAdd = async () => {
+    if (catalogSelected.length === 0) return
+    setBulkAdding(true)
+    setError('')
+    try {
+      const res = await api.post(`/api/news-portals/${portal.id}/sources/bulk-add`, catalogSelected)
+      setCatalogSelected([])
+      setShowCatalog(false)
+      await loadSources()
+      onUpdated()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Błąd dodawania źródeł')
+    } finally {
+      setBulkAdding(false)
+    }
+  }
+
+  const existingUrls = new Set(sources.map(s => s.url))
+
+  const catalogCategories = ['all', ...new Set(catalog.map(c => c.category))]
+  const filteredCatalog = catalogCategory === 'all' ? catalog : catalog.filter(c => c.category === catalogCategory)
+
+  const categoryLabels = {
+    'all': 'Wszystkie', 'ogólne': 'Ogólne', 'wiadomości': 'Wiadomości',
+    'technologia': 'Technologia', 'finanse': 'Finanse', 'biznes': 'Biznes',
+    'sport': 'Sport', 'zdrowie': 'Zdrowie', 'motoryzacja': 'Motoryzacja',
+    'budownictwo': 'Budownictwo', 'kultura': 'Kultura', 'international': 'Międzynarodowe',
+  }
+
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700 w-full max-w-2xl max-h-[85vh] flex flex-col">
+      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700 w-full max-w-3xl max-h-[85vh] flex flex-col">
         <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Źródła — {portal.name}</h3>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{sources.length} źródeł</p>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={handleOpenCatalog}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 ${
+                showCatalog
+                  ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300'
+                  : 'bg-orange-500 hover:bg-orange-600 text-white'
+              }`}>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+              </svg>
+              {showCatalog ? 'Ukryj katalog' : 'Katalog RSS'}
+            </button>
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
+          {/* RSS Catalog Browser */}
+          {showCatalog && (
+            <div className="mb-6 border border-orange-200 dark:border-orange-800 rounded-xl overflow-hidden">
+              <div className="bg-orange-50 dark:bg-orange-900/20 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-sm font-semibold text-orange-800 dark:text-orange-300">Katalog portali RSS — kliknij żeby dodać</p>
+                  {catalogSelected.length > 0 && (
+                    <button onClick={handleBulkAdd} disabled={bulkAdding}
+                      className="px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center gap-1">
+                      {bulkAdding ? <Spinner className="w-3 h-3" /> : null}
+                      Dodaj zaznaczone ({catalogSelected.length})
+                    </button>
+                  )}
+                </div>
+                {/* Category pills */}
+                <div className="flex flex-wrap gap-1.5">
+                  {catalogCategories.map(cat => (
+                    <button key={cat} onClick={() => setCatalogCategory(cat)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                        catalogCategory === cat
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-orange-100 dark:hover:bg-gray-600'
+                      }`}>
+                      {categoryLabels[cat] || cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {catalogLoading ? (
+                  <div className="flex justify-center py-6"><Spinner /></div>
+                ) : filteredCatalog.length === 0 ? (
+                  <p className="text-center text-gray-400 text-sm py-6">Brak portali w tej kategorii</p>
+                ) : (
+                  <div className="divide-y divide-gray-100 dark:divide-gray-700">
+                    {filteredCatalog.map((portalItem, idx) => (
+                      <div key={idx} className="p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">{portalItem.portal}</span>
+                            <Badge color="gray">{categoryLabels[portalItem.category] || portalItem.category}</Badge>
+                          </div>
+                          <button onClick={() => selectAllFromPortal(portalItem.feeds)}
+                            className="text-xs text-orange-600 dark:text-orange-400 hover:underline">
+                            Zaznacz wszystkie
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {portalItem.feeds.map((feed, fi) => {
+                            const alreadyAdded = existingUrls.has(feed.url)
+                            const isSelected = catalogSelected.some(f => f.url === feed.url)
+                            return (
+                              <button key={fi}
+                                onClick={() => !alreadyAdded && toggleCatalogFeed(feed)}
+                                disabled={alreadyAdded}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
+                                  alreadyAdded
+                                    ? 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 cursor-default opacity-60'
+                                    : isSelected
+                                      ? 'bg-orange-500 text-white ring-2 ring-orange-300'
+                                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-orange-100 dark:hover:bg-orange-800/30'
+                                }`}>
+                                {alreadyAdded ? '✓ ' : isSelected ? '● ' : ''}{feed.name}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Existing sources list */}
           {loading ? (
             <div className="flex justify-center py-8"><Spinner /></div>
-          ) : sources.length === 0 ? (
-            <p className="text-center text-gray-400 dark:text-gray-500 text-sm py-8">Brak źródeł. Dodaj pierwsze źródło poniżej.</p>
-          ) : (
+          ) : sources.length === 0 && !showCatalog ? (
+            <p className="text-center text-gray-400 dark:text-gray-500 text-sm py-8">Brak źródeł. Kliknij "Katalog RSS" żeby dodać z listy portali.</p>
+          ) : sources.length === 0 ? null : (
             <div className="space-y-2">
               {sources.map(s => (
                 <div key={s.id} className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
@@ -331,7 +489,7 @@ function SourcesModal({ portal, onClose, onUpdated }) {
 
         {/* Add source form */}
         <div className="p-6 border-t border-gray-100 dark:border-gray-700">
-          <p className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase mb-3">Dodaj źródło</p>
+          <p className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase mb-3">Dodaj źródło ręcznie</p>
           <div className="grid grid-cols-12 gap-2">
             <input type="text" placeholder="Nazwa (opcjonalnie)" value={newName}
               onChange={e => setNewName(e.target.value)}
