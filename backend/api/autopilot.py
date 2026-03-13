@@ -1413,6 +1413,146 @@ async def bulk_create_schedules(body: BulkCreateRequest):
             "details": {"created": created, "skipped": skipped, "errors": errors}}
 
 
+class BulkCreateAutoRequest(BaseModel):
+    domain_ids: List[int]
+    posts_per_day: int = 1
+    language: str = "pl"
+    min_volume: int = 10
+    custom_prompt: str = ""
+
+
+@router.post("/bulk-create-auto")
+async def bulk_create_auto(body: BulkCreateAutoRequest):
+    """
+    Auto-seed bulk create: for each PBN domain, DataForSEO discovers what the
+    domain ranks for (or could rank for), GPT picks the best seed keyword,
+    then creates the schedule.
+    """
+    await ensure_tables()
+    if not DFS_LOGIN or not DFS_PASSWORD:
+        raise HTTPException(400, "Brak konfiguracji DataForSEO — ustaw DATAFORSEO_LOGIN i DATAFORSEO_PASSWORD")
+
+    dfs = DataForSEOClient(DFS_LOGIN, DFS_PASSWORD)
+    location_code = 2616 if body.language == "pl" else 2840
+    results = []
+    created_count = 0
+    skipped_count = 0
+    error_count = 0
+
+    for domain_id in body.domain_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT id, domain FROM my_domains WHERE id = ?", (domain_id,)) as cur:
+                dom = await cur.fetchone()
+        if not dom:
+            results.append({"domain_id": domain_id, "domain": "?", "error": "not found"})
+            error_count += 1
+            continue
+
+        domain_name = dict(dom)["domain"]
+
+        # 1) DataForSEO: what does this PBN domain rank for?
+        try:
+            site_keywords = await dfs.keywords_for_site(
+                domain_name, location_code=location_code,
+                language_code=body.language, limit=200,
+            )
+        except Exception as e:
+            logger.warning(f"[auto-seed] DFS keywords_for_site failed for {domain_name}: {e}")
+            site_keywords = []
+
+        if not site_keywords:
+            results.append({"domain_id": domain_id, "domain": domain_name, "error": "brak danych z DataForSEO — domena bez pozycji"})
+            error_count += 1
+            continue
+
+        # 2) GPT picks the best seed
+        top_kws = sorted(site_keywords, key=lambda x: x["search_volume"], reverse=True)[:60]
+        kw_list = "\n".join(f"- {k['keyword']} (vol: {k['search_volume']})" for k in top_kws)
+
+        gpt_model = "gpt-4o-mini"
+        try:
+            gpt_model = await get_gpt_model()
+        except Exception:
+            pass
+
+        try:
+            from openai import AsyncOpenAI as _AO
+            _oai = _AO()
+            response = await _oai.chat.completions.create(
+                model=gpt_model,
+                messages=[
+                    {"role": "system", "content": "You are an SEO expert. Return valid JSON only, no markdown."},
+                    {"role": "user", "content": f"""Pick the single best seed keyword for building a topical map on this PBN domain.
+The seed should be a broad topic (2-3 words) that covers the most keywords this domain ranks for.
+It should allow generating 15-30 supporting articles for long tail traffic.
+
+Domain: {domain_name}
+Keywords it ranks for:
+{kw_list}
+
+Return: {{"seed": "keyword phrase", "reason": "short reason"}}"""},
+                ],
+                temperature=0.2,
+                max_tokens=200,
+            )
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+            seed_data = _json.loads(raw)
+            chosen_seed = seed_data.get("seed", "")
+            reason = seed_data.get("reason", "")
+        except Exception as e:
+            # Fallback: pick the highest-volume 2+ word keyword
+            logger.warning(f"[auto-seed] GPT failed for {domain_name}: {e}")
+            for k in top_kws:
+                if len(k["keyword"].split()) >= 2:
+                    chosen_seed = k["keyword"]
+                    reason = f"fallback: highest vol ({k['search_volume']})"
+                    break
+            else:
+                chosen_seed = top_kws[0]["keyword"] if top_kws else ""
+                reason = "fallback: top keyword"
+
+        if not chosen_seed:
+            results.append({"domain_id": domain_id, "domain": domain_name, "error": "AI nie wybrało seeda"})
+            error_count += 1
+            continue
+
+        # 3) Create schedule (skip if already exists with same seed)
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT id FROM domain_schedules WHERE my_domain_id = ? AND seed_keyword = ?",
+                (domain_id, chosen_seed)
+            ) as cur:
+                existing = await cur.fetchone()
+            if existing:
+                results.append({"domain_id": domain_id, "domain": domain_name, "seed_keyword": chosen_seed, "skipped": True, "reason": "harmonogram już istnieje"})
+                skipped_count += 1
+                continue
+
+            cursor = await db.execute(
+                """INSERT INTO domain_schedules
+                   (my_domain_id, seed_keyword, posts_per_day, language, min_volume, custom_prompt)
+                   VALUES (?,?,?,?,?,?)""",
+                (domain_id, chosen_seed, body.posts_per_day, body.language, body.min_volume, body.custom_prompt),
+            )
+            await db.commit()
+            results.append({"domain_id": domain_id, "domain": domain_name, "seed_keyword": chosen_seed, "reason": reason, "schedule_id": cursor.lastrowid})
+            created_count += 1
+
+        # Small delay to avoid DataForSEO rate limits
+        await asyncio.sleep(1)
+
+    return {
+        "created": created_count,
+        "skipped": skipped_count,
+        "errors": error_count,
+        "results": results,
+    }
+
+
 @router.post("/bulk-generate-maps")
 async def bulk_generate_maps(body: BulkActionRequest):
     """

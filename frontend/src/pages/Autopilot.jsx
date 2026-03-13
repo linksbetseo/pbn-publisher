@@ -42,42 +42,14 @@ function BulkTab() {
   const [ppd, setPpd] = useState(1)
   const [lang, setLang] = useState('pl')
   const [minVol, setMinVol] = useState(10)
-  const [clientDomain, setClientDomain] = useState('')
-  const [anchorText, setAnchorText] = useState('')
   const [customPrompt, setCustomPrompt] = useState('')
   const [runLimit, setRunLimit] = useState(1)
-  const [aiSeedMode, setAiSeedMode] = useState(false)
-  const [aiSeeds, setAiSeeds] = useState([])
-  const [aiSeedLoading, setAiSeedLoading] = useState(false)
-  const [aiSeedError, setAiSeedError] = useState('')
+  const [autoSeed, setAutoSeed] = useState(true)
 
   const [csvImporting, setCsvImporting] = useState(false)
   const csvInputRef = useRef(null)
 
   const log = (msg, type = 'info') => setActionLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString('pl-PL') }])
-
-  const fetchAiSeeds = async () => {
-    if (!clientDomain.trim()) { setAiSeedError('Wpisz domenę klienta'); return }
-    setAiSeedLoading(true)
-    setAiSeedError('')
-    setAiSeeds([])
-    try {
-      const res = await api.post('/api/autopilot/ai-seed-keywords', {
-        client_domain: clientDomain.trim(),
-        language: lang,
-        count: 5,
-      }, { timeout: 120000 })
-      if (res.data?.seeds?.length) {
-        setAiSeeds(res.data.seeds)
-      } else {
-        setAiSeedError(res.data?.message || 'Brak sugestii — domena może nie mieć pozycji w Google')
-      }
-    } catch (e) {
-      setAiSeedError(e.response?.data?.detail || e.message)
-    } finally {
-      setAiSeedLoading(false)
-    }
-  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -174,29 +146,49 @@ function BulkTab() {
 
   const bulkCreateSchedules = async () => {
     if (!selectedList.length) return addToast('Zaznacz domeny', 'warning')
-    if (!seedKw.trim()) return addToast('Wpisz frazę seed', 'warning')
+    if (!autoSeed && !seedKw.trim()) return addToast('Wpisz frazę seed lub włącz auto-seed', 'warning')
     setRunning(true)
     setActionLog([])
-    log(`Tworzę harmonogramy dla ${selectedList.length} domen...`)
-    try {
-      const res = await api.post('/api/autopilot/bulk-create', {
-        domain_ids: selectedList,
-        seed_keyword: seedKw,
-        posts_per_day: Number(ppd),
-        language: lang,
-        min_volume: Number(minVol),
-        client_domain: clientDomain,
-        anchor_text: anchorText,
-        custom_prompt: customPrompt,
-      })
-      log(`✓ Utworzono: ${res.data.created}, pominięto: ${res.data.skipped}, błędy: ${res.data.errors}`, 'ok')
-      await load()
-      setSelected(new Set())
-    } catch (e) {
-      log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
-    } finally {
-      setRunning(false)
+
+    if (autoSeed) {
+      log(`AI dobiera seed keywords dla ${selectedList.length} domen... (to może potrwać kilka minut)`)
+      try {
+        const res = await api.post('/api/autopilot/bulk-create-auto', {
+          domain_ids: selectedList,
+          posts_per_day: Number(ppd),
+          language: lang,
+          min_volume: Number(minVol),
+          custom_prompt: customPrompt,
+        }, { timeout: 600000 })
+        res.data.results?.forEach(r => {
+          if (r.error) log(`  ✗ ${r.domain}: ${r.error}`, 'err')
+          else log(`  ✓ ${r.domain}: seed "${r.seed_keyword}"`, 'ok')
+        })
+        log(`✓ Utworzono: ${res.data.created}, pominięto: ${res.data.skipped}, błędy: ${res.data.errors}`, 'ok')
+        await load()
+        setSelected(new Set())
+      } catch (e) {
+        log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
+      }
+    } else {
+      log(`Tworzę harmonogramy dla ${selectedList.length} domen z seed "${seedKw}"...`)
+      try {
+        const res = await api.post('/api/autopilot/bulk-create', {
+          domain_ids: selectedList,
+          seed_keyword: seedKw,
+          posts_per_day: Number(ppd),
+          language: lang,
+          min_volume: Number(minVol),
+          custom_prompt: customPrompt,
+        })
+        log(`✓ Utworzono: ${res.data.created}, pominięto: ${res.data.skipped}, błędy: ${res.data.errors}`, 'ok')
+        await load()
+        setSelected(new Set())
+      } catch (e) {
+        log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
+      }
     }
+    setRunning(false)
   }
 
   const bulkGenerateMaps = async () => {
@@ -377,58 +369,29 @@ function BulkTab() {
             {tab === 'domains' && (
               <>
                 <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Domena klienta</label>
-                  <input value={clientDomain} onChange={e => setClientDomain(e.target.value)}
-                    placeholder="https://klient.pl"
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="flex items-center gap-2 text-xs font-medium text-gray-500 mb-1 cursor-pointer">
-                    <input type="checkbox" checked={aiSeedMode} onChange={e => { setAiSeedMode(e.target.checked); setAiSeeds([]); setAiSeedError('') }}
-                      className="rounded border-gray-300" />
-                    AI wybiera seed keyword z domeny klienta
+                  <label className="flex items-center gap-2 text-xs font-medium text-gray-700 mb-2 cursor-pointer">
+                    <input type="checkbox" checked={autoSeed} onChange={e => setAutoSeed(e.target.checked)}
+                      className="rounded border-gray-300 text-blue-600" />
+                    AI dobiera seed automatycznie
                   </label>
-                  {!aiSeedMode ? (
-                    <>
-                      <label className="block text-xs font-medium text-gray-500 mb-1 mt-2">Fraza seed *</label>
+                  {autoSeed ? (
+                    <p className="text-xs text-gray-400 bg-blue-50 rounded-lg p-2">
+                      System przeanalizuje każdą domenę PBN przez DataForSEO i automatycznie dobierze najlepszy seed keyword do budowy topical map.
+                    </p>
+                  ) : (
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Fraza seed *</label>
                       <input value={seedKw} onChange={e => setSeedKw(e.target.value)}
                         placeholder="np. prawo pracy"
                         className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    </>
-                  ) : (
-                    <div className="mt-2">
-                      <button onClick={fetchAiSeeds} disabled={aiSeedLoading || !clientDomain.trim()}
-                        className="w-full py-2 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50 flex items-center justify-center gap-2">
-                        {aiSeedLoading ? <><Spinner className="w-3 h-3" /> Analizuję domenę...</> : '🔍 Znajdź seed keywords z DataForSEO'}
-                      </button>
-                      {aiSeedError && <p className="text-red-500 text-xs mt-1">{aiSeedError}</p>}
-                      {aiSeeds.length > 0 && (
-                        <div className="mt-2 space-y-1">
-                          <p className="text-xs text-gray-400">Kliknij aby wybrać:</p>
-                          {aiSeeds.map((s, i) => (
-                            <button key={i} onClick={() => { setSeedKw(s.seed); setAiSeedMode(false) }}
-                              className={`w-full text-left p-2 rounded-lg border text-xs transition-colors ${seedKw === s.seed ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-600 hover:border-blue-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}>
-                              <span className="font-medium text-gray-900 dark:text-white">{s.seed}</span>
-                              <span className="text-gray-400 ml-2">~{s.estimated_articles} art.</span>
-                              <p className="text-gray-400 mt-0.5">{s.reason}</p>
-                            </button>
-                          ))}
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Anchor text klienta</label>
-                  <input value={anchorText} onChange={e => setAnchorText(e.target.value)}
-                    placeholder="usługi prawne"
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                </div>
-                <div>
                   <label className="block text-xs font-medium text-gray-500 mb-1">Custom prompt (opcjonalnie)</label>
                   <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
-                    rows={3}
-                    placeholder="Dodatkowe wskazówki dla AI, np. styl, ton, wymagania..."
+                    rows={2}
+                    placeholder="Dodatkowe wskazówki dla AI..."
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
                 </div>
                 <div className="grid grid-cols-2 gap-2">
@@ -453,7 +416,7 @@ function BulkTab() {
                 </div>
                 <button onClick={bulkCreateSchedules} disabled={running || !selectedList.length}
                   className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
-                  {running ? '⟳ Tworzę...' : `+ Utwórz harmonogramy (${selectedList.length})`}
+                  {running ? <><Spinner className="w-4 h-4 inline mr-1" /> Tworzę...</> : `+ Utwórz harmonogramy (${selectedList.length})`}
                 </button>
               </>
             )}
