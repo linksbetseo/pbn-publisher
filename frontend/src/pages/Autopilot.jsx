@@ -969,6 +969,7 @@ export default function Autopilot() {
               <select value={newForm.image_source} onChange={e => set('image_source', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <option value="freepik_flux">🌊 Flux Pro 1.1 (AI — rekomendowane)</option>
                 <option value="freepik_zimage">⚡ Z-Image Turbo (AI — szybsze)</option>
+                <option value="freepik_stock">📷 Freepik Stock (wyszukiwanie)</option>
                 <option value="gemini">🤖 Gemini (AI — darmowe)</option>
                 <option value="dalle">🎨 DALL-E 3 (AI — ~$0.04/zdjęcie)</option>
                 <option value="none">🚫 Bez zdjęcia</option>
@@ -1084,6 +1085,7 @@ export default function Autopilot() {
                   >
                     <option value="freepik_flux">🌊 Flux</option>
                     <option value="freepik_zimage">⚡ Z-Image</option>
+                    <option value="freepik_stock">📷 Stock</option>
                     <option value="gemini">🤖 Gemini</option>
                     <option value="dalle">🎨 DALL-E</option>
                     <option value="none">🚫 Brak</option>

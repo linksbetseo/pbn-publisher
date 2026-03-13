@@ -101,13 +101,13 @@ async def get_pillar_url(schedule_id: int, my_domain_id: int, pillar_anchor: str
 async def fetch_image(image_source: str, keyword: str, title: str, img_prompt: str) -> tuple[str | None, str]:
     """Fetch image based on image_source setting."""
     from services.openai_service import generate_image
+    from services.freepik_service import generate_image_freepik
     from services.freepik_generate_service import generate_image_zimage, generate_image_flux
     from services.gemini_image_service import generate_image_gemini
 
     if image_source == "none":
         return None, "none"
 
-    # AI-only providers — no stock photos (copyright-safe, no attribution needed)
     providers = {
         "freepik_flux": [
             ("freepik_flux", lambda: generate_image_flux(img_prompt)),
@@ -118,6 +118,9 @@ async def fetch_image(image_source: str, keyword: str, title: str, img_prompt: s
             ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
             ("freepik_flux", lambda: generate_image_flux(img_prompt)),
             ("gemini", lambda: generate_image_gemini(img_prompt)),
+        ],
+        "freepik_stock": [
+            ("freepik_stock", lambda: generate_image_freepik(keyword)),
         ],
         "dalle": [
             ("dalle", lambda: generate_image(img_prompt)),

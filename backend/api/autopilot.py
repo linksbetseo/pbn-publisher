@@ -1808,7 +1808,7 @@ async def test_images():
     prompt = f"A photorealistic scene that visually represents: {title}. Show a concrete moment related to '{keyword}'. Editorial photography, natural lighting, NO text, NO watermarks. 16:9 landscape."
     results = {}
 
-    for source in ["freepik_flux", "freepik_zimage", "gemini", "dalle"]:
+    for source in ["freepik_flux", "freepik_zimage", "freepik_stock", "gemini", "dalle"]:
         t0 = time.time()
         try:
             img, provider = await _fetch_image(source, keyword, title, prompt)

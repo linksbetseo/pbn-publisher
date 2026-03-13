@@ -13,6 +13,7 @@ from typing import List, Optional
 from config import DB_PATH
 from services.openai_service import generate_article, generate_image, describe_image_and_generate
 from services.gemini_image_service import generate_image_gemini
+from services.freepik_service import generate_image_freepik
 from services.freepik_generate_service import generate_image_zimage, generate_image_flux
 from services.wordpress_service import publish_post
 
@@ -272,12 +273,11 @@ def _build_image_prompt(topic: str, title: str = "", provider: str = "") -> str:
 
 
 async def _fetch_image(topic: str, image_source: str, title: str = "") -> Optional[str]:
-    """Fetch AI-generated image. All providers produce original images — no copyright issues."""
+    """Fetch image based on image_source setting. Tries primary provider, then fallbacks."""
     if image_source == "none":
         return None
     img_prompt = _build_image_prompt(topic, title, provider=image_source)
 
-    # AI-only provider chains — no stock photos (copyright-safe, no attribution needed)
     _chains = {
         "freepik_flux": [
             ("freepik_flux", lambda: generate_image_flux(img_prompt)),
@@ -288,6 +288,9 @@ async def _fetch_image(topic: str, image_source: str, title: str = "") -> Option
             ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
             ("freepik_flux", lambda: generate_image_flux(img_prompt)),
             ("gemini", lambda: generate_image_gemini(img_prompt)),
+        ],
+        "freepik_stock": [
+            ("freepik_stock", lambda: generate_image_freepik(topic)),
         ],
         "dalle": [
             ("dalle", lambda: generate_image(img_prompt)),

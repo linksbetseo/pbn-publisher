@@ -15,6 +15,7 @@ const GPT_MODELS = [
 const IMAGE_SOURCES = [
   { value: 'freepik_flux', label: 'Freepik Flux (AI)', desc: 'AI generowane — Flux Pro 1.1, najlepsza jakosc (rekomendowane)' },
   { value: 'freepik_zimage', label: 'Freepik Z-Image (AI)', desc: 'AI generowane — Turbo model (szybszy, dobra jakosc)' },
+  { value: 'freepik_stock', label: 'Freepik Stock', desc: 'Zdjecia stockowe z Freepik (najszybsze)' },
   { value: 'gemini', label: 'Gemini (AI)', desc: 'Google Gemini — darmowe (preview), nieprzewidywalne' },
   { value: 'dalle', label: 'DALL-E 3 (AI)', desc: 'OpenAI DALL-E 3 — najwyzsza jakosc, ~$0.04/img' },
   { value: 'none', label: 'Brak obrazka', desc: 'Artykuly bez featured image' },
