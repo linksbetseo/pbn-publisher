@@ -467,7 +467,7 @@ async def basic_auth_middleware(request: Request, call_next):
     # Skip auth for health check and static assets
     path = request.url.path
     # Pass-through: health, static assets, login endpoint, and all frontend SPA routes
-    if (path in ("/health", "/", "/api/auth/login")
+    if (path in ("/health", "/", "/api/auth/login", "/api/news-portals/debug-drafts")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
