@@ -1831,6 +1831,7 @@ async def list_published_urls(
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
 
+    logger.info(f"[PublishedURLs] portal_id={portal_id} total={total} returned={len(rows)} where={where}")
     return {
         "items": rows,
         "total": total,
@@ -1838,3 +1839,22 @@ async def list_published_urls(
         "per_page": per_page,
         "pages": (total + per_page - 1) // per_page if per_page else 1,
     }
+
+
+@router.get("/debug-drafts")
+async def debug_drafts():
+    """Debug: show draft statuses and wp_post_url."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, portal_id, status, wp_post_url, published_at,
+                      SUBSTR(title, 1, 60) as title_short
+               FROM news_drafts ORDER BY id DESC LIMIT 30"""
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        async with db.execute(
+            "SELECT status, COUNT(*) as cnt FROM news_drafts GROUP BY status"
+        ) as cur:
+            stats = {r["status"]: r["cnt"] for r in await cur.fetchall()}
+    return {"stats": stats, "recent": rows}
