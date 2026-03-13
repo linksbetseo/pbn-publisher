@@ -34,6 +34,15 @@ export default function Settings() {
   const [savingModel, setSavingModel] = useState(false)
   const [savingImage, setSavingImage] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [notifyPrefs, setNotifyPrefs] = useState({
+    notify_autopilot_done: true,
+    notify_bulk_publish_done: true,
+    notify_news_approve: true,
+    notify_news_generate: true,
+    notify_health_snapshot: true,
+    notify_errors: true,
+  })
+  const [savingPrefs, setSavingPrefs] = useState(false)
   const addToast = useToast()
 
   useEffect(() => {
@@ -47,6 +56,7 @@ export default function Settings() {
         if (s.default_image_source) setImageSource(s.default_image_source)
         setEncryptionKeySet(!!s.encryption_key_set)
         if (s.api_keys_status) setApiKeysStatus(s.api_keys_status)
+        if (s.notify_prefs) setNotifyPrefs(prev => ({ ...prev, ...s.notify_prefs }))
       })
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -95,6 +105,18 @@ export default function Settings() {
       addToast(e.response?.data?.detail || 'Blad zapisu', 'error')
     } finally {
       setSavingImage(false)
+    }
+  }
+
+  const handleSaveNotifyPrefs = async () => {
+    setSavingPrefs(true)
+    try {
+      await notifications.saveNotifyPrefs(notifyPrefs)
+      addToast('Preferencje powiadomien zapisane', 'success')
+    } catch (e) {
+      addToast(e.response?.data?.detail || 'Blad zapisu preferencji', 'error')
+    } finally {
+      setSavingPrefs(false)
     }
   }
 
@@ -357,6 +379,51 @@ export default function Settings() {
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Notification Preferences */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm p-6">
+        <div className="mb-5">
+          <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200">Rodzaje powiadomien Telegram</h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Wybierz o czym chcesz otrzymywac powiadomienia</p>
+        </div>
+
+        <div className="space-y-3 mb-5">
+          {[
+            { key: 'notify_autopilot_done', label: 'Autopilot zakonczony', desc: 'Po zakonczeniu dziennego autopilota — podsumowanie publikacji' },
+            { key: 'notify_bulk_publish_done', label: 'Publikacja zbiorcza', desc: 'Po zakonczeniu ręcznej publikacji zbiorczej' },
+            { key: 'notify_news_approve', label: 'News Portal — publikacja', desc: 'Po zatwierdzeniu i opublikowaniu artykulu z news portalu' },
+            { key: 'notify_news_generate', label: 'News Portal — generowanie', desc: 'Po wygenerowaniu nowych artykulow AI z news portalu' },
+            { key: 'notify_health_snapshot', label: 'Health snapshot zakonczony', desc: 'Po zakonczeniu skanowania zdrowia domen' },
+            { key: 'notify_errors', label: 'Bledy i ostrzezenia', desc: 'Krytyczne bledy publikacji, problemy z API, nieudane operacje' },
+          ].map(item => (
+            <label key={item.key}
+              className="flex items-start gap-3 p-3 rounded-lg border border-gray-200 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer transition-colors"
+            >
+              <input
+                type="checkbox"
+                checked={!!notifyPrefs[item.key]}
+                onChange={e => setNotifyPrefs(prev => ({ ...prev, [item.key]: e.target.checked }))}
+                className="w-4 h-4 text-blue-600 rounded mt-0.5"
+              />
+              <div className="flex-1 min-w-0">
+                <span className="text-sm font-medium text-gray-900 dark:text-white">{item.label}</span>
+                <p className="text-xs text-gray-500 dark:text-gray-400">{item.desc}</p>
+              </div>
+            </label>
+          ))}
+        </div>
+
+        <button
+          onClick={handleSaveNotifyPrefs}
+          disabled={savingPrefs || !configured}
+          className="px-6 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors"
+        >
+          {savingPrefs ? 'Zapisywanie...' : 'Zapisz preferencje'}
+        </button>
+        {!configured && (
+          <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">Najpierw skonfiguruj Telegram powyzej</p>
+        )}
       </div>
     </div>
   )

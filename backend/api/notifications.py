@@ -46,11 +46,20 @@ async def get_settings():
     bot_token = ""
     chat_id = ""
     gpt_model = "gpt-4o-mini"
+    # Notification preference keys
+    _notify_keys = [
+        "notify_autopilot_done", "notify_bulk_publish_done",
+        "notify_news_approve", "notify_news_generate",
+        "notify_health_snapshot", "notify_errors",
+    ]
+    notify_prefs: dict[str, bool] = {k: True for k in _notify_keys}  # default all ON
+
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
                 "SELECT key, value FROM settings WHERE key IN "
-                "('telegram_bot_token', 'telegram_chat_id', 'gpt_model')"
+                "('telegram_bot_token', 'telegram_chat_id', 'gpt_model',"
+                + ",".join(f"'{k}'" for k in _notify_keys) + ")"
             ) as cur:
                 for key, value in await cur.fetchall():
                     if key == "telegram_bot_token" and value:
@@ -59,6 +68,8 @@ async def get_settings():
                         chat_id = value
                     elif key == "gpt_model" and value:
                         gpt_model = value
+                    elif key in _notify_keys:
+                        notify_prefs[key] = value == "1"
     except Exception:
         pass
 
@@ -94,6 +105,7 @@ async def get_settings():
         "encryption_key_set": encryption_key_set,
         "api_keys_status": api_keys_status,
         "default_image_source": default_image_source,
+        "notify_prefs": notify_prefs,
     }
 
 
@@ -165,3 +177,41 @@ async def save_default_image_source(body: dict):
         )
         await db.commit()
     return {"ok": True, "default_image_source": source}
+
+
+# All valid notification preference keys
+NOTIFY_KEYS = {
+    "notify_autopilot_done", "notify_bulk_publish_done",
+    "notify_news_approve", "notify_news_generate",
+    "notify_health_snapshot", "notify_errors",
+}
+
+
+@router.post("/notify-prefs")
+async def save_notify_prefs(body: dict):
+    """Save notification preferences (checkboxes). Body: {key: bool, ...}."""
+    await _ensure_settings_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        for key, val in body.items():
+            if key in NOTIFY_KEYS:
+                await db.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    (key, "1" if val else "0"),
+                )
+        await db.commit()
+    return {"ok": True}
+
+
+async def should_notify(pref_key: str) -> bool:
+    """Check if a notification preference is enabled. Default: True (all on)."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT value FROM settings WHERE key = ?", (pref_key,)
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    return row[0] == "1"
+    except Exception:
+        pass
+    return True  # default on

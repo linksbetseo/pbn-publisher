@@ -617,22 +617,24 @@ async def _run_publish_job(job_id: str, body: "PublishRequest", domains: list):
 
     _job_finish(job_id)
 
-    # Send Telegram notification with publish summary
+    # Send Telegram notification with publish summary (respects user preference)
     try:
-        from services.telegram_service import send_telegram
-        job = _publish_jobs.get(job_id, {})
-        pub_count = job.get("published", 0)
-        fail_count = job.get("failed", 0)
-        total = job.get("total", 0)
-        topic_label = body.topic[:60] if body.topic else "manual"
-        msg = (
-            f"<b>PBN Publish done</b>\n\n"
-            f"Topic: {topic_label}\n"
-            f"Published: <b>{pub_count}/{total}</b>\n"
-        )
-        if fail_count:
-            msg += f"Failed: <b>{fail_count}</b>\n"
-        await send_telegram(msg)
+        from api.notifications import should_notify
+        if await should_notify("notify_bulk_publish_done"):
+            from services.telegram_service import send_telegram
+            job = _publish_jobs.get(job_id, {})
+            pub_count = job.get("published", 0)
+            fail_count = job.get("failed", 0)
+            total = job.get("total", 0)
+            topic_label = body.topic[:60] if body.topic else "manual"
+            msg = (
+                f"<b>PBN Publish done</b>\n\n"
+                f"Topic: {topic_label}\n"
+                f"Published: <b>{pub_count}/{total}</b>\n"
+            )
+            if fail_count:
+                msg += f"Failed: <b>{fail_count}</b>\n"
+            await send_telegram(msg)
     except Exception:
         pass
 

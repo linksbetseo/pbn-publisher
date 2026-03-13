@@ -1266,22 +1266,24 @@ async def run_daily_all():
         else:
             final.append(res)
 
-    # Send Telegram summary
+    # Send Telegram summary (respects user preference)
     try:
-        from services.telegram_service import send_telegram
-        total_pub = sum(r.get("published", 0) for r in final)
-        total_fail = sum(r.get("failed", 0) for r in final)
-        total_errors = sum(1 for r in final if r.get("error"))
-        msg = (
-            f"<b>Autopilot daily run</b>\n\n"
-            f"Schedules: <b>{len(final)}</b>\n"
-            f"Published: <b>{total_pub}</b>\n"
-        )
-        if total_fail:
-            msg += f"Failed: <b>{total_fail}</b>\n"
-        if total_errors:
-            msg += f"Errors: <b>{total_errors}</b>\n"
-        await send_telegram(msg)
+        from api.notifications import should_notify
+        if await should_notify("notify_autopilot_done"):
+            from services.telegram_service import send_telegram
+            total_pub = sum(r.get("published", 0) for r in final)
+            total_fail = sum(r.get("failed", 0) for r in final)
+            total_errors = sum(1 for r in final if r.get("error"))
+            msg = (
+                f"<b>Autopilot daily run</b>\n\n"
+                f"Schedules: <b>{len(final)}</b>\n"
+                f"Published: <b>{total_pub}</b>\n"
+            )
+            if total_fail:
+                msg += f"Failed: <b>{total_fail}</b>\n"
+            if total_errors:
+                msg += f"Errors: <b>{total_errors}</b>\n"
+            await send_telegram(msg)
     except Exception:
         pass
 

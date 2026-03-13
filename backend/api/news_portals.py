@@ -1659,6 +1659,22 @@ async def auto_generate(portal_id: int, max_articles: int = Query(5, ge=1, le=20
         except Exception as e:
             errors.append(f"Cluster {cluster['id']}: {str(e)[:100]}")
 
+    # Telegram notification
+    if generated:
+        try:
+            from api.notifications import should_notify
+            if await should_notify("notify_news_generate"):
+                from services.telegram_service import send_telegram
+                _titles = "\n".join(f"  • {d['title'][:60]}" for d in generated[:5])
+                await send_telegram(
+                    f"<b>News Portal — wygenerowano {len(generated)} art.</b>\n\n"
+                    f"Portal ID: {portal_id}\n"
+                    f"{_titles}"
+                    + (f"\n  ... i {len(generated) - 5} wiecej" if len(generated) > 5 else "")
+                )
+        except Exception:
+            pass
+
     return {
         "fetch": fetch_result,
         "generated": len(generated),
@@ -1800,6 +1816,21 @@ async def approve_draft(draft_id: int):
             (result.get("url", ""), now_str, draft_id),
         )
         await db.commit()
+
+    # Telegram notification
+    try:
+        from api.notifications import should_notify
+        if await should_notify("notify_news_approve"):
+            from services.telegram_service import send_telegram
+            _wp_url = result.get("url", "")
+            await send_telegram(
+                f"<b>News Portal — opublikowano</b>\n\n"
+                f"{draft['title'][:80]}\n"
+                f"Domena: <b>{domain['domain']}</b>\n"
+                f"URL: {_wp_url}"
+            )
+    except Exception:
+        pass
 
     return {
         "draft_id": draft_id,

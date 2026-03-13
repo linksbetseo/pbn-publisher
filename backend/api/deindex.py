@@ -127,9 +127,12 @@ async def run_deindex_scan() -> dict:
     dead_urls = [{"url": r["url"], "domain": r["domain"], "status_code": r["status_code"]}
                  for r in results if not r["is_alive"]]
 
-    # Send Telegram alert if dead URLs found
+    # Send Telegram alert if dead URLs found (respects user preference)
     if dead > 0:
         try:
+            from api.notifications import should_notify
+            if not await should_notify("notify_errors"):
+                raise Exception("disabled")
             from services.telegram_service import send_telegram
             domains_affected = len(set(r["domain"] for r in results if not r["is_alive"]))
             msg = (
