@@ -939,7 +939,10 @@ function ReviewQueueTab({ portals }) {
       }
       setPreviewDraft(null)
       await loadDrafts()
-    } catch {}
+    } catch (err) {
+      const msg = err?.response?.data?.detail || err?.message || 'Nieznany błąd'
+      alert(`Błąd publikacji: ${msg}`)
+    }
     setApprovingId(null)
   }
 
