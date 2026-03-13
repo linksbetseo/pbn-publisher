@@ -412,11 +412,25 @@ def _compute_site_metrics(pillars: list[dict], seed: str, all_keywords: list[dic
     # Topical coverage depth: total supporting articles per pillar
     total_supporting = sum(len(p.get("supporting_keywords", [])) for p in pillars)
 
+    # Cluster completeness per pillar (content gap indicator)
+    # A pillar with high supporting count relative to SERP competition = well-covered
+    max_supporting = max((len(p.get("supporting_keywords", [])) for p in pillars), default=1) or 1
+    cluster_completeness = [
+        round(len(p.get("supporting_keywords", [])) / max_supporting, 2) for p in pillars
+    ]
+    avg_completeness = round(sum(cluster_completeness) / len(cluster_completeness), 3) if cluster_completeness else 0
+
+    # Firefly-safe velocity recommendation (Google's Firefly system flags publishing spikes)
+    # Recommendation: 2-4 articles/week for new sites, max 6-8 for established
+    recommended_weekly = min(4, max(2, len(pillars)))
+
     return {
         "site_focus": round(site_focus, 3),      # 0–1, higher is better
         "site_radius": round(site_radius, 3),     # 0–1, lower is better
         "coverage": len(pillars),                  # number of topic facets
         "total_articles": len(pillars) + total_supporting,
+        "avg_cluster_completeness": avg_completeness,  # 0–1, higher = fewer content gaps
+        "recommended_weekly_velocity": recommended_weekly,  # Firefly-safe max articles/week
         "focus_rating": (
             "excellent" if site_focus >= 0.7 else
             "good"      if site_focus >= 0.5 else
@@ -428,6 +442,12 @@ def _compute_site_metrics(pillars: list[dict], seed: str, all_keywords: list[dic
             "moderate" if site_radius <= 0.5 else
             "wide"     if site_radius <= 0.7 else
             "drifting"
+        ),
+        "completeness_rating": (
+            "comprehensive" if avg_completeness >= 0.7 else
+            "good"          if avg_completeness >= 0.5 else
+            "developing"    if avg_completeness >= 0.3 else
+            "sparse"
         ),
     }
 
@@ -561,6 +581,16 @@ async def generate_topical_map(
             "total_volume": cluster["total_volume"],
             "avg_difficulty": cluster["avg_difficulty"],
             "intent_distribution": intent_dist,
+            # Content gap indicators — how many subtopics need coverage
+            "content_gap": {
+                "total_subtopics": len(supporting),
+                "high_volume_gaps": len([k for k in supporting if k.get("search_volume", 0) >= 100]),
+                "low_kd_opportunities": len([k for k in supporting if k.get("keyword_difficulty", 50) < 30]),
+                "quick_wins": len([
+                    k for k in supporting
+                    if k.get("search_volume", 0) >= 50 and k.get("keyword_difficulty", 50) < 25
+                ]),
+            },
         })
 
     # Compute publishing priority score per pillar:

@@ -22,6 +22,8 @@ Pula 20 elementów — na długi artykuł losowane 3-4:
 18. case_study_box     — krótkie case study / przykład z życia
 19. summary_table      — tabela podsumowująca (kiedy wybrać co)
 20. action_steps       — box "Kolejne kroki / Co zrobić teraz"
+21. methodology_box    — box "Nasza metodologia" (contentEffort signal)
+22. data_insight       — box z unikatową analizą danych (Information Gain)
 """
 import json
 import random
@@ -82,6 +84,8 @@ _STYLES = {
     "time":       lambda: f'style="background:#e3f2fd;border:1px solid #90caf9;padding:{_vary(12)}px {_vary(18)}px;margin:{_vary(20)}px 0;border-radius:{_vary(8)}px;display:flex;gap:{_vary(24)}px;flex-wrap:wrap;"',
     "case":       lambda: f'style="background:#fafafa;border:1px solid #e0e0e0;border-top:4px solid #1a73e8;padding:{_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 0 {_vary(8)}px {_vary(8)}px;"',
     "action":     lambda: f'style="background:#e8f5e9;border-left:4px solid #43a047;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "methodology":lambda: f'style="background:#fce4ec;border-left:4px solid #c62828;padding:{_vary(16)}px {_vary(20)}px;margin:{_vary(24)}px 0;border-radius:0 {_vary(8)}px {_vary(8)}px 0;"',
+    "insight":    lambda: f'style="background:#e0f2f1;border:2px solid #00897b;padding:{_vary(18)}px {_vary(22)}px;margin:{_vary(24)}px 0;border-radius:{_vary(8)}px;"',
 }
 
 def _s(name: str) -> str:
@@ -376,6 +380,30 @@ def _build_action_steps(steps: list[str], lang_pl: bool) -> str:
     )
 
 
+def _build_methodology_box(methodology: str, lang_pl: bool) -> str:
+    """contentEffort signal — shows research methodology, boosts perceived effort."""
+    label = "🔬 Nasza metodologia" if lang_pl else "🔬 Our Methodology"
+    return (
+        f'<div {_s("methodology")}>\n'
+        f'<strong style="display:block;margin-bottom:8px;">{label}</strong>\n'
+        f'<p style="margin:0;font-size:0.95em;">{methodology}</p>\n'
+        f'</div>\n'
+    )
+
+
+def _build_data_insight(title: str, insight: str, source: str, lang_pl: bool) -> str:
+    """Information Gain element — unique data analysis not found in competing articles."""
+    label = "📈 Unikalna analiza" if lang_pl else "📈 Unique Analysis"
+    src_label = "Źródło" if lang_pl else "Source"
+    return (
+        f'<div {_s("insight")}>\n'
+        f'<strong style="display:block;margin-bottom:8px;">{label}: {title}</strong>\n'
+        f'<p style="margin:0 0 8px;">{insight}</p>\n'
+        f'<p style="margin:0;font-size:0.85em;color:#555;"><em>{src_label}: {source}</em></p>\n'
+        f'</div>\n'
+    )
+
+
 # ── GPT-generowane dane ────────────────────────────────────────────────────────
 
 async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> dict:
@@ -570,6 +598,33 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
             raw = json.loads(resp.choices[0].message.content)
             return {"steps": raw.get("steps", [])[:5]}
 
+        elif element == "methodology_box":
+            prompt = (
+                f"Opisz w 2-3 zdaniach metodologię przygotowania artykułu o '{topic}'. "
+                f"Wymień konkretne źródła danych (np. raporty branżowe, dane GUS, badania akademickie, "
+                f"analiza ofert rynkowych). Pokaż systematyczny research. Bez wstępu, od razu treść."
+                if lang_pl else
+                f"Describe in 2-3 sentences the research methodology for an article about '{topic}'. "
+                f"Mention specific data sources (industry reports, government data, academic studies, "
+                f"market analysis). Show systematic research effort. No preamble, content only."
+            )
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=150)
+            return {"methodology": resp.choices[0].message.content.strip()}
+
+        elif element == "data_insight":
+            prompt = (
+                f"Podaj 1 unikatową analizę danych lub wnioski, których nie znajdzie się w standardowych "
+                f"artykułach o '{topic}'. Porównaj dane z różnych źródeł, pokaż trend lub korelację, "
+                f"którą inni pominęli. JSON: {{\"title\": str (max 8 słów), \"insight\": str (3-4 zdania), \"source\": str}}. Tylko JSON."
+                if lang_pl else
+                f"Give 1 unique data analysis or insight not found in standard articles about '{topic}'. "
+                f"Cross-reference data from multiple sources, show a trend or correlation others missed. "
+                f"JSON: {{\"title\": str (max 8 words), \"insight\": str (3-4 sentences), \"source\": str}}. JSON only."
+            )
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.6, max_tokens=250, response_format={"type":"json_object"})
+            raw = json.loads(resp.choices[0].message.content)
+            return {"title": raw.get("title",""), "insight": raw.get("insight",""), "source": raw.get("source","")}
+
         elif element == "source_citations":
             return {}
 
@@ -603,6 +658,8 @@ ALL_ELEMENTS = [
     "case_study_box",
     "summary_table",
     "action_steps",
+    "methodology_box",
+    "data_insight",
 ]
 
 
@@ -812,6 +869,20 @@ async def enrich_article(
                 para_end = content.find("</p>", h2_matches[mid_idx])
                 if para_end != -1:
                     content = content[:para_end + 4] + f"\n\n{box}" + content[para_end + 4:]
+
+    # ── Methodology Box — po update_box, przed treścią (contentEffort) ─────────
+    if "methodology_box" in chosen:
+        data = gpt_results.get("methodology_box", {})
+        if data.get("methodology"):
+            box = _build_methodology_box(data["methodology"], lang_pl)
+            content = _insert_after_section(content, 0, box)
+
+    # ── Data Insight — po 2. lub 3. sekcji (Information Gain) ───────────────
+    if "data_insight" in chosen:
+        data = gpt_results.get("data_insight", {})
+        if data.get("insight"):
+            box = _build_data_insight(data.get("title",""), data["insight"], data.get("source",""), lang_pl)
+            content = _insert_after_section(content, random.randint(2, 3), box)
 
     # ── Action Steps — na końcu przed FAQ ─────────────────────────────────────
     if "action_steps" in chosen:

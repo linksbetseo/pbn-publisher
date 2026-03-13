@@ -1209,6 +1209,9 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
                     "- Pisz KONKRETNIE: dane, liczby, cytaty, fakty — NIE ogólniki\n"
                     "- ENCJE: Używaj konkretnych nazw własnych (osoby, firmy, instytucje)\n"
                     "- E-E-A-T: Wpleć perspektywę ekspercką ('Eksperci wskazują...', 'Analitycy podkreślają...')\n"
+                    "- INFORMATION GAIN: Dodaj 1 fakt/kontekst którego nie ma w typowych newsach na ten temat\n"
+                    "- HUMANIZACJA: Mieszaj krótkie zdania (5-8 słów) z długimi (20-30). "
+                    "1 pytanie retoryczne lub porównanie na sekcję.\n"
                     "- 150-250 słów na sekcję\n"
                     "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. TYLKO HTML."
                     f"{editorial_ctx}"
@@ -1229,6 +1232,9 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
                     "- Be SPECIFIC: data, numbers, quotes, facts — NO generalities\n"
                     "- ENTITIES: Use proper nouns (people, companies, institutions)\n"
                     "- E-E-A-T: Include expert perspective ('Experts point out...', 'Analysts emphasize...')\n"
+                    "- INFORMATION GAIN: Add 1 fact/context missing from typical news on this topic\n"
+                    "- HUMANIZATION: Mix short sentences (5-8 words) with long (20-30). "
+                    "1 rhetorical question or comparison per section.\n"
                     "- 150-250 words per section\n"
                     "STRICT: NO markdown. ONLY HTML."
                     f"{editorial_ctx}"
@@ -1369,6 +1375,77 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
 
     # Final cleanup
     content = _strip_markdown_remnants(content)
+
+    # ── STEP 8: NewsArticle + FAQPage JSON-LD Schema ──
+    _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    # Author entity pool — varies per portal for anti-footprint + E-E-A-T entity building
+    _news_authors_pl = [
+        {"name": "Redakcja", "desc": "Zespół redakcyjny portalu"},
+        {"name": "Dział Informacyjny", "desc": "Redaktorzy i dziennikarze portalu"},
+        {"name": "Newsroom", "desc": "Centrum informacyjne portalu"},
+    ]
+    _news_authors_en = [
+        {"name": "Editorial Team", "desc": "Portal editorial staff"},
+        {"name": "Newsroom", "desc": "News desk team"},
+        {"name": "News Desk", "desc": "Portal journalists and editors"},
+    ]
+    _author = random.choice(_news_authors_pl if lang_pl else _news_authors_en)
+    portal_name = portal.get("name", "News Portal")
+
+    schema_blocks = []
+
+    # NewsArticle schema (preferred over Article for news content — confirmed by Google docs)
+    news_article_ld = {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": title[:110],
+        "description": excerpt[:155] if excerpt else "",
+        "datePublished": _now_iso,
+        "dateModified": _now_iso,
+        "author": {
+            "@type": "Person",
+            "name": _author["name"],
+            "description": _author["desc"],
+        },
+        "publisher": {
+            "@type": "Organization",
+            "name": portal_name,
+        },
+        "mainEntityOfPage": {"@type": "WebPage"},
+        "inLanguage": portal_language,
+    }
+    if source_urls:
+        news_article_ld["citation"] = source_urls[:3]
+    schema_blocks.append(news_article_ld)
+
+    # FAQPage schema if article has H3 Q&A patterns
+    faq_pairs = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', content, re.DOTALL | re.IGNORECASE)
+    if faq_pairs and len(faq_pairs) >= 2:
+        faq_ld = {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": re.sub(r'<[^>]+>', '', q).strip(),
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": re.sub(r'<[^>]+>', '', a).strip()
+                    }
+                }
+                for q, a in faq_pairs[:6]
+            ]
+        }
+        schema_blocks.append(faq_ld)
+
+    # Inject schema
+    if schema_blocks:
+        all_schema = "\n".join(
+            f'<script type="application/ld+json">{json.dumps(s, ensure_ascii=False)}</script>'
+            for s in schema_blocks
+        )
+        content = all_schema + "\n" + content
 
     # Fingerprint for dedup
     fingerprint = _content_fingerprint(content)
