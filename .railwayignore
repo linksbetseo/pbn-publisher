@@ -1,0 +1,9 @@
+node_modules
+frontend/dist
+backend/frontend_dist
+__pycache__
+*.pyc
+.git
+*.db
+.env
+automatyzacja.docx
