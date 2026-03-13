@@ -908,3 +908,55 @@ async def test_wp_connection(domain_id: int):
         return {"ok": False, "domain": d["domain"], "status_code": 0, "message": f"Blad polaczenia: {str(e)[:200]}"}
     except Exception as e:
         return {"ok": False, "domain": d["domain"], "status_code": 0, "message": f"Blad: {str(e)[:200]}"}
+
+
+@router.get("/diagnostics")
+async def health_diagnostics():
+    """Diagnostic endpoint: check DFS credentials, test one domain, show last snapshot stats."""
+    await ensure_tables()
+    diag = {
+        "dataforseo_configured": bool(DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD),
+        "whoisxml_configured": bool(WHOISXML_KEY),
+    }
+
+    # Count domains
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM my_domains WHERE active=1") as cur:
+            diag["active_domains"] = (await cur.fetchone())[0]
+        # Last snapshot stats
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT COUNT(*) as total,
+                      SUM(CASE WHEN traffic > 0 THEN 1 ELSE 0 END) as with_traffic,
+                      SUM(CASE WHEN keywords > 0 THEN 1 ELSE 0 END) as with_keywords,
+                      SUM(CASE WHEN wp_ok = 1 THEN 1 ELSE 0 END) as wp_ok_count,
+                      MAX(snapped_at) as last_snap
+               FROM domain_health_snapshots
+               WHERE id IN (SELECT MAX(id) FROM domain_health_snapshots GROUP BY my_domain_id)"""
+        ) as cur:
+            snap = await cur.fetchone()
+            diag["last_snapshot"] = dict(snap) if snap else None
+        # Snapshot progress
+        async with db.execute(
+            "SELECT * FROM domain_health_snapshot_progress ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            prog = await cur.fetchone()
+            diag["last_progress"] = dict(prog) if prog else None
+
+    # Test DFS with first active domain
+    if diag["dataforseo_configured"]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT domain FROM my_domains WHERE active=1 LIMIT 1") as cur:
+                row = await cur.fetchone()
+        if row:
+            test_domain = row[0]
+            diag["dfs_test_domain"] = test_domain
+            try:
+                result = await _dfs_domain_metrics(test_domain)
+                diag["dfs_test_result"] = result or {"note": "No data returned (domain may have no organic visibility)"}
+            except Exception as e:
+                diag["dfs_test_error"] = str(e)
+    else:
+        diag["dfs_test_note"] = "Skipped — DATAFORSEO_LOGIN or DATAFORSEO_PASSWORD not set"
+
+    return diag
