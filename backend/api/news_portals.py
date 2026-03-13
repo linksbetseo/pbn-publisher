@@ -515,11 +515,17 @@ async def global_stats():
         ) as cur:
             published_today = (await cur.fetchone())["cnt"]
 
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM news_drafts WHERE status = 'published'"
+        ) as cur:
+            published_total = (await cur.fetchone())["cnt"]
+
     return {
         "total_portals": total_portals,
         "total_sources": total_sources,
         "pending_drafts": pending_drafts,
         "published_today": published_today,
+        "published_total": published_total,
     }
 
 
@@ -540,8 +546,8 @@ async def list_portals():
                 np.active, np.created_at,
                 md.domain AS domain_name,
                 (SELECT COUNT(*) FROM news_sources ns WHERE ns.portal_id = np.id) AS source_count,
-                (SELECT COUNT(*) FROM news_drafts nd WHERE nd.portal_id = np.id AND nd.status = 'pending') AS pending_drafts,
-                (SELECT COUNT(*) FROM news_drafts nd WHERE nd.portal_id = np.id AND nd.status = 'published') AS published_drafts
+                (SELECT COUNT(*) FROM news_drafts nd WHERE nd.portal_id = np.id AND nd.status = 'pending') AS pending_count,
+                (SELECT COUNT(*) FROM news_drafts nd WHERE nd.portal_id = np.id AND nd.status = 'published') AS published_count
             FROM news_portals np
             LEFT JOIN my_domains md ON md.id = np.my_domain_id
             ORDER BY np.created_at DESC
@@ -801,14 +807,14 @@ async def fetch_and_cluster(portal_id: int):
                         desc_clean = re.sub(r"<[^>]+>", " ", fi.get("description", ""))
                         desc_clean = re.sub(r"\s+", " ", desc_clean).strip()
                         try:
-                            await db.execute(
+                            cur = await db.execute(
                                 """INSERT OR IGNORE INTO news_items
                                    (source_id, portal_id, title, url, content, published_at, fingerprint)
                                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                                 (source["id"], portal_id, fi["title"], fi["link"],
                                  desc_clean[:5000], fi.get("pubDate", ""), fp),
                             )
-                            if db.total_changes > 0:
+                            if cur.rowcount > 0:
                                 inserted += 1
                         except Exception:
                             pass  # UNIQUE constraint — item already exists
@@ -1060,6 +1066,40 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
     return dict(draft)
 
 
+@router.post("/{portal_id}/auto-generate")
+async def auto_generate(portal_id: int, max_articles: int = Query(5, ge=1, le=20)):
+    """One-click: fetch RSS feeds, cluster, and auto-generate drafts for all new clusters."""
+    # Step 1: fetch
+    fetch_result = await fetch_and_cluster(portal_id)
+
+    # Step 2: get unprocessed clusters
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM news_clusters WHERE portal_id = ? AND status = 'new' ORDER BY created_at DESC LIMIT ?",
+            (portal_id, max_articles),
+        ) as cur:
+            new_clusters = [dict(r) for r in await cur.fetchall()]
+
+    # Step 3: generate a draft for each cluster
+    generated = []
+    errors = []
+    for cluster in new_clusters:
+        try:
+            draft = await generate_draft(portal_id, GenerateRequest(cluster_id=cluster["id"]))
+            generated.append({"draft_id": draft.get("id"), "title": draft.get("title", "")})
+        except Exception as e:
+            errors.append(f"Cluster {cluster['id']}: {str(e)[:100]}")
+
+    return {
+        "fetch": fetch_result,
+        "generated": len(generated),
+        "drafts": generated,
+        "errors": errors if errors else None,
+    }
+
+
 @router.post("/drafts/{draft_id}/approve")
 async def approve_draft(draft_id: int):
     """Approve a draft and publish it to the portal's linked WordPress domain."""
@@ -1091,7 +1131,6 @@ async def approve_draft(draft_id: int):
         domain = dict(domain)
 
     # Publish to WordPress
-    wp_pass = get_plain_password(domain["wp_pass"])
     result = await publish_post(
         domain=domain["domain"],
         wp_login=domain["wp_login"],

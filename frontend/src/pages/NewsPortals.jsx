@@ -557,21 +557,26 @@ function PreviewDraftModal({ draft, onClose, onApprove, onReject, onEdit }) {
 
         <div className="flex-1 overflow-y-auto p-6">
           {/* Source URLs */}
-          {draft.source_urls && draft.source_urls.length > 0 && (
-            <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
-              <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Źródła</p>
-              <div className="space-y-1">
-                {draft.source_urls.map((url, i) => (
-                  <a key={i} href={url} target="_blank" rel="noopener noreferrer"
-                    className="block text-xs text-blue-600 dark:text-blue-400 hover:underline truncate">{url}</a>
-                ))}
+          {(() => {
+            let urls = draft.source_urls
+            if (typeof urls === 'string') { try { urls = JSON.parse(urls) } catch { urls = [] } }
+            if (!Array.isArray(urls) || urls.length === 0) return null
+            return (
+              <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Źródła</p>
+                <div className="space-y-1">
+                  {urls.map((url, i) => (
+                    <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                      className="block text-xs text-blue-600 dark:text-blue-400 hover:underline truncate">{url}</a>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )
+          })()}
 
           {/* Content */}
           <div className="prose prose-sm dark:prose-invert max-w-none"
-            dangerouslySetInnerHTML={{ __html: draft.content || '<p class="text-gray-400">Brak treści</p>' }} />
+            dangerouslySetInnerHTML={{ __html: (draft.content || '<p class="text-gray-400">Brak treści</p>').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '') }} />
         </div>
 
         <div className="p-6 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between">
@@ -681,12 +686,18 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
     setFetchingId(null)
   }
 
-  const handleGenerate = async (portalId) => {
+  const [autoResult, setAutoResult] = useState(null)
+
+  const handleAutoGenerate = async (portalId) => {
     setGeneratingId(portalId)
+    setAutoResult(null)
     try {
-      await api.post(`/api/news-portals/${portalId}/generate`)
+      const res = await api.post(`/api/news-portals/${portalId}/auto-generate`)
+      setAutoResult({ portalId, ...res.data })
       onRefresh()
-    } catch {}
+    } catch (err) {
+      setAutoResult({ portalId, error: err.response?.data?.detail || 'Błąd generowania' })
+    }
     setGeneratingId(null)
   }
 
@@ -812,7 +823,7 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
                   </svg>
                 )}
               </button>
-              <button onClick={() => handleGenerate(p.id)} disabled={generatingId === p.id} title="Generuj artykuł"
+              <button onClick={() => handleAutoGenerate(p.id)} disabled={generatingId === p.id} title="Pobierz i generuj artykuły"
                 className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors disabled:opacity-50">
                 {generatingId === p.id ? <Spinner className="w-4 h-4" /> : (
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -831,6 +842,35 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
           </div>
         ))}
       </div>
+
+      {/* Auto-generate result banner */}
+      {autoResult && (
+        <div className={`mt-4 p-4 rounded-xl border ${autoResult.error ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              {autoResult.error ? (
+                <p className="text-sm text-red-700 dark:text-red-300">{autoResult.error}</p>
+              ) : (
+                <>
+                  <p className="text-sm font-medium text-green-800 dark:text-green-300">
+                    Pobrano {autoResult.fetch?.new_items ?? 0} nowych wiadomości, utworzono {autoResult.fetch?.new_clusters ?? 0} klastrów, wygenerowano {autoResult.generated ?? 0} artykułów
+                  </p>
+                  {autoResult.fetch?.errors && autoResult.fetch.errors.length > 0 && (
+                    <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">
+                      Ostrzeżenia RSS: {autoResult.fetch.errors.join(', ')}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+            <button onClick={() => setAutoResult(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 ml-3">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
 
       {confirmDelete && (
         <ConfirmDialog
@@ -857,9 +897,10 @@ function ReviewQueueTab({ portals }) {
     setLoading(true)
     try {
       const promises = (portals || []).map(p =>
-        api.get(`/api/news-portals/${p.id}/drafts`).then(res =>
-          (res.data || []).map(d => ({ ...d, portal_name: p.name, portal_id: p.id }))
-        ).catch(() => [])
+        api.get(`/api/news-portals/${p.id}/drafts`).then(res => {
+          const items = res.data?.items || (Array.isArray(res.data) ? res.data : [])
+          return items.map(d => ({ ...d, portal_name: p.name, portal_id: p.id }))
+        }).catch(() => [])
       )
       const results = await Promise.all(promises)
       const all = results.flat().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
