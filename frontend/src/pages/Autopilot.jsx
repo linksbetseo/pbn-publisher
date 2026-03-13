@@ -547,7 +547,7 @@ export default function Autopilot() {
     min_coherence: 0,
     client_domain: '',
     anchor_text: '',
-    image_source: 'freepik_stock',
+    image_source: 'freepik_flux',
     custom_prompt: '',
   })
   const [addError, setAddError] = useState('')
@@ -585,7 +585,7 @@ export default function Autopilot() {
         min_coherence: Number(newForm.min_coherence),
       })
       setShowAdd(false)
-      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, min_coherence: 0, client_domain: '', anchor_text: '', image_source: 'freepik_stock', custom_prompt: '' })
+      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, min_coherence: 0, client_domain: '', anchor_text: '', image_source: 'freepik_flux', custom_prompt: '' })
       await load()
     } catch (e) {
       setAddError(e.response?.data?.detail || e.message)
@@ -967,10 +967,10 @@ export default function Autopilot() {
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Źródło zdjęć</label>
               <select value={newForm.image_source} onChange={e => set('image_source', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="freepik_stock">📷 Freepik Stock (wyszukiwanie)</option>
-                <option value="freepik_zimage">⚡ Freepik Z-Image (generowanie)</option>
-                <option value="freepik_flux">🌊 Freepik Flux Pro 1.1 (generowanie)</option>
-                <option value="dalle">🎨 DALL-E 3 (~$0.04/zdjęcie)</option>
+                <option value="freepik_flux">🌊 Flux Pro 1.1 (AI — rekomendowane)</option>
+                <option value="freepik_zimage">⚡ Z-Image Turbo (AI — szybsze)</option>
+                <option value="gemini">🤖 Gemini (AI — darmowe)</option>
+                <option value="dalle">🎨 DALL-E 3 (AI — ~$0.04/zdjęcie)</option>
                 <option value="none">🚫 Bez zdjęcia</option>
               </select>
             </div>
@@ -1077,14 +1077,14 @@ export default function Autopilot() {
                 {/* Image source */}
                 <div className="flex items-center gap-1 shrink-0">
                   <select
-                    defaultValue={sched.image_source || 'freepik_stock'}
+                    defaultValue={sched.image_source || 'freepik_flux'}
                     onChange={e => updateImageSource(sched.id, e.target.value)}
                     className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    title="Źródło zdjęć"
+                    title="Źródło zdjęć (AI-generowane)"
                   >
-                    <option value="freepik_stock">📷 Stock</option>
-                    <option value="freepik_zimage">⚡ Z-Image</option>
                     <option value="freepik_flux">🌊 Flux</option>
+                    <option value="freepik_zimage">⚡ Z-Image</option>
+                    <option value="gemini">🤖 Gemini</option>
                     <option value="dalle">🎨 DALL-E</option>
                     <option value="none">🚫 Brak</option>
                   </select>

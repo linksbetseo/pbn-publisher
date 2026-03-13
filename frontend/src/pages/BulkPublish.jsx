@@ -5,10 +5,10 @@ import { useToast } from '../components/Toast'
 
 const IMAGE_SOURCES = [
   { value: 'none', label: 'Brak obrazka' },
-  { value: 'freepik_stock', label: '📷 Freepik Stock' },
-  { value: 'freepik_zimage', label: '⚡ Freepik Z-Image (generowanie)' },
-  { value: 'freepik_flux', label: '🌊 Freepik Flux Pro 1.1 (generowanie)' },
-  { value: 'dalle', label: '🎨 DALL-E 3' },
+  { value: 'freepik_flux', label: '🌊 Freepik Flux (AI — rekomendowane)' },
+  { value: 'freepik_zimage', label: '⚡ Freepik Z-Image (AI — szybsze)' },
+  { value: 'gemini', label: '🤖 Gemini (AI — darmowe)' },
+  { value: 'dalle', label: '🎨 DALL-E 3 (AI — premium)' },
 ]
 
 function TabImport({ projects }) {

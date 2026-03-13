@@ -58,7 +58,7 @@ class ScheduleCreate(BaseModel):
     min_coherence: float = 0.0  # SiteRadius filter: 0=off, 0.1=light, 0.3=moderate, 0.5=strict
     client_domain: str = ""
     anchor_text: str = ""
-    image_source: str = "freepik_stock"
+    image_source: str = "freepik_flux"
     custom_prompt: str = ""
 
 
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS domain_schedules (
     total_keywords INTEGER DEFAULT 0,
     published_count INTEGER DEFAULT 0,
     last_run_at TEXT,
-    image_source TEXT DEFAULT 'freepik_stock',
+    image_source TEXT DEFAULT 'freepik_flux',
     custom_prompt TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -174,7 +174,7 @@ async def ensure_tables():
                 pass
         # Migracja domain_schedules
         for col, typedef in [
-            ("image_source", "TEXT DEFAULT 'freepik_stock'"),
+            ("image_source", "TEXT DEFAULT 'freepik_flux'"),
             ("custom_prompt", "TEXT DEFAULT ''"),
             ("min_coherence", "REAL DEFAULT 0.0"),
         ]:
@@ -733,11 +733,13 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     category_id = kw_row.get("wp_category_id") or None
 
                     img_prompt = (
-                        f"High-quality professional photo for blog article: '{title}'. "
-                        f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
+                        f"A photorealistic scene that visually represents: {title}. "
+                        f"Show a concrete moment or setting related to '{keyword}'. "
+                        f"Editorial photography style, natural lighting, shallow depth of field. "
+                        f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
                     )
                     image_b64, image_provider = await _fetch_image(
-                        sched.get("image_source", "freepik_stock"), keyword, title, img_prompt
+                        sched.get("image_source", "freepik_flux"), keyword, title, img_prompt
                     )
 
                     async def _do_publish():
@@ -1058,11 +1060,13 @@ async def _run_schedule_daily(sched: dict) -> dict:
                         lsi_tags = article.get("lsi_tags", [])
 
                         img_prompt_daily = (
-                            f"High-quality professional photo for blog article: '{article['title']}'. "
-                            f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks, clean modern aesthetic."
+                            f"A photorealistic scene that visually represents: {article['title']}. "
+                            f"Show a concrete moment or setting related to '{keyword}'. "
+                            f"Editorial photography style, natural lighting, shallow depth of field. "
+                            f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
                         )
                         image_b64, _ = await _fetch_image(
-                            sched.get("image_source", "freepik_stock"), keyword, article["title"], img_prompt_daily
+                            sched.get("image_source", "freepik_flux"), keyword, article["title"], img_prompt_daily
                         )
 
                         _art = article  # capture for lambda
@@ -1262,7 +1266,7 @@ class ImportMapRequest(BaseModel):
     language: str = "pl"
     client_domain: str = ""
     anchor_text: str = ""
-    image_source: str = "freepik_stock"
+    image_source: str = "freepik_flux"
     custom_prompt: str = ""
 
 
@@ -1573,11 +1577,13 @@ async def bulk_run_schedules(body: BulkActionRequest):
                         domain_fingerprints=domain_fingerprints,
                     )
                     img_prompt_bulk = (
-                        f"High-quality professional photo for blog article: '{article['title']}'. "
-                        f"Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks."
+                        f"A photorealistic scene that visually represents: {article['title']}. "
+                        f"Show a concrete moment or setting related to '{keyword}'. "
+                        f"Editorial photography style, natural lighting, shallow depth of field. "
+                        f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
                     )
                     image_b64, _ = await _fetch_image(
-                        sched.get("image_source", "freepik_stock"), keyword, article["title"], img_prompt_bulk
+                        sched.get("image_source", "freepik_flux"), keyword, article["title"], img_prompt_bulk
                     )
 
                     _art = article
@@ -1799,10 +1805,10 @@ async def test_images():
     import time
     keyword = "SEO optimization"
     title = "SEO Optimization Guide 2025"
-    prompt = f"High-quality professional photo for blog article: '{title}'. Topic: {keyword}. Realistic scene, natural lighting, no text, no watermarks."
+    prompt = f"A photorealistic scene that visually represents: {title}. Show a concrete moment related to '{keyword}'. Editorial photography, natural lighting, NO text, NO watermarks. 16:9 landscape."
     results = {}
 
-    for source in ["freepik_stock", "freepik_zimage", "freepik_flux", "dalle"]:
+    for source in ["freepik_flux", "freepik_zimage", "gemini", "dalle"]:
         t0 = time.time()
         try:
             img, provider = await _fetch_image(source, keyword, title, prompt)

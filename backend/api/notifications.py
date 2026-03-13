@@ -74,7 +74,7 @@ async def get_settings():
     }
 
     # Default image source
-    default_image_source = "freepik_stock"
+    default_image_source = "freepik_flux"
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
@@ -152,7 +152,7 @@ async def save_gpt_model(body: GptModelRequest):
 @router.post("/default-image-source")
 async def save_default_image_source(body: dict):
     """Save the default image source preference to DB settings."""
-    source = body.get("image_source", "freepik_stock")
+    source = body.get("image_source", "freepik_flux")
     allowed = ["none", "freepik_stock", "freepik_zimage", "freepik_flux", "dalle", "gemini"]
     if source not in allowed:
         from fastapi import HTTPException

@@ -13,7 +13,6 @@ from typing import List, Optional
 from config import DB_PATH
 from services.openai_service import generate_article, generate_image, describe_image_and_generate
 from services.gemini_image_service import generate_image_gemini
-from services.freepik_service import generate_image_freepik
 from services.freepik_generate_service import generate_image_zimage, generate_image_flux
 from services.wordpress_service import publish_post
 
@@ -214,24 +213,20 @@ async def generate_content(body: GenerateRequest):
     )
     image_b64 = None
     image_provider = "none"
-    img_prompt = (
-        f"High-quality professional photo for an article titled '{article['title']}'. "
-        f"Topic: {body.topic}. Realistic scene, natural lighting, no text overlays, no watermarks, "
-        f"16:9 aspect, clean modern aesthetic."
-    )
-    try:
-        image_b64 = await generate_image_gemini(img_prompt)
-        image_provider = "gemini"
-    except Exception:
+    img_prompt = _build_image_prompt(body.topic, article["title"], provider="freepik_flux")
+    # AI-only fallback chain — no stock photos
+    for _prov, _fn in [
+        ("freepik_flux", lambda: generate_image_flux(img_prompt)),
+        ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
+        ("gemini", lambda: generate_image_gemini(img_prompt)),
+    ]:
         try:
-            image_b64 = await generate_image_freepik(body.topic)
-            image_provider = "freepik"
-        except Exception:
-            try:
-                image_b64 = await generate_image(f"Professional photo for blog post about: {body.topic}. Clean, no text.")
-                image_provider = "dalle"
-            except Exception as e:
-                logger.warning(f"All image providers failed: {e}")
+            image_b64 = await _fn()
+            image_provider = _prov
+            break
+        except Exception as e:
+            logger.warning(f"[Image] {_prov} failed: {e}")
+            continue
 
     return {
         "title": article["title"],
@@ -256,51 +251,56 @@ async def regenerate_image(body: RegenerateImageRequest):
 
 
 def _build_image_prompt(topic: str, title: str = "", provider: str = "") -> str:
-    """Build a descriptive image prompt tied to the article topic."""
-    subject = title if title and title.strip() else topic
-    # Z-Image renders non-Latin text poorly — explicitly forbid any text/letters/words
+    """Build a descriptive scene-based image prompt tied to the article topic.
+
+    Creates a concrete visual scene instead of abstract topic description.
+    AI image generators produce much better results with specific scene prompts.
+    """
+    subject = title.strip() if title and title.strip() else topic
+    # All AI generators render text poorly — always forbid it
     no_text = (
-        "Absolutely NO text, NO letters, NO words, NO numbers, NO captions, NO labels anywhere in the image. "
-        "Pure visual only."
-    ) if provider in ("freepik_zimage", "freepik_flux") else "No text overlays, no watermarks, no logos."
+        "Absolutely NO text, NO letters, NO words, NO numbers, NO captions, NO labels, "
+        "NO watermarks, NO logos anywhere in the image. Pure visual only."
+    )
     return (
-        f"High-quality professional photograph directly related to: {subject}. "
-        f"The image must clearly illustrate the topic '{topic}'. "
-        f"Realistic scene, natural lighting, sharp focus, {no_text} "
-        f"16:9 landscape format, clean modern aesthetic. "
-        f"Do NOT show random objects unrelated to the topic."
+        f"A photorealistic scene that visually represents the concept of: {subject}. "
+        f"Show a concrete, specific moment or setting — real objects, real environment, real people if relevant. "
+        f"NOT an abstract illustration. Think editorial photography for a professional magazine. "
+        f"Natural lighting, shallow depth of field, 16:9 landscape composition. "
+        f"{no_text}"
     )
 
 
 async def _fetch_image(topic: str, image_source: str, title: str = "") -> Optional[str]:
-    """Fetch image based on image_source setting. Tries primary provider, then freepik_stock fallback."""
+    """Fetch AI-generated image. All providers produce original images — no copyright issues."""
     if image_source == "none":
         return None
     img_prompt = _build_image_prompt(topic, title, provider=image_source)
 
-    # Provider chains: primary → fallback(s)
+    # AI-only provider chains — no stock photos (copyright-safe, no attribution needed)
     _chains = {
-        "freepik_zimage": [
-            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
-            ("freepik_stock", lambda: generate_image_freepik(topic)),
-        ],
         "freepik_flux": [
             ("freepik_flux", lambda: generate_image_flux(img_prompt)),
-            ("freepik_stock", lambda: generate_image_freepik(topic)),
+            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
+            ("gemini", lambda: generate_image_gemini(img_prompt)),
         ],
-        "freepik_stock": [
-            ("freepik_stock", lambda: generate_image_freepik(topic)),
+        "freepik_zimage": [
+            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
+            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
+            ("gemini", lambda: generate_image_gemini(img_prompt)),
         ],
         "dalle": [
-            ("dalle", lambda: generate_image(f"Professional illustration for article about: {topic}. Clean, no text, no watermarks.")),
-            ("freepik_stock", lambda: generate_image_freepik(topic)),
+            ("dalle", lambda: generate_image(img_prompt)),
+            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
+            ("gemini", lambda: generate_image_gemini(img_prompt)),
         ],
         "gemini": [
             ("gemini", lambda: generate_image_gemini(img_prompt)),
-            ("freepik_stock", lambda: generate_image_freepik(topic)),
+            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
+            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
         ],
     }
-    chain = _chains.get(image_source, _chains.get("freepik_stock", []))
+    chain = _chains.get(image_source, _chains.get("freepik_flux", []))
 
     for provider_name, provider_fn in chain:
         try:
