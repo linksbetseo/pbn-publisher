@@ -111,7 +111,11 @@ def _keyword_to_slug(keyword: str) -> str:
     nfkd = unicodedata.normalize("NFKD", keyword.lower())
     ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_str).strip("-")
-    return slug[:80]
+    slug = slug[:80]
+    # Trim trailing partial word
+    if len(slug) == 80 and "-" in slug:
+        slug = slug.rsplit("-", 1)[0]
+    return slug
 
 
 async def _upload_image(
@@ -141,9 +145,10 @@ async def _upload_image(
         # Set alt text, title, caption for SEO
         if media_id and alt_text:
             try:
+                descriptive_alt = f"{alt_text} — ilustracja" if alt_text else ""
                 await client.post(
                     f"{base_url}/wp-json/wp/v2/media/{media_id}",
-                    json={"alt_text": alt_text, "title": alt_text, "caption": alt_text},
+                    json={"alt_text": descriptive_alt, "title": alt_text[:60], "caption": ""},
                     headers={"Authorization": auth, "Content-Type": "application/json"},
                     timeout=10,
                 )
@@ -288,6 +293,7 @@ async def publish_post(
                         # Twitter Card
                         "_yoast_wpseo_twitter-title": title,
                         "_yoast_wpseo_twitter-description": excerpt[:200],
+                        "_yoast_wpseo_twitter-card-type": "summary_large_image",
                     })
                 if keyword:
                     meta["_yoast_wpseo_focuskw"] = keyword

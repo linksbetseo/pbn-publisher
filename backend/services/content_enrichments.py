@@ -33,26 +33,30 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Personas eksperckie ────────────────────────────────────────────────────────
-_EXPERT_PERSONAS_PL = [
-    ("dr Marek Wiśniewski", "ekspert z 18-letnim doświadczeniem w branży"),
-    ("mgr Agnieszka Kowalska", "specjalistka z wieloletnią praktyką"),
-    ("Piotr Zawadzki", "konsultant i praktyk z 20-letnim stażem"),
-    ("prof. Anna Nowak", "badaczka i ekspertka w tej dziedzinie"),
-    ("Tomasz Jabłoński", "certyfikowany specjalista i doradca"),
-    ("Katarzyna Wróbel", "ekspertka i autorka publikacji branżowych"),
-    ("Michał Zieliński", "praktyk z doświadczeniem w ponad 200 projektach"),
-    ("Barbara Kamińska", "konsultantka i trenerka branżowa"),
+# ── Instytucjonalne źródła (zamiast fikcyjnych ekspertów — E-E-A-T) ───────────
+_INSTITUTIONAL_SOURCES_PL = [
+    "GUS (Główny Urząd Statystyczny)",
+    "NIK (Najwyższa Izba Kontroli)",
+    "UOKiK (Urząd Ochrony Konkurencji i Konsumentów)",
+    "ZUS (Zakład Ubezpieczeń Społecznych)",
+    "NFZ (Narodowy Fundusz Zdrowia)",
+    "Ministerstwo Finansów",
+    "Rzecznik Finansowy",
+    "PARP (Polska Agencja Rozwoju Przedsiębiorczości)",
+    "Komisja Nadzoru Finansowego (KNF)",
+    "Polska Izba Ubezpieczeń (PIU)",
 ]
-_EXPERT_PERSONAS_EN = [
-    ("Dr. Michael Stevens", "expert with 18 years of industry experience"),
-    ("Sarah Johnson", "specialist with extensive hands-on experience"),
-    ("Robert Clarke", "certified consultant with 20+ years in the field"),
-    ("Prof. Emily Watson", "researcher and subject matter expert"),
-    ("David Miller", "certified specialist and industry advisor"),
-    ("Jennifer Brown", "expert and author of professional publications"),
-    ("James Wilson", "practitioner with experience in 200+ projects"),
-    ("Laura Thompson", "industry consultant and trainer"),
+_INSTITUTIONAL_SOURCES_EN = [
+    "Bureau of Labor Statistics (BLS)",
+    "Federal Trade Commission (FTC)",
+    "National Institute of Standards and Technology (NIST)",
+    "Centers for Disease Control and Prevention (CDC)",
+    "Consumer Financial Protection Bureau (CFPB)",
+    "U.S. Small Business Administration (SBA)",
+    "World Health Organization (WHO)",
+    "International Monetary Fund (IMF)",
+    "Organisation for Economic Co-operation and Development (OECD)",
+    "National Institutes of Health (NIH)",
 ]
 
 # ── Anti-footprint CSS variation ──────────────────────────────────────────────
@@ -131,12 +135,12 @@ def _build_key_takeaways(points: list[str], lang_pl: bool) -> str:
     )
 
 
-def _build_expert_quote(quote: str, name: str, role: str) -> str:
+def _build_expert_quote(quote: str, source: str, _role: str = "") -> str:
     return (
         f'<blockquote {_s("blockquote")}>\n'
-        f'<p style="margin:0 0 10px;">"{quote}"</p>\n'
+        f'<p style="margin:0 0 10px;">{quote}</p>\n'
         f'<footer style="font-size:0.9em;font-style:normal;color:#555;">'
-        f'— <strong>{name}</strong>, {role}</footer>\n'
+        f'— <strong>{source}</strong></footer>\n'
         f'</blockquote>\n'
     )
 
@@ -382,14 +386,20 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
     _enrich_model = await get_gpt_model()
     try:
         if element == "expert_quote":
-            persona = random.choice(_EXPERT_PERSONAS_PL if lang_pl else _EXPERT_PERSONAS_EN)
+            source = random.choice(_INSTITUTIONAL_SOURCES_PL if lang_pl else _INSTITUTIONAL_SOURCES_EN)
             prompt = (
-                f"Napisz krótki cytat eksperta (2-3 zdania) o temacie: '{topic}'. Konkretny, praktyczny. Tylko treść, bez cudzysłowów."
+                f"Napisz krótki cytat lub dane statystyczne (2-3 zdania) o temacie: '{topic}', "
+                f"powołując się na {source} lub inną realną polską instytucję powiązaną z tematem. "
+                f"Format: 'Według [Instytucja], ...' lub '[Instytucja] podaje, że...'. "
+                f"Konkretne dane, bez cudzysłowów. Jeśli nie znasz dokładnych danych — podaj przedziały z oznaczeniem 'szacunkowo'."
                 if lang_pl else
-                f"Write a short expert quote (2-3 sentences) about: '{topic}'. Specific, practical. Only the quote, no quotation marks."
+                f"Write a short statistic or data point (2-3 sentences) about '{topic}', "
+                f"citing {source} or another real institution relevant to the topic. "
+                f"Format: 'According to [Institution], ...' Specific data only, no quotation marks. "
+                f"If unsure about exact numbers, use ranges and mark as 'estimated'."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.8, max_tokens=120)
-            return {"quote": resp.choices[0].message.content.strip().strip('"\''), "name": persona[0], "role": persona[1]}
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=150)
+            return {"quote": resp.choices[0].message.content.strip().strip('"\''), "name": source, "role": ""}
 
         elif element == "key_takeaways":
             prompt = (
@@ -413,11 +423,18 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
 
         elif element == "stats_block":
             prompt = (
-                f"Podaj 4 konkretne statystyki/fakty liczbowe o '{topic}'. Format JSON: {{\"stats\": [[\"wartość\", \"opis\"], ...]}}. Tylko JSON."
+                f"Podaj 4 konkretne statystyki/fakty liczbowe o '{topic}' WYŁĄCZNIE ze znanych "
+                f"źródeł (GUS, Eurostat, raporty rządowe, badania akademickie). "
+                f"Dla każdej statystyki podaj źródło w nawiasie. "
+                f"Jeśli nie znasz pewnych danych — NIE wymyślaj, zamiast tego podaj przedziały z oznaczeniem 'szacunkowo'. "
+                f"Format JSON: {{\"stats\": [[\"wartość\", \"opis (źródło)\"], ...]}}. Tylko JSON."
                 if lang_pl else
-                f"Give 4 specific statistics/numerical facts about '{topic}'. JSON format: {{\"stats\": [[\"value\", \"description\"], ...]}}. JSON only."
+                f"Give 4 specific statistics about '{topic}' ONLY from known sources "
+                f"(government agencies, Eurostat, academic studies, industry reports). "
+                f"Include source in parentheses for each. If unsure — use ranges marked 'estimated'. "
+                f"JSON format: {{\"stats\": [[\"value\", \"description (source)\"], ...]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=200, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.1, max_tokens=250, response_format={"type":"json_object"})
             raw = json.loads(resp.choices[0].message.content)
             stats = []
             for s in raw.get("stats", [])[:4]:

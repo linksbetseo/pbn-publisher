@@ -964,6 +964,18 @@ async def _run_schedule_daily(sched: dict) -> dict:
         schedule_id = sched["id"]
         limit = sched["posts_per_day"]
 
+        # Velocity throttle: slow down once domain has many articles (anti-spam signal)
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM domain_keywords WHERE my_domain_id=? AND status='published'",
+                (sched["my_domain_id"],)
+            ) as cur:
+                total_published = (await cur.fetchone())[0]
+        if total_published > 50:
+            limit = min(limit, 1)  # max 1/day for established sites
+        elif total_published > 20:
+            limit = min(limit, 2)
+
         # Pre-check WP credentials
         wp_ok = await check_wp_credentials(sched["domain"], sched["wp_login"], sched["wp_pass"],
                                            http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""))

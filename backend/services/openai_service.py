@@ -542,6 +542,7 @@ async def generate_article(
         outline_user = (
             f"Stwórz outline artykułu SEO dla frazy: '{topic}'\n"
             f"Intencja i encje: {intent_analysis}\n"
+            f"{f'KĄT TEMATYCZNY: {variation}' if variation else ''}\n"
             f"DOKŁADNIE {n_sections} sekcji H2, każda oddzielona '<<<<', "
             f"bez wstępu i zakończenia.\nTylko nagłówki H2, bez tekstu.{serp_block}"
         )
@@ -549,6 +550,7 @@ async def generate_article(
         outline_user = (
             f"Create SEO article outline for: '{topic}'\n"
             f"Intent: {intent_analysis}\n"
+            f"{f'THEMATIC ANGLE: {variation}' if variation else ''}\n"
             f"EXACTLY {n_sections} H2 sections separated by '<<<<', "
             f"no intro/conclusion.\nOnly H2 headings.{serp_block}"
         )
@@ -643,7 +645,7 @@ async def generate_article(
     logger.info("[Article] Intro done")
 
     # ── STEP 6: Sections (parallel) ───────────────────────────────────────────
-    words_per_section = max(180, target_words // max(1, len(sections)))
+    words_per_section = max(280, int(target_words * 1.2) // max(1, len(sections)))
     kw_per_section = max(1, round(words_per_section * target_density / 100))
     # Pick 3-4 LSI terms per section (rotate through the list)
     lsi_per_section = lsi_terms[:15] if lsi_terms else []
@@ -656,6 +658,9 @@ async def generate_article(
             "- Używaj <p>, <ul>/<li> lub <ol>/<li> tam gdzie pasuje\n"
             "- Dodaj <strong> dla najważniejszych terminów i faktów\n"
             "- Pisz konkretnie — dane, liczby, przykłady, porady praktyczne\n"
+            "- DOŚWIADCZENIE E-E-A-T: Wpleć 1-2 zdania z perspektywy praktycznej "
+            "('W praktyce często spotykamy...', 'Typowy błąd to...', 'Z doświadczenia wynika...'). "
+            "NIE pisz 'ja' — pisz w tonie eksperta który widział setki takich przypadków.\n"
             "- Bez powtarzania wstępu ani zakończenia artykułu\n"
             "- ENCJE: Używaj konkretnych nazw własnych (marki, firmy, produkty, osoby, miejsca, normy, "
             "instytucje) zamiast ogólników. Google NLP rozpoznaje encje — im więcej trafnych nazw "
@@ -671,6 +676,9 @@ async def generate_article(
             "- Use <p>, <ul>/<li> or <ol>/<li> where appropriate\n"
             "- Add <strong> for key terms and important facts\n"
             "- Be specific — data, numbers, examples, practical tips\n"
+            "- E-E-A-T EXPERIENCE: Weave in 1-2 sentences from a practical perspective "
+            "('In practice, we often see...', 'A common mistake is...', 'Experience shows...'). "
+            "DON'T use first person 'I' — write as an expert who has seen hundreds of such cases.\n"
             "- Don't repeat intro or conclusion\n"
             "- ENTITIES: Use specific proper nouns (brands, companies, products, people, places, standards, "
             "institutions) instead of generic terms. Google NLP recognizes entities — more relevant "
@@ -916,9 +924,27 @@ async def generate_article(
 
     content = re.sub(r'<a\s[^>]*?>.*?</a>', _dedup_link, content, flags=re.DOTALL | re.IGNORECASE)
 
-    # Schema.org JSON-LD removed from post content — Yoast/RankMath generate their own
-    # schema and having it in post_content creates duplicates. SEO meta is passed via
-    # WP REST API (Yoast/RankMath meta fields) in wordpress_service.py.
+    # FAQPage JSON-LD — Yoast/RankMath only auto-generate FAQ schema from their own
+    # block types, not from raw <h3>/<p> HTML. Inject it explicitly for rich snippets.
+    faq_pairs = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', content, re.DOTALL | re.IGNORECASE)
+    if faq_pairs and len(faq_pairs) >= 3:
+        faq_ld = {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": re.sub(r'<[^>]+>', '', q).strip(),
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": re.sub(r'<[^>]+>', '', a).strip()
+                    }
+                }
+                for q, a in faq_pairs[:8]
+            ]
+        }
+        faq_schema = f'<script type="application/ld+json">{_json.dumps(faq_ld, ensure_ascii=False)}</script>'
+        content = faq_schema + "\n" + content
 
     # Dedup fingerprint
     fingerprint = _content_fingerprint(content)
@@ -962,6 +988,6 @@ async def describe_image_and_generate(image_b64: str, topic: str) -> str:
 async def generate_image(prompt: str) -> str:
     response = await client.images.generate(
         model="dall-e-3", prompt=prompt, n=1,
-        size="1024x1024", response_format="b64_json",
+        size="1792x1024", response_format="b64_json",
     )
     return response.data[0].b64_json

@@ -133,14 +133,16 @@ async def _daily_autopilot_cron():
     from api.autopilot import run_daily_all
     while True:
         now = datetime.now(timezone.utc)
-        # Pick random hour 6-10 (inclusive) + random jitter 0-45 minutes
-        rand_hour = _random.randint(6, 10)
-        rand_minute = _random.randint(0, 45)
+        # Pick random window (morning/midday/evening) + random jitter — anti-footprint
+        _windows = [(6, 10), (11, 14), (19, 22)]
+        _win = _random.choice(_windows)
+        rand_hour = _random.randint(*_win)
+        rand_minute = _random.randint(0, 59)
         next_run = now.replace(hour=rand_hour, minute=rand_minute, second=0, microsecond=0)
         if next_run <= now:
             next_run += timedelta(days=1)
-            # Re-roll for the new day
-            next_run = next_run.replace(hour=_random.randint(6, 10), minute=_random.randint(0, 45))
+            _win = _random.choice(_windows)
+            next_run = next_run.replace(hour=_random.randint(*_win), minute=_random.randint(0, 59))
         wait_sec = (next_run - now).total_seconds()
         logger.info(f"[DailyCron] Next autopilot run scheduled at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
         await _asyncio.sleep(wait_sec)
@@ -273,6 +275,7 @@ async def lifespan(app: FastAPI):
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        await db.execute("PRAGMA busy_timeout=5000")  # 5s retry on locked DB
         await db.executescript(CREATE_TABLES_SQL)
         # Migration: add wp_ok column if missing
         try:
@@ -469,7 +472,7 @@ async def basic_auth_middleware(request: Request, call_next):
         client_host = request.client.host if request.client else ""
         is_local = client_host in ("127.0.0.1", "::1", "localhost")
         token_ok = CRON_SECRET and cron_token and secrets.compare_digest(cron_token, CRON_SECRET)
-        if is_local or token_ok or not CRON_SECRET:
+        if is_local or token_ok:
             return await call_next(request)
     auth = request.headers.get("Authorization", "")
     # Also accept auth via query param for SSE endpoints (EventSource can't send headers)
@@ -526,6 +529,9 @@ if os.path.exists(FRONTEND_DIST):
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         file_path = os.path.join(FRONTEND_DIST, full_path)
+        # Prevent path traversal — resolved path must stay within FRONTEND_DIST
+        if not os.path.realpath(file_path).startswith(os.path.realpath(FRONTEND_DIST)):
+            return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
         if os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))

@@ -106,9 +106,19 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+def _stem_pl(token: str) -> str:
+    """Naive Polish suffix stripper — handles most common case inflections."""
+    for suffix in ("owego", "owej", "owym", "nych", "nego", "nemu",
+                   "ach", "ami", "iem", "ego", "emu", "owi",
+                   "ie", "ej", "ą", "ę"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            return token[:-len(suffix)]
+    return token
+
+
 def _tokenize(text: str) -> list[str]:
     folded = _ascii_fold(text)
-    return [t for t in folded.split() if t not in STOP_WORDS and len(t) > 2]
+    return [_stem_pl(t) for t in folded.split() if t not in STOP_WORDS and len(t) > 2]
 
 
 def _dedupe(keywords: list[dict]) -> list[dict]:

@@ -319,8 +319,26 @@ JSON only, no markdown."""
         return m.group(0)
     content = re.sub(r"<a\s[^>]+>.*?</a>", dedup_link, content, flags=re.DOTALL)
 
-    # Schema.org JSON-LD removed — Yoast/RankMath generate schema automatically.
-    # Injecting JSON-LD in post_content causes duplicate schema issues.
+    # FAQPage JSON-LD — inject for rich snippets (Yoast only auto-generates from its own FAQ blocks)
+    faq_pairs = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', content, re.DOTALL | re.IGNORECASE)
+    if faq_pairs and len(faq_pairs) >= 3:
+        faq_ld = {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": re.sub(r'<[^>]+>', '', q).strip(),
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": re.sub(r'<[^>]+>', '', a).strip()
+                    }
+                }
+                for q, a in faq_pairs[:8]
+            ]
+        }
+        faq_schema = f'<script type="application/ld+json">{json.dumps(faq_ld, ensure_ascii=False)}</script>'
+        content = faq_schema + "\n" + content
     excerpt = data.get("meta_description", "")
     sections = [re.sub(r"<[^>]+>", "", m).strip() for m in re.findall(r"<h2[^>]*>(.*?)</h2>", content, re.DOTALL)][:8]
 

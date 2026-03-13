@@ -116,7 +116,7 @@ async def fetch_image(image_source: str, keyword: str, title: str, img_prompt: s
             ("freepik_stock", lambda: generate_image_freepik(keyword)),
         ],
         "dalle": [
-            ("dalle", lambda: generate_image(f"Professional illustration for article about: {title}. Clean, modern, no text.")),
+            ("dalle", lambda: generate_image(img_prompt)),
             ("freepik_stock", lambda: generate_image_freepik(keyword)),
         ],
     }
