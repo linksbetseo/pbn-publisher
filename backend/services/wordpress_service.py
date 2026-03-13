@@ -193,6 +193,8 @@ async def _upload_image(
 
 
 # SEO #55: IndexNow key file check cache (avoid re-checking every publish)
+# FIX: bounded caches — evict oldest when exceeding 500 entries (typical PBN has <200 domains)
+_CACHE_MAX = 500
 _indexnow_key_cache: dict[str, bool] = {}
 
 # SEO #93: per-domain SEO plugin detection cache (anti-fingerprint)
@@ -200,6 +202,16 @@ _seo_plugin_cache: dict[str, str] = {}
 
 # TOC plugin detection cache — True if domain has a WP TOC plugin (avoid double TOC)
 _toc_plugin_cache: dict[str, bool] = {}
+
+
+def _cache_put(cache: dict, key, value, max_size: int = _CACHE_MAX):
+    """Add to cache with LRU-like eviction: drop first entries when full."""
+    if len(cache) >= max_size:
+        # Remove oldest ~10% entries
+        to_remove = list(cache.keys())[:max(1, max_size // 10)]
+        for k in to_remove:
+            cache.pop(k, None)
+    cache[key] = value
 
 
 async def detect_toc_plugin(
@@ -247,7 +259,7 @@ async def detect_toc_plugin(
                     pass
     except Exception:
         pass
-    _toc_plugin_cache[base_url] = has_toc
+    _cache_put(_toc_plugin_cache, base_url, has_toc)
     return has_toc
 
 
@@ -281,7 +293,7 @@ async def _detect_seo_plugin(
                     continue
     except Exception:
         pass
-    _seo_plugin_cache[base_url] = plugin
+    _cache_put(_seo_plugin_cache, base_url, plugin)
     return plugin
 
 async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "", extra_urls: list[str] = None) -> None:
@@ -312,7 +324,7 @@ async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "", extra_url
                         key_file_ok = kf_resp.status_code == 200 and indexnow_key in (kf_resp.text or "")
                     except Exception:
                         pass
-                    _indexnow_key_cache[key_file_url] = key_file_ok
+                    _cache_put(_indexnow_key_cache, key_file_url, key_file_ok)
                 if not key_file_ok:
                     logger.warning(
                         f"[IndexNow] Key file missing or invalid at {key_file_url} — "
@@ -572,7 +584,9 @@ async def publish_post(
                             except Exception:
                                 pass
                     # FIX #45: use module-level asyncio import (was importing inside function body)
-                    asyncio.create_task(_ping_sitemaps(base_url, site_auth, post_url=post_url))
+                    # FIX: add done callback to log exceptions from fire-and-forget task
+                    _ping_task = asyncio.create_task(_ping_sitemaps(base_url, site_auth, post_url=post_url))
+                    _ping_task.add_done_callback(lambda t: logger.error(f"[WP] Ping failed: {t.exception()}") if not t.cancelled() and t.exception() else None)
                     return {
                         "success": True,
                         "url": post_url,

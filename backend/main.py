@@ -108,9 +108,12 @@ async def _weekly_cron():
     from datetime import timedelta
     while True:
         now = datetime.now(timezone.utc)
-        # Next Monday 03:00 UTC
-        days_ahead = (7 - now.weekday()) % 7 or 7
+        # Next Monday (weekday=0) at 03:00 UTC
+        days_ahead = (7 - now.weekday()) % 7  # 0 if today is Monday
         next_run = (now + timedelta(days=days_ahead)).replace(hour=3, minute=0, second=0, microsecond=0)
+        # If we're already past today's 03:00, push to next Monday
+        if next_run <= now:
+            next_run += timedelta(days=7)
         wait_sec = max(0, (next_run - now).total_seconds())
         await _asyncio.sleep(wait_sec)
         try:
@@ -383,28 +386,44 @@ async def lifespan(app: FastAPI):
             await db.commit()
         except Exception:
             pass  # table may not exist yet on first run
-    # Start background crons
+    # Start background crons with exception logging
     import asyncio as _asyncio
-    cron_task = _asyncio.create_task(_weekly_cron())
-    daily_task = _asyncio.create_task(_daily_autopilot_cron())
-    date_mod_task = _asyncio.create_task(_date_modified_refresh_cron())
-    deindex_task = _asyncio.create_task(_weekly_deindex_cron())
+
+    def _cron_done_callback(task: _asyncio.Task):
+        """Log unhandled exceptions from background cron tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"[Cron] Background task {task.get_name()} crashed: {exc}", exc_info=exc)
+
+    _bg_tasks = []
+    for _coro, _name in [
+        (_weekly_cron(), "weekly-health"),
+        (_daily_autopilot_cron(), "daily-autopilot"),
+        (_date_modified_refresh_cron(), "date-modified-refresh"),
+        (_weekly_deindex_cron(), "weekly-deindex"),
+    ]:
+        t = _asyncio.create_task(_coro, name=_name)
+        t.add_done_callback(_cron_done_callback)
+        _bg_tasks.append(t)
     yield
-    cron_task.cancel()
-    daily_task.cancel()
-    date_mod_task.cancel()
-    deindex_task.cancel()
+    for t in _bg_tasks:
+        t.cancel()
 
 
 app = FastAPI(title="PBN Publisher API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 # SEO #81: tighten CORS — allow configured origins or fallback to permissive for dev
-_CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
+# FIX: allow_credentials=True is incompatible with wildcard origins (CSRF risk)
+_CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*").split(",")
+_CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW if o.strip()]
+_cors_has_wildcard = "*" in _CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not _cors_has_wildcard,  # disable credentials with wildcard
     allow_methods=["*"],
     allow_headers=["*"],
 )

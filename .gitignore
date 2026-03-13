@@ -2,6 +2,7 @@
 backend/.env
 backend/*.db
 backend/wp_check_result.txt
+backend/.encryption_key
 
 # One-off scripts
 backend/update_*.py

@@ -173,8 +173,9 @@ async def list_domains(
         conditions.append("server = ?")
         params.append(server)
     if search:
-        conditions.append("domain LIKE ?")
-        params.append(f"%{search}%")
+        conditions.append("domain LIKE ? ESCAPE '\\'")
+        _escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{_escaped}%")
     if active is not None:
         conditions.append("active = ?")
         params.append(active)
