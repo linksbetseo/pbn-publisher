@@ -26,7 +26,7 @@ export default function History() {
   const [copied, setCopied] = useState(false)
   const [indexing, setIndexing] = useState(false)
   const [indexResult, setIndexResult] = useState(null)
-  const LIMIT = 100
+  const LIMIT = 50
 
   const load = useCallback(async (newOffset = 0) => {
     setLoading(true)
@@ -413,12 +413,13 @@ export default function History() {
             </table>
           </div>
         )}
-        {total > LIMIT && (
-          <div className="flex items-center justify-end gap-3 px-4 py-3 border-t border-gray-100 text-sm text-gray-600">
+        <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400">
+          <span>Strona {Math.floor(offset / LIMIT) + 1} z {Math.max(1, Math.ceil(total / LIMIT))} ({total} wpisow)</span>
+          <div className="flex items-center gap-3">
             <button
               disabled={offset === 0}
               onClick={() => load(offset - LIMIT)}
-              className="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40"
+              className="px-3 py-1.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40"
             >
               ← Poprzednia
             </button>
@@ -426,12 +427,12 @@ export default function History() {
             <button
               disabled={offset + LIMIT >= total}
               onClick={() => load(offset + LIMIT)}
-              className="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40"
+              className="px-3 py-1.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-40"
             >
               Następna →
             </button>
           </div>
-        )}
+        </div>
       </div>
       {preview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setPreview(null)}>
