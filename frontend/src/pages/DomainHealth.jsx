@@ -55,10 +55,11 @@ function StatCard({ label, value, sub, color, onClick, active }) {
 function SnapshotProgress({ progress, onDone }) {
   if (!progress || !progress.running) return null
   const pct = progress.pct || 0
+  const isSaving = pct >= 100
   // Check if stuck (started > 15 min ago)
   const startedAt = progress.started_at ? new Date(progress.started_at + 'Z') : null
   const stuckMinutes = startedAt ? Math.round((Date.now() - startedAt.getTime()) / 60000) : 0
-  const isStuck = stuckMinutes > 15
+  const isStuck = stuckMinutes > 20
 
   const handleReset = async () => {
     try {
@@ -68,25 +69,29 @@ function SnapshotProgress({ progress, onDone }) {
     } catch {}
   }
 
+  const statusText = isStuck
+    ? `Snapshot prawdopodobnie zawisnął (${stuckMinutes} min) — ${progress.done}/${progress.total} domen`
+    : isSaving
+      ? `Zapisuję wyniki do bazy — ${progress.done}/${progress.total} domen...`
+      : `Snapshot w toku — ${progress.done}/${progress.total} domen (${pct}%)`
+
   return (
     <div className={`mb-4 px-4 py-3 border rounded-xl ${isStuck ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'}`}>
       <div className="flex items-center justify-between mb-2">
         <span className={`text-xs font-semibold ${isStuck ? 'text-orange-700' : 'text-blue-700'}`}>
-          {isStuck
-            ? `Snapshot prawdopodobnie zawisnął (${stuckMinutes} min) — ${progress.done}/${progress.total} domen`
-            : `Snapshot w toku — ${progress.done}/${progress.total} domen (${pct}%)`}
+          {statusText}
         </span>
         {isStuck ? (
           <button onClick={handleReset} className="text-xs bg-orange-600 text-white px-3 py-1 rounded-lg hover:bg-orange-700">
             Resetuj i spróbuj ponownie
           </button>
         ) : (
-          <span className="text-xs text-blue-500 animate-pulse">● działa</span>
+          <span className="text-xs text-blue-500 animate-pulse">● {isSaving ? 'zapisuję' : 'działa'}</span>
         )}
       </div>
       <div className="w-full bg-blue-100 rounded-full h-2">
         <div
-          className={`h-2 rounded-full transition-all duration-500 ${isStuck ? 'bg-orange-400' : 'bg-blue-500'}`}
+          className={`h-2 rounded-full transition-all duration-500 ${isStuck ? 'bg-orange-400' : isSaving ? 'bg-green-500' : 'bg-blue-500'}`}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -360,13 +365,21 @@ function LiveTab() {
         const res = await api.get('/api/health/snapshot-progress')
         setProgress(res.data)
         if (!res.data.running) {
-          // Snapshot finished — reload data
+          // Snapshot finished — reload ALL domains
           clearInterval(pollRef.current)
           pollRef.current = null
           setSnapping(false)
-          setSnapMsg('Snapshot zakończony! Dane zaktualizowane.')
-          await load(0)
-          setTimeout(() => setSnapMsg(''), 4000)
+          setSnapMsg(`Snapshot zakończony! ${res.data.done}/${res.data.total} domen — dane zaktualizowane.`)
+          // Load a large batch to get all results
+          try {
+            const fullRes = await api.get('/api/health', { params: { limit: 500, offset: 0 } })
+            setTotal(fullRes.data.total)
+            setDomains(fullRes.data.domains)
+            setOffset(500)
+          } catch {
+            await load(0)
+          }
+          setTimeout(() => setSnapMsg(''), 8000)
         }
       } catch (e) {
         clearInterval(pollRef.current)
@@ -558,7 +571,13 @@ function LiveTab() {
       </div>
 
       {snapMsg && (
-        <div className="mb-3 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">
+        <div className={`mb-3 px-4 py-3 border rounded-lg text-sm font-medium ${
+          snapMsg.includes('zakończony') || snapMsg.includes('zaktualizowane')
+            ? 'bg-green-50 border-green-200 text-green-700'
+            : snapMsg.includes('Błąd')
+              ? 'bg-red-50 border-red-200 text-red-700'
+              : 'bg-blue-50 border-blue-200 text-blue-700'
+        }`}>
           {snapMsg}
         </div>
       )}

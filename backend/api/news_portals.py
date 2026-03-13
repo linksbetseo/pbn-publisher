@@ -1804,7 +1804,7 @@ async def list_published_urls(
     """List all published news articles with their WordPress URLs."""
     await ensure_tables()
     offset = (page - 1) * per_page
-    conditions = ["nd.status = 'published'", "nd.wp_post_url IS NOT NULL", "nd.wp_post_url != ''"]
+    conditions = ["nd.status = 'published'"]
     params: list = []
     if portal_id:
         conditions.append("nd.portal_id = ?")
