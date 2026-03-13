@@ -1080,7 +1080,8 @@ async def _run_schedule_daily(sched: dict) -> dict:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT * FROM domain_keywords WHERE schedule_id=? AND status='pending'
-                   ORDER BY keyword_type DESC, search_volume DESC LIMIT ?""",
+                   ORDER BY CASE keyword_type WHEN 'pillar' THEN 0 ELSE 1 END,
+                   keyword_difficulty ASC, search_volume DESC LIMIT ?""",
                 (schedule_id, limit)
             ) as cur:
                 keywords = [dict(r) for r in await cur.fetchall()]

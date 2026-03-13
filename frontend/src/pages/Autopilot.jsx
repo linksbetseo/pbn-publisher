@@ -366,27 +366,33 @@ function BulkTab() {
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 space-y-3">
             <h3 className="text-sm font-semibold text-gray-800">Ustawienia</h3>
 
+            <div className="bg-blue-50 rounded-lg p-3 mb-2 border border-blue-100">
+              <label className="flex items-center gap-2 text-xs font-semibold text-blue-800 cursor-pointer">
+                <input type="checkbox" checked={autoSeed} onChange={e => setAutoSeed(e.target.checked)}
+                  className="rounded border-blue-300 text-blue-600" />
+                Auto-Seed z DataForSEO
+              </label>
+              {autoSeed ? (
+                <p className="text-xs text-blue-600 mt-1.5">
+                  System przeanalizuje każdą domenę przez DataForSEO API — automatycznie dobierze najlepszą niszę i seed keyword na podstawie istniejących rankingów i tematyki domeny.
+                </p>
+              ) : (
+                <p className="text-xs text-gray-400 mt-1.5">
+                  Wyłączony — musisz podać seed keyword ręcznie.
+                </p>
+              )}
+            </div>
+
             {tab === 'domains' && (
               <>
-                <div>
-                  <label className="flex items-center gap-2 text-xs font-medium text-gray-700 mb-2 cursor-pointer">
-                    <input type="checkbox" checked={autoSeed} onChange={e => setAutoSeed(e.target.checked)}
-                      className="rounded border-gray-300 text-blue-600" />
-                    AI dobiera seed automatycznie
-                  </label>
-                  {autoSeed ? (
-                    <p className="text-xs text-gray-400 bg-blue-50 rounded-lg p-2">
-                      System przeanalizuje każdą domenę PBN przez DataForSEO i automatycznie dobierze najlepszy seed keyword do budowy topical map.
-                    </p>
-                  ) : (
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">Fraza seed *</label>
-                      <input value={seedKw} onChange={e => setSeedKw(e.target.value)}
-                        placeholder="np. prawo pracy"
-                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    </div>
-                  )}
-                </div>
+                {!autoSeed && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Fraza seed *</label>
+                    <input value={seedKw} onChange={e => setSeedKw(e.target.value)}
+                      placeholder="np. prawo pracy"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-medium text-gray-500 mb-1">Custom prompt (opcjonalnie)</label>
                   <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
@@ -567,6 +573,7 @@ export default function Autopilot() {
   const [siteMetrics, setSiteMetrics] = useState({})
   const [previewModal, setPreviewModal] = useState(null) // { keyword, title, content, excerpt } | null
   const [previewLoading, setPreviewLoading] = useState({})
+  const [showLinkFields, setShowLinkFields] = useState(false)
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -985,13 +992,24 @@ export default function Autopilot() {
                 <option value="0.5">0.5 — surowy (~-50% fraz)</option>
               </select>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Domena klienta (link w artykule)</label>
-              <input value={newForm.client_domain} onChange={e => set('client_domain', e.target.value)} placeholder="https://klient.pl (opcjonalne)" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Anchor text klienta</label>
-              <input value={newForm.anchor_text} onChange={e => set('anchor_text', e.target.value)} placeholder="usługi prawne (opcjonalne)" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <div className="sm:col-span-2 lg:col-span-3">
+              <button type="button" onClick={() => setShowLinkFields(!showLinkFields)}
+                className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 mb-2">
+                <span className={`transform transition-transform ${showLinkFields ? 'rotate-90' : ''}`}>&#9656;</span>
+                Link building (opcjonalne)
+              </button>
+              {showLinkFields && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-3 border-l-2 border-gray-100">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Link sponsorowany (opcjonalne)</label>
+                    <input value={newForm.client_domain} onChange={e => set('client_domain', e.target.value)} placeholder="https://example.com — link w każdym artykule" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Anchor text</label>
+                    <input value={newForm.anchor_text} onChange={e => set('anchor_text', e.target.value)} placeholder="usługi prawne (opcjonalne)" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                </div>
+              )}
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Źródło zdjęć</label>

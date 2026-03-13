@@ -192,6 +192,43 @@ async def _upload_image(
 # SEO #55: IndexNow key file check cache (avoid re-checking every publish)
 _indexnow_key_cache: dict[str, bool] = {}
 
+# SEO #93: per-domain SEO plugin detection cache (anti-fingerprint)
+_seo_plugin_cache: dict[str, str] = {}
+
+
+async def _detect_seo_plugin(
+    base_url: str, auth: str, http_user: str = "", http_pass: str = ""
+) -> str:
+    """Detect which SEO plugin is active on the target WP site.
+
+    Checks REST API endpoints for RankMath, Yoast and AIOSEO.
+    Returns one of: 'yoast', 'rankmath', 'aioseo', or 'yoast' as default.
+    Results are cached per domain to avoid repeated requests.
+    """
+    if base_url in _seo_plugin_cache:
+        return _seo_plugin_cache[base_url]
+    site_auth = (http_user, http_pass) if http_user and http_pass else None
+    plugin = "yoast"  # default fallback
+    try:
+        async with httpx.AsyncClient(timeout=5, verify=False, auth=site_auth) as client:
+            headers = {"Authorization": auth}
+            for name, path in [
+                ("rankmath", "/wp-json/rankmath/v1/"),
+                ("yoast", "/wp-json/yoast/v1/"),
+                ("aioseo", "/wp-json/aioseo/v1/"),
+            ]:
+                try:
+                    r = await client.get(f"{base_url}{path}", headers=headers)
+                    if r.status_code in (200, 301, 401, 403):
+                        plugin = name
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    _seo_plugin_cache[base_url] = plugin
+    return plugin
+
 async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "") -> None:
     """Notify search engines about new/updated content via IndexNow + Bing sitemap ping."""
     try:
@@ -363,55 +400,56 @@ async def publish_post(
                     tag_ids = await _get_or_create_tags(client, base_url, auth, tags)
                     if tag_ids:
                         post_data["tags"] = tag_ids
-                # SEO meta — Yoast, RankMath, All-in-One SEO compatible
+                # SEO #93: detect active SEO plugin to avoid fingerprint
+                _seo_plugin = await _detect_seo_plugin(base_url, auth, http_user, http_pass)
+                _is_yoast = _seo_plugin in ("yoast", "unknown")
+                _is_rankmath = _seo_plugin in ("rankmath", "unknown")
+                _is_aioseo = _seo_plugin == "aioseo"
+
+                # SEO meta — only write keys for the detected plugin
                 meta = {}
                 if excerpt:
-                    meta.update({
-                        "_yoast_wpseo_metadesc": excerpt[:160],
-                        "_yoast_wpseo_title": f"{title} %%sep%% %%sitename%%",
-                        "rank_math_description": excerpt[:160],
-                        "rank_math_title": title,
-                        "_aioseop_description": excerpt[:160],
-                        "_aioseop_title": title,
-                        # Open Graph
-                        "_yoast_wpseo_opengraph-title": title,
-                        "_yoast_wpseo_opengraph-description": excerpt[:200],
-                        "rank_math_facebook_title": title,
-                        "rank_math_facebook_description": excerpt[:200],
-                        # Twitter Card
-                        "_yoast_wpseo_twitter-title": title,
-                        "_yoast_wpseo_twitter-description": excerpt[:200],
-                        "_yoast_wpseo_twitter-card-type": "summary_large_image",
-                        # SEO #53: RankMath Twitter meta
-                        "rank_math_twitter_title": title,
-                        "rank_math_twitter_description": excerpt[:200],
-                        "rank_math_twitter_card_type": "summary_large_image",
-                        # SEO #8: OG article metadata for Facebook/Pinterest
-                        "article:published_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                        "article:section": keyword or title[:50],
-                    })
+                    if _is_yoast:
+                        meta["_yoast_wpseo_metadesc"] = excerpt[:160]
+                        meta["_yoast_wpseo_title"] = f"{title} %%sep%% %%sitename%%"
+                        meta["_yoast_wpseo_opengraph-title"] = title
+                        meta["_yoast_wpseo_opengraph-description"] = excerpt[:200]
+                        meta["_yoast_wpseo_twitter-title"] = title
+                        meta["_yoast_wpseo_twitter-description"] = excerpt[:200]
+                        meta["_yoast_wpseo_twitter-card-type"] = "summary_large_image"
+                    if _is_rankmath:
+                        meta["rank_math_description"] = excerpt[:160]
+                        meta["rank_math_title"] = title
+                        meta["rank_math_facebook_title"] = title
+                        meta["rank_math_facebook_description"] = excerpt[:200]
+                        meta["rank_math_twitter_title"] = title
+                        meta["rank_math_twitter_description"] = excerpt[:200]
+                        meta["rank_math_twitter_card_type"] = "summary_large_image"
+                    if _is_aioseo:
+                        meta["_aioseop_description"] = excerpt[:160]
+                        meta["_aioseop_title"] = title
+                    # SEO #8: OG article metadata for Facebook/Pinterest
+                    meta["article:published_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                    meta["article:section"] = keyword or title[:50]
                     if tags:
-                        # SEO #8: article:tag for OG taxonomy
                         for _ti, _tag in enumerate(tags[:5]):
                             meta[f"article:tag_{_ti}"] = _tag
                 if keyword:
-                    meta["_yoast_wpseo_focuskw"] = keyword
-                    # RankMath supports comma-separated focus keywords
-                    kw_with_lsi = keyword
-                    if tags:
-                        kw_with_lsi = ",".join([keyword] + list(tags[:4]))
-                    meta["rank_math_focus_keyword"] = kw_with_lsi
+                    if _is_yoast:
+                        meta["_yoast_wpseo_focuskw"] = keyword
+                    if _is_rankmath:
+                        kw_with_lsi = keyword
+                        if tags:
+                            kw_with_lsi = ",".join([keyword] + list(tags[:4]))
+                        meta["rank_math_focus_keyword"] = kw_with_lsi
                 # OG image from uploaded featured image
-                if og_image_url:
-                    meta["_yoast_wpseo_opengraph-image"] = og_image_url
-                    meta["rank_math_facebook_image"] = og_image_url
-                    meta["_yoast_wpseo_twitter-image"] = og_image_url
-                    meta["rank_math_twitter_image"] = og_image_url
-                else:
-                    # SEO #91: fallback OG image — use site icon or placeholder
-                    _fallback_og = f"{base_url}/wp-content/uploads/site-og-default.jpg"
-                    meta["_yoast_wpseo_opengraph-image"] = _fallback_og
-                    meta["rank_math_facebook_image"] = _fallback_og
+                _og_img = og_image_url or f"{base_url}/wp-content/uploads/site-og-default.jpg"
+                if _is_yoast:
+                    meta["_yoast_wpseo_opengraph-image"] = _og_img
+                    meta["_yoast_wpseo_twitter-image"] = _og_img
+                if _is_rankmath:
+                    meta["rank_math_facebook_image"] = _og_img
+                    meta["rank_math_twitter_image"] = _og_img
                 if meta:
                     post_data["meta"] = meta
 
@@ -442,20 +480,22 @@ async def publish_post(
                     # SEO #57: set canonical via meta update (uses post URL after publish)
                     if post_url and post_id:
                         canonical = post_url.rstrip("/") + "/"
-                        try:
-                            await client.post(
-                                f"{base_url}/wp-json/wp/v2/posts/{post_id}",
-                                json={"meta": {
-                                    "_yoast_wpseo_canonical": canonical,
-                                    "rank_math_canonical_url": canonical,
-                                    # SEO #58: explicit robots meta
-                                    "rank_math_robots": ["index", "follow", "max-snippet:-1", "max-image-preview:large"],
-                                }},
-                                headers=headers,
-                                timeout=10,
-                            )
-                        except Exception:
-                            pass
+                        _canon_meta: dict = {}
+                        if _is_yoast:
+                            _canon_meta["_yoast_wpseo_canonical"] = canonical
+                        if _is_rankmath:
+                            _canon_meta["rank_math_canonical_url"] = canonical
+                            _canon_meta["rank_math_robots"] = ["index", "follow", "max-snippet:-1", "max-image-preview:large"]
+                        if _canon_meta:
+                            try:
+                                await client.post(
+                                    f"{base_url}/wp-json/wp/v2/posts/{post_id}",
+                                    json={"meta": _canon_meta},
+                                    headers=headers,
+                                    timeout=10,
+                                )
+                            except Exception:
+                                pass
                     # FIX #45: use module-level asyncio import (was importing inside function body)
                     asyncio.create_task(_ping_sitemaps(base_url, site_auth, post_url=post_url))
                     return {

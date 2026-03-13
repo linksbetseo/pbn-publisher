@@ -396,6 +396,21 @@ async def publish_posts(body: PublishRequest):
             if not image_b64 and body.image_source and body.image_source != "none":
                 image_b64 = await _fetch_image(body.topic, body.image_source, title)
 
+            # Resolve category name to WP category ID
+            _category_name = article.get("category", "") if (body.unique_per_domain and body.topic) else ""
+            _category_id = None
+            if _category_name:
+                try:
+                    from services.wordpress_service import get_or_create_category
+                    _category_id = await get_or_create_category(
+                        domain=d["domain"], wp_login=d["wp_login"], wp_pass=d["wp_pass"],
+                        name=_category_name,
+                        http_user=d.get("http_user", "") or "",
+                        http_pass=d.get("http_pass", "") or "",
+                    )
+                except Exception:
+                    pass
+
             result = await publish_post(
                 domain=d["domain"],
                 wp_login=d["wp_login"],
@@ -403,6 +418,7 @@ async def publish_posts(body: PublishRequest):
                 title=title,
                 content=content,
                 image_b64=image_b64,
+                category_id=_category_id,
                 excerpt=excerpt,
                 keyword=body.topic or None,
                 tags=lsi_tags or None,
@@ -508,6 +524,21 @@ async def _process_one_domain(
         if not image_b64 and body.image_source and body.image_source != "none":
             image_b64 = await _fetch_image(body.topic, body.image_source, title)
 
+        # Resolve category name to WP category ID
+        _category_name = article.get("category", "") if (body.unique_per_domain and body.topic) else ""
+        _category_id = None
+        if _category_name:
+            try:
+                from services.wordpress_service import get_or_create_category
+                _category_id = await get_or_create_category(
+                    domain=d["domain"], wp_login=d["wp_login"], wp_pass=d["wp_pass"],
+                    name=_category_name,
+                    http_user=d.get("http_user", "") or "",
+                    http_pass=d.get("http_pass", "") or "",
+                )
+            except Exception:
+                pass
+
         result = await publish_post(
             domain=d["domain"],
             wp_login=d["wp_login"],
@@ -515,6 +546,7 @@ async def _process_one_domain(
             title=title,
             content=content,
             image_b64=image_b64,
+            category_id=_category_id,
             excerpt=excerpt,
             keyword=body.topic or None,
             tags=lsi_tags or None,

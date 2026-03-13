@@ -1,10 +1,9 @@
 """
 Domain Health monitoring endpoint.
 For each domain fetches in parallel:
-- DataForSEO: organic traffic + keywords count
+- DataForSEO: organic traffic + keywords count + domain rank
 - WHOIS: expiry date (WhoisXML preferred, python-whois fallback)
-- WP ping: checks if WP REST API responds
-- Ahrefs DR: via public endpoint (no API key needed)
+- WP ping: checks if WP REST API responds (with WP auth for htpasswd sites)
 
 Weekly cron saves snapshots to domain_health_snapshots table.
 Snapshot progress tracked in domain_health_snapshot_progress table.
@@ -91,7 +90,7 @@ async def ensure_tables():
 # ── DataForSEO helpers ────────────────────────────────────────────────────────
 
 async def _dfs_domain_metrics(domain: str, location_code: int = 2616, language_code: str = "pl") -> dict:
-    """Fetch organic traffic + keyword count from DataForSEO."""
+    """Fetch organic traffic + keyword count + domain rank from DataForSEO."""
     if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
         logger.warning("[Health] DFS credentials not set — skipping metrics")
         return {}
@@ -118,10 +117,15 @@ async def _dfs_domain_metrics(domain: str, location_code: int = 2616, language_c
                 metrics = result.get("metrics", {}).get("organic", {})
                 traffic = int(metrics.get("etv", 0) or 0)
                 keywords = int(metrics.get("count", 0) or 0)
-                logger.info(f"[Health] DFS {clean}: traffic={traffic}, keywords={keywords}")
+                # DataForSEO domain_rank_overview returns 'rank' at the result level
+                dr = result.get("rank")
+                if dr is not None:
+                    dr = int(dr)
+                logger.info(f"[Health] DFS {clean}: traffic={traffic}, keywords={keywords}, dr={dr}")
                 return {
                     "traffic": traffic,
                     "keywords": keywords,
+                    "dr": dr,
                 }
         logger.info(f"[Health] DFS no results for {clean} (domain may have no organic data)")
     except Exception as e:
@@ -190,31 +194,41 @@ async def _whois_expiry(domain: str) -> dict:
 
 # ── WP ping ───────────────────────────────────────────────────────────────────
 
-async def _ahrefs_dr(domain: str) -> Optional[int]:
-    """Fetch Domain Rating from Ahrefs public API (no key needed)."""
-    clean = re.sub(r"^https?://", "", domain).rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://ahrefs.com/api/public/dr",
-                params={"url": clean},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                dr = data.get("domain_rating")
-                if dr is not None:
-                    return int(dr)
-    except Exception as e:
-        logger.warning(f"[Health] Ahrefs DR failed for {clean}: {e}")
-    return None
-
-
-async def _wp_ping(domain: str, http_user: str = "", http_pass: str = "") -> bool:
+async def _wp_ping(
+    domain: str,
+    http_user: str = "",
+    http_pass: str = "",
+    wp_login: str = "",
+    wp_pass: str = "",
+) -> bool:
+    """Check if WP REST API responds. Tries WP auth first (for htpasswd sites), then unauthenticated."""
     base = domain if domain.startswith("http") else f"https://{domain}"
     base = base.rstrip("/")
-    site_auth = (http_user, http_pass) if http_user and http_pass else None
+    site_auth = httpx.BasicAuth(http_user, http_pass) if http_user and http_pass else None
+
+    # Build WP auth header if credentials available
+    wp_headers = {}
+    if wp_login and wp_pass:
+        try:
+            from services.crypto_service import get_plain_password
+            plain = get_plain_password(wp_pass)
+            wp_creds = base64.b64encode(f"{wp_login}:{plain}".encode()).decode()
+            wp_headers = {"Authorization": f"Basic {wp_creds}"}
+        except Exception as e:
+            logger.debug(f"[Health] WP auth header build failed for {domain}: {e}")
+
     for url in [f"{base}/wp-json/wp/v2/posts?per_page=1",
                 f"{base.replace('https://', 'http://')}/wp-json/wp/v2/posts?per_page=1"]:
+        # Try with WP credentials first (handles htpasswd-protected sites)
+        if wp_headers:
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=7, auth=site_auth) as client:
+                    resp = await client.get(url, headers=wp_headers)
+                    if resp.status_code in (200, 401, 403):
+                        return True
+            except Exception:
+                pass
+        # Fall back to unauthenticated check
         try:
             async with httpx.AsyncClient(verify=False, timeout=7, auth=site_auth) as client:
                 resp = await client.get(url)
@@ -227,17 +241,24 @@ async def _wp_ping(domain: str, http_user: str = "", http_pass: str = "") -> boo
 
 # ── Health score ──────────────────────────────────────────────────────────────
 
-def _health_score(traffic: int, keywords: int, days_to_expiry: Optional[int] = None, dr: Optional[int] = None) -> str:
+def _health_score(
+    traffic: int,
+    keywords: int,
+    days_to_expiry: Optional[int] = None,
+    dr: Optional[int] = None,
+    wp_ok: bool = False,
+) -> str:
     # Critical: expired or expiring very soon
     if days_to_expiry is not None and days_to_expiry < 7:
         return "critical"
     score = "weak"
-    if traffic >= 500 or keywords >= 200:
+    # PBN-friendly thresholds (lower than authority sites)
+    if traffic >= 100 or keywords >= 50 or (dr is not None and dr >= 15 and wp_ok):
         score = "good"
-    elif traffic >= 50 or keywords >= 30:
+    elif traffic >= 10 or keywords >= 10 or (dr is not None and dr >= 5):
         score = "medium"
-    # DR boost: DR >= 20 bumps up score by one tier
-    if dr is not None and dr >= 20:
+    # DR boost: DR >= 10 bumps up score by one tier
+    if dr is not None and dr >= 10:
         if score == "medium":
             score = "good"
         elif score == "weak":
@@ -281,21 +302,22 @@ async def _domain_health_live(row: dict) -> dict:
     domain = row["domain"]
     http_user = row.get("http_user", "") or ""
     http_pass = row.get("http_pass", "") or ""
+    wp_login = row.get("wp_login", "") or ""
+    wp_pass = row.get("wp_pass", "") or ""
 
-    metrics, whois_data, wp_ok, dr = await asyncio.gather(
+    metrics, whois_data, wp_ok = await asyncio.gather(
         _dfs_domain_metrics(domain),
         _whois_expiry(domain),
-        _wp_ping(domain, http_user, http_pass),
-        _ahrefs_dr(domain),
+        _wp_ping(domain, http_user, http_pass, wp_login, wp_pass),
         return_exceptions=True,
     )
     if isinstance(metrics, Exception): metrics = {}
     if isinstance(whois_data, Exception): whois_data = {}
     if isinstance(wp_ok, Exception): wp_ok = False
-    if isinstance(dr, Exception): dr = None
 
     traffic = metrics.get("traffic", 0) or 0
     keywords = metrics.get("keywords", 0) or 0
+    dr = metrics.get("dr")
     days = whois_data.get("days_to_expiry")
 
     return {
@@ -314,7 +336,7 @@ async def _domain_health_live(row: dict) -> dict:
             else "ok" if days is not None
             else "unknown"
         ),
-        "health_score": _health_score(traffic, keywords, days, dr),
+        "health_score": _health_score(traffic, keywords, days, dr, wp_ok=bool(wp_ok)),
         "dr": dr,
     }
 
@@ -329,7 +351,9 @@ async def run_weekly_snapshot():
         async with db.execute(
             """SELECT md.id, md.domain, md.server, md.active,
                       COALESCE(md.http_user,'') as http_user,
-                      COALESCE(md.http_pass,'') as http_pass
+                      COALESCE(md.http_pass,'') as http_pass,
+                      COALESCE(md.wp_login,'') as wp_login,
+                      COALESCE(md.wp_pass,'') as wp_pass
                FROM my_domains md WHERE md.active=1"""
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -594,7 +618,9 @@ async def run_quick_snapshot():
         async with db.execute(
             """SELECT md.id, md.domain, md.server, md.active,
                       COALESCE(md.http_user,'') as http_user,
-                      COALESCE(md.http_pass,'') as http_pass
+                      COALESCE(md.http_pass,'') as http_pass,
+                      COALESCE(md.wp_login,'') as wp_login,
+                      COALESCE(md.wp_pass,'') as wp_pass
                FROM my_domains md WHERE md.active=1"""
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -615,22 +641,26 @@ async def run_quick_snapshot():
         domain = row["domain"]
         http_user = row.get("http_user", "") or ""
         http_pass = row.get("http_pass", "") or ""
+        wp_login = row.get("wp_login", "") or ""
+        wp_pass = row.get("wp_pass", "") or ""
         try:
             metrics, wp_ok = await asyncio.gather(
                 _dfs_domain_metrics(domain),
-                _wp_ping(domain, http_user, http_pass),
+                _wp_ping(domain, http_user, http_pass, wp_login, wp_pass),
                 return_exceptions=True,
             )
             if isinstance(metrics, Exception): metrics = {}
             if isinstance(wp_ok, Exception): wp_ok = False
             traffic = metrics.get("traffic", 0) or 0
             keywords = metrics.get("keywords", 0) or 0
+            dr = metrics.get("dr")
             return {"id": row["id"], "domain": domain, "traffic": traffic,
-                    "keywords": keywords, "wp_ok": bool(wp_ok), "health_score": _health_score(traffic, keywords)}
+                    "keywords": keywords, "wp_ok": bool(wp_ok), "dr": dr,
+                    "health_score": _health_score(traffic, keywords, dr=dr, wp_ok=bool(wp_ok))}
         except Exception as e:
             logger.warning(f"[HealthQuick] _quick_check failed for {row.get('domain')}: {e}")
             return {"id": row["id"], "domain": domain, "traffic": 0,
-                    "keywords": 0, "wp_ok": False, "health_score": "weak"}
+                    "keywords": 0, "wp_ok": False, "dr": None, "health_score": "weak"}
 
     results = []
     BATCH = 8
@@ -683,8 +713,9 @@ async def run_quick_snapshot():
                          existing.get(r["id"], {}).get("days_to_expiry"),
                          _health_score(r.get("traffic", 0), r.get("keywords", 0),
                                        existing.get(r["id"], {}).get("days_to_expiry"),
-                                       existing.get(r["id"], {}).get("dr")),
-                         existing.get(r["id"], {}).get("dr"),
+                                       r.get("dr") or existing.get(r["id"], {}).get("dr"),
+                                       wp_ok=bool(r.get("wp_ok"))),
+                         r.get("dr") or existing.get(r["id"], {}).get("dr"),
                          snapped_at)
                         for r in results
                     ]
@@ -789,7 +820,9 @@ async def single_domain_health(domain_id: int):
         async with db.execute(
             """SELECT id, domain, server, active,
                       COALESCE(http_user,'') as http_user,
-                      COALESCE(http_pass,'') as http_pass
+                      COALESCE(http_pass,'') as http_pass,
+                      COALESCE(wp_login,'') as wp_login,
+                      COALESCE(wp_pass,'') as wp_pass
                FROM my_domains WHERE id = ?""",
             (domain_id,)
         ) as cur:
