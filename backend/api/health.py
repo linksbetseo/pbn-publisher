@@ -523,8 +523,28 @@ async def snapshot_progress():
         return {"running": False, "total": 0, "done": 0, "pct": 0}
     r = dict(row)
     pct = round(r["done"] / r["total"] * 100) if r["total"] else 0
+
+    # Safety net: auto-finish stuck snapshots
+    # If done==total but finished==0 and started >5 min ago, mark as finished
+    is_running = r["finished"] == 0
+    if is_running and r["done"] >= r["total"] and r["total"] > 0:
+        try:
+            started = datetime.fromisoformat(r["started_at"].replace("Z", "+00:00"))
+            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+            if elapsed > 300:  # >5 min since start and done==total → stuck
+                logger.warning(f"[Health] Auto-finishing stuck snapshot progress id={r['id']} (done={r['done']}/{r['total']}, elapsed={elapsed:.0f}s)")
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE domain_health_snapshot_progress SET finished=1, finished_at=? WHERE id=?",
+                        (datetime.now(timezone.utc).isoformat(), r["id"])
+                    )
+                    await db.commit()
+                is_running = False
+        except Exception:
+            pass
+
     return {
-        "running": r["finished"] == 0,
+        "running": is_running,
         "total": r["total"],
         "done": r["done"],
         "pct": pct,

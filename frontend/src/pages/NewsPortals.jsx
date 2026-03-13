@@ -674,16 +674,34 @@ function EditDraftModal({ draft, onClose, onSaved }) {
 
 function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSources, onViewPublished }) {
   const [fetchingId, setFetchingId] = useState(null)
+  const [fetchResult, setFetchResult] = useState(null)
   const [generatingId, setGeneratingId] = useState(null)
   const [confirmDelete, setConfirmDelete] = useState(null)
 
   const handleFetch = async (portalId) => {
     setFetchingId(portalId)
+    setFetchResult(null)
     try {
-      await api.post(`/api/news-portals/${portalId}/fetch`, {}, { timeout: 120000 })
+      const res = await api.post(`/api/news-portals/${portalId}/fetch`, {}, { timeout: 120000 })
+      const d = res.data
+      const hasErrors = d.errors && d.errors.length > 0
+      setFetchResult({
+        portalId,
+        success: true,
+        message: `Pobrano ${d.new_items} nowych newsów, ${d.new_clusters} nowych klastrów${hasErrors ? ` (${d.errors.length} błędów)` : ''}`,
+        errors: d.errors,
+      })
       onRefresh()
-    } catch {}
+    } catch (err) {
+      setFetchResult({
+        portalId,
+        success: false,
+        message: 'Błąd pobierania: ' + (err.response?.data?.detail || err.message),
+      })
+    }
     setFetchingId(null)
+    // Auto-hide success after 8s
+    setTimeout(() => setFetchResult(null), 8000)
   }
 
   const [autoResult, setAutoResult] = useState(null)
@@ -854,6 +872,29 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
           </div>
         ))}
       </div>
+
+      {/* Fetch result banner */}
+      {fetchResult && (
+        <div className={`mt-4 p-4 rounded-xl border ${fetchResult.success ? 'bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800' : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className={`text-sm font-medium ${fetchResult.success ? 'text-cyan-800 dark:text-cyan-300' : 'text-red-700 dark:text-red-300'}`}>
+                {fetchResult.message}
+              </p>
+              {fetchResult.errors && fetchResult.errors.length > 0 && (
+                <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">
+                  Problemy RSS: {fetchResult.errors.join(', ')}
+                </p>
+              )}
+            </div>
+            <button onClick={() => setFetchResult(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 ml-3">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Auto-generate result banner */}
       {autoResult && (

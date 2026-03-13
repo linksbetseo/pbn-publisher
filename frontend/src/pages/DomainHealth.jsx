@@ -56,10 +56,11 @@ function SnapshotProgress({ progress, onDone }) {
   if (!progress || !progress.running) return null
   const pct = progress.pct || 0
   const isSaving = pct >= 100
-  // Check if stuck (started > 15 min ago)
+  // Check if stuck (started > 5 min ago, or done==total but still "running" for >2 min)
   const startedAt = progress.started_at ? new Date(progress.started_at + 'Z') : null
   const stuckMinutes = startedAt ? Math.round((Date.now() - startedAt.getTime()) / 60000) : 0
-  const isStuck = stuckMinutes > 20
+  const doneButStuck = pct >= 100 && stuckMinutes > 2
+  const isStuck = stuckMinutes > 15 || doneButStuck
 
   const handleReset = async () => {
     try {
