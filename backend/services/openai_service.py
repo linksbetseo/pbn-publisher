@@ -1044,6 +1044,9 @@ async def generate_article(
     # Final strip again after enrichment (GPT content in enrichments may also have ##)
     content = _strip_markdown_remnants(content)
 
+    # SEO #89: add loading="lazy" and decoding="async" to all inline images
+    content = re.sub(r'<img(?!\s[^>]*loading=)\s', '<img loading="lazy" decoding="async" ', content)
+
     # Fix heading hierarchy (H3 before H2, skipped levels, etc.)
     content = _fix_heading_hierarchy(content)
 

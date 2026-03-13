@@ -1400,6 +1400,38 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
 
     content = "\n\n".join(p for p in content_parts if p)
 
+    # SEO #87: inject internal links to other published articles on same portal
+    try:
+        async with aiosqlite.connect(DB_PATH) as _db:
+            _db.row_factory = aiosqlite.Row
+            async with _db.execute(
+                """SELECT title, wp_post_url FROM news_drafts
+                   WHERE portal_id = ? AND status = 'published' AND wp_post_url != ''
+                   ORDER BY published_at DESC LIMIT 20""",
+                (portal_id,)
+            ) as _cur:
+                _published_news = [{"title": r["title"], "keyword": r["title"], "url": r["wp_post_url"]} for r in await _cur.fetchall()]
+        if _published_news:
+            from services.openai_service import _inject_internal_links
+            content = _inject_internal_links(content, _published_news, title, language=portal_language)
+    except Exception as _e:
+        logger.warning(f"[NewsGen] Internal linking failed: {_e}")
+
+    # SEO #88: enrich news articles with TOC + 1-2 random elements
+    try:
+        from services.content_enrichments import enrich_article as _enrich_news
+        _news_sections = [re.sub(r'<[^>]+>', '', h).strip() for h in re.findall(r'<h2[^>]*>(.*?)</h2>', content, re.DOTALL)][:6]
+        content = await _enrich_news(
+            content=content,
+            topic=title,
+            sections=_news_sections,
+            lang_pl=lang_pl,
+            openai_client=_openai_client,
+            serp_urls=source_urls[:3] if source_urls else None,
+        )
+    except Exception as _e:
+        logger.warning(f"[NewsGen] Enrichment failed: {_e}")
+
     # Final cleanup
     content = _strip_markdown_remnants(content)
     # SEO #46: fix heading hierarchy in news articles
@@ -1599,6 +1631,13 @@ async def approve_draft(draft_id: int):
             raise HTTPException(status_code=404, detail="Linked domain not found")
         domain = dict(domain)
 
+    # SEO #86: pass keyword and tags for Yoast/RankMath meta optimization
+    # Extract main keyword from title (first 3 significant words)
+    _title_words = [w for w in re.findall(r'\w{3,}', draft["title"]) if len(w) >= 4][:3]
+    _news_keyword = " ".join(_title_words) if _title_words else draft["title"][:50]
+    # Generate tags from title words
+    _news_tags = [w for w in re.findall(r'\w{4,}', draft["title"].lower())][:8]
+
     # Publish to WordPress
     result = await publish_post(
         domain=domain["domain"],
@@ -1607,6 +1646,8 @@ async def approve_draft(draft_id: int):
         title=draft["title"],
         content=draft["content"],
         excerpt=draft.get("excerpt", ""),
+        keyword=_news_keyword,
+        tags=_news_tags if _news_tags else None,
         http_user=domain.get("http_user", "") or "",
         http_pass=domain.get("http_pass", "") or "",
     )

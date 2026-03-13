@@ -691,6 +691,34 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
 
         await _job_update(job_id, total=len(keywords))
 
+        # SEO #92: auto-sync categories if none synced yet (prevents "Uncategorized" posts)
+        try:
+            async with aiosqlite.connect(DB_PATH) as _catdb:
+                async with _catdb.execute(
+                    "SELECT COUNT(*) FROM domain_categories WHERE schedule_id=? AND synced=1",
+                    (schedule_id,)
+                ) as _catcur:
+                    _synced_count = (await _catcur.fetchone())[0]
+            if _synced_count == 0:
+                logger.info(f"[Autopilot] No synced categories — auto-syncing for schedule {schedule_id}")
+                try:
+                    await sync_categories(schedule_id)
+                    # Reload keywords to get updated wp_category_id
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        db.row_factory = aiosqlite.Row
+                        async with db.execute(
+                            """SELECT * FROM domain_keywords
+                               WHERE schedule_id = ? AND status = 'pending'
+                               ORDER BY CASE keyword_type WHEN 'pillar' THEN 0 ELSE 1 END,
+                               keyword_difficulty ASC, search_volume DESC LIMIT ?""",
+                            (schedule_id, limit)
+                        ) as cur:
+                            keywords = [dict(r) for r in await cur.fetchall()]
+                except Exception as _sync_err:
+                    logger.warning(f"[Autopilot] Category auto-sync failed: {_sync_err}")
+        except Exception:
+            pass
+
         # SEO #29: fetch ALL published posts then random sample 50 — ensures links to older valuable posts
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row

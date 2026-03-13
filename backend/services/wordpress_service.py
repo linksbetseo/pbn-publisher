@@ -167,9 +167,19 @@ async def _upload_image(
         if media_id and alt_text:
             try:
                 descriptive_alt = alt_text
+                # SEO #90: set image dimensions for CLS prevention
+                _img_meta = {"alt_text": descriptive_alt, "title": alt_text[:60], "caption": ""}
+                try:
+                    from PIL import Image as _PILImg
+                    import io as _imgIO
+                    _pil = _PILImg.open(_imgIO.BytesIO(image_data))
+                    _img_meta["width"] = _pil.width
+                    _img_meta["height"] = _pil.height
+                except Exception:
+                    pass
                 await client.post(
                     f"{base_url}/wp-json/wp/v2/media/{media_id}",
-                    json={"alt_text": descriptive_alt, "title": alt_text[:60], "caption": ""},
+                    json=_img_meta,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
                     timeout=10,
                 )
@@ -396,6 +406,12 @@ async def publish_post(
                     meta["_yoast_wpseo_opengraph-image"] = og_image_url
                     meta["rank_math_facebook_image"] = og_image_url
                     meta["_yoast_wpseo_twitter-image"] = og_image_url
+                    meta["rank_math_twitter_image"] = og_image_url
+                else:
+                    # SEO #91: fallback OG image — use site icon or placeholder
+                    _fallback_og = f"{base_url}/wp-content/uploads/site-og-default.jpg"
+                    meta["_yoast_wpseo_opengraph-image"] = _fallback_og
+                    meta["rank_math_facebook_image"] = _fallback_og
                 if meta:
                     post_data["meta"] = meta
 
