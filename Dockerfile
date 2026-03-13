@@ -12,7 +12,7 @@ WORKDIR /app
 COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm ci
 
-# cache bust frontend: 2026-03-12-v4
+# cache bust frontend: 2026-03-13-v1
 COPY frontend/ ./frontend/
 RUN mkdir -p backend/frontend_dist && \
     cd frontend && npm run build && cp -r dist/* ../backend/frontend_dist/
@@ -21,7 +21,7 @@ RUN mkdir -p backend/frontend_dist && \
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# Copy backend (cache bust: 2026-03-12-v4)
+# Copy backend (cache bust: 2026-03-13-v1)
 COPY backend/ ./backend/
 
 EXPOSE 8080
