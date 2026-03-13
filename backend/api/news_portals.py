@@ -36,7 +36,7 @@ import random
 import re
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import aiosqlite
@@ -640,6 +640,45 @@ async def list_published_urls(
         "per_page": per_page,
         "pages": (total + per_page - 1) // per_page if per_page else 1,
     }
+
+
+# Track last run per portal for status reporting
+_autopilot_status: dict = {}  # {portal_id: {last_run, next_run, published, errors, running}}
+
+
+@router.get("/autopilot-status")
+async def get_autopilot_status():
+    """Return auto-pilot status for all portals."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, name, auto_publish, posts_per_day, check_interval_min, active
+               FROM news_portals WHERE auto_publish = 1 AND active = 1"""
+        ) as cur:
+            portals = [dict(r) for r in await cur.fetchall()]
+    result = []
+    for p in portals:
+        st = _autopilot_status.get(p["id"], {})
+        result.append({
+            "portal_id": p["id"],
+            "name": p["name"],
+            "posts_per_day": p["posts_per_day"],
+            "check_interval_min": p["check_interval_min"],
+            "last_run": st.get("last_run"),
+            "next_run": st.get("next_run"),
+            "last_published": st.get("published", 0),
+            "last_errors": st.get("errors", 0),
+            "running": st.get("running", False),
+        })
+    return result
+
+
+@router.post("/autopilot-run")
+async def manual_autopilot_run():
+    """Manually trigger one news autopilot cycle for all auto-publish portals."""
+    result = await run_news_autopilot()
+    return result
 
 
 @router.get("/{portal_id}")
@@ -1872,5 +1911,145 @@ async def edit_draft(draft_id: int, body: DraftUpdate):
     return dict(updated)
 
 
+# ── News Autopilot ────────────────────────────────────────────────────────────
 
+
+async def run_news_autopilot():
+    """Core autopilot: for each auto_publish portal, fetch → generate → publish.
+
+    Respects posts_per_day limit and check_interval_min between runs.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT np.*, md.domain, md.wp_login, md.wp_pass,
+                      COALESCE(md.http_user,'') as http_user,
+                      COALESCE(md.http_pass,'') as http_pass
+               FROM news_portals np
+               JOIN my_domains md ON md.id = np.my_domain_id
+               WHERE np.auto_publish = 1 AND np.active = 1"""
+        ) as cur:
+            portals = [dict(r) for r in await cur.fetchall()]
+
+    if not portals:
+        logger.info("[NewsAutopilot] No auto-publish portals configured")
+        return {"portals_processed": 0}
+
+    total_published = 0
+    total_errors = 0
+    portal_results = []
+
+    for portal in portals:
+        pid = portal["id"]
+        interval = portal.get("check_interval_min", 30) or 30
+        limit = portal.get("posts_per_day", 5) or 5
+
+        # Check if enough time passed since last run
+        last = _autopilot_status.get(pid, {})
+        if last.get("last_run"):
+            elapsed_min = (datetime.now(timezone.utc) - datetime.fromisoformat(last["last_run"])).total_seconds() / 60
+            if elapsed_min < interval:
+                logger.info(f"[NewsAutopilot] Portal {pid} ({portal['name']}): skipping, {elapsed_min:.0f}/{interval}min elapsed")
+                portal_results.append({"portal_id": pid, "skipped": True, "reason": f"{elapsed_min:.0f}/{interval}min"})
+                continue
+
+        _autopilot_status[pid] = {**last, "running": True}
+        published = 0
+        errors = 0
+
+        try:
+            # Step 1: fetch & cluster
+            logger.info(f"[NewsAutopilot] Portal {pid} ({portal['name']}): fetching RSS...")
+            fetch_result = await fetch_and_cluster(pid)
+            new_items = fetch_result.get("new_items", 0)
+            new_clusters = fetch_result.get("new_clusters", 0)
+            logger.info(f"[NewsAutopilot] Portal {pid}: {new_items} items, {new_clusters} clusters")
+
+            # Step 2: get unprocessed clusters (up to posts_per_day)
+            # Also count how many already published today
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT COUNT(*) as cnt FROM news_drafts WHERE portal_id=? AND status='published' AND published_at>=?",
+                    (pid, today_start),
+                ) as cur:
+                    today_count = (await cur.fetchone())["cnt"]
+
+            remaining = max(0, limit - today_count)
+            if remaining == 0:
+                logger.info(f"[NewsAutopilot] Portal {pid}: already published {today_count}/{limit} today, skipping")
+                portal_results.append({"portal_id": pid, "skipped": True, "reason": f"limit {today_count}/{limit}"})
+                now = datetime.now(timezone.utc)
+                _autopilot_status[pid] = {
+                    "last_run": now.isoformat(),
+                    "next_run": (now + timedelta(minutes=interval)).isoformat(),
+                    "published": 0, "errors": 0, "running": False,
+                }
+                continue
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT id FROM news_clusters WHERE portal_id=? AND status='new' ORDER BY created_at DESC LIMIT ?",
+                    (pid, remaining),
+                ) as cur:
+                    clusters = [dict(r) for r in await cur.fetchall()]
+
+            # Step 3: generate + auto-approve each
+            for i, cluster in enumerate(clusters):
+                try:
+                    draft = await generate_draft(pid, GenerateRequest(cluster_id=cluster["id"]))
+                    draft_id = draft.get("id")
+                    if draft_id:
+                        # Auto-approve (publish to WP)
+                        pub = await approve_draft(draft_id)
+                        published += 1
+                        logger.info(f"[NewsAutopilot] Portal {pid}: published '{draft.get('title', '')[:50]}' → {pub.get('wp_post_url', '')}")
+                    # Stagger between articles
+                    if i < len(clusters) - 1:
+                        await asyncio.sleep(random.randint(3, 8))
+                except Exception as e:
+                    errors += 1
+                    logger.warning(f"[NewsAutopilot] Portal {pid} cluster {cluster['id']}: {e}")
+
+        except Exception as e:
+            errors += 1
+            logger.error(f"[NewsAutopilot] Portal {pid} failed: {e}", exc_info=True)
+
+        total_published += published
+        total_errors += errors
+        now = datetime.now(timezone.utc)
+        _autopilot_status[pid] = {
+            "last_run": now.isoformat(),
+            "next_run": (now + timedelta(minutes=interval)).isoformat(),
+            "published": published,
+            "errors": errors,
+            "running": False,
+        }
+        portal_results.append({"portal_id": pid, "published": published, "errors": errors})
+
+        # Telegram notification
+        if published:
+            try:
+                from api.notifications import should_notify
+                if await should_notify("notify_news_approve"):
+                    from services.telegram_service import send_telegram
+                    await send_telegram(
+                        f"<b>News Autopilot — {portal['name']}</b>\n\n"
+                        f"Opublikowano: <b>{published}</b> artykułów\n"
+                        f"Domena: {portal['domain']}\n"
+                        f"Błędy: {errors}"
+                    )
+            except Exception:
+                pass
+
+    logger.info(f"[NewsAutopilot] Done: {total_published} published, {total_errors} errors across {len(portals)} portals")
+    return {
+        "portals_processed": len(portals),
+        "total_published": total_published,
+        "total_errors": total_errors,
+        "details": portal_results,
+    }
 

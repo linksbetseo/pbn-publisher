@@ -386,6 +386,19 @@ async def lifespan(app: FastAPI):
             await db.commit()
         except Exception:
             pass  # table may not exist yet on first run
+    # Start news autopilot cron
+    async def _news_autopilot_cron():
+        """Run news autopilot every 15 minutes for auto-publish portals."""
+        import asyncio as __asyncio
+        while True:
+            await __asyncio.sleep(900)  # 15 min between cycles
+            try:
+                from api.news_portals import run_news_autopilot
+                result = await run_news_autopilot()
+                logger.info(f"[NewsAutopilot] Cycle: {result.get('total_published', 0)} published")
+            except Exception as e:
+                logger.error(f"[NewsAutopilot] Cron error: {e}", exc_info=True)
+
     # Start background crons with exception logging
     import asyncio as _asyncio
 
@@ -403,6 +416,7 @@ async def lifespan(app: FastAPI):
         (_daily_autopilot_cron(), "daily-autopilot"),
         (_date_modified_refresh_cron(), "date-modified-refresh"),
         (_weekly_deindex_cron(), "weekly-deindex"),
+        (_news_autopilot_cron(), "news-autopilot"),
     ]:
         t = _asyncio.create_task(_coro, name=_name)
         t.add_done_callback(_cron_done_callback)

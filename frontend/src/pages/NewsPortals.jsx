@@ -677,6 +677,32 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
   const [fetchResult, setFetchResult] = useState(null)
   const [generatingId, setGeneratingId] = useState(null)
   const [confirmDelete, setConfirmDelete] = useState(null)
+  const [autopilotStatus, setAutopilotStatus] = useState({})
+  const [togglingAuto, setTogglingAuto] = useState(null)
+
+  // Load autopilot status
+  useEffect(() => {
+    const loadStatus = async () => {
+      try {
+        const res = await api.get('/api/news-portals/autopilot-status')
+        const map = {}
+        for (const s of (res.data || [])) map[s.portal_id] = s
+        setAutopilotStatus(map)
+      } catch {}
+    }
+    loadStatus()
+    const iv = setInterval(loadStatus, 30000)
+    return () => clearInterval(iv)
+  }, [])
+
+  const handleToggleAuto = async (portal) => {
+    setTogglingAuto(portal.id)
+    try {
+      await api.put(`/api/news-portals/${portal.id}`, { auto_publish: portal.auto_publish ? 0 : 1 })
+      onRefresh()
+    } catch {}
+    setTogglingAuto(null)
+  }
 
   const handleFetch = async (portalId) => {
     setFetchingId(portalId)
@@ -815,18 +841,47 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
                 </div>
               </div>
 
-              {/* Extra info */}
-              <div className="flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500 mb-4">
-                <span>{p.posts_per_day ?? 5} art./dzień</span>
-                <span className="w-1 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
-                <span>co {p.check_interval_min ?? 30} min</span>
-                <span className="w-1 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
-                <span>{p.language === 'en' ? 'EN' : 'PL'}</span>
-                {p.auto_publish && (
-                  <>
-                    <span className="w-1 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
-                    <Badge color="green">Auto</Badge>
-                  </>
+              {/* Auto-pilot section */}
+              <div className={`rounded-lg p-3 mb-4 border ${p.auto_publish
+                ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+                : 'bg-gray-50 dark:bg-gray-700/30 border-gray-200 dark:border-gray-600'}`}>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">Autopilot</span>
+                    {p.auto_publish ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-green-700 dark:text-green-400 bg-green-100 dark:bg-green-900/40 px-1.5 py-0.5 rounded-full">
+                        <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                        ON
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-medium text-gray-400 dark:text-gray-500">OFF</span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleToggleAuto(p)}
+                    disabled={togglingAuto === p.id}
+                    className={`relative w-9 h-5 rounded-full transition-colors ${p.auto_publish ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform shadow-sm ${p.auto_publish ? 'translate-x-4' : ''}`} />
+                  </button>
+                </div>
+                <div className="flex items-center gap-3 text-[11px] text-gray-500 dark:text-gray-400">
+                  <span>{p.posts_per_day ?? 5} art./dzień</span>
+                  <span className="w-1 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
+                  <span>co {p.check_interval_min ?? 30} min</span>
+                  <span className="w-1 h-1 bg-gray-300 dark:bg-gray-600 rounded-full" />
+                  <span>{p.language === 'en' ? 'EN' : 'PL'}</span>
+                </div>
+                {p.auto_publish && autopilotStatus[p.id] && (
+                  <div className="mt-2 text-[10px] text-gray-400 dark:text-gray-500 space-y-0.5">
+                    {autopilotStatus[p.id].last_run && (
+                      <p>Ostatni run: {new Date(autopilotStatus[p.id].last_run).toLocaleString('pl')} — {autopilotStatus[p.id].last_published} opubl.{autopilotStatus[p.id].last_errors > 0 && `, ${autopilotStatus[p.id].last_errors} błędów`}</p>
+                    )}
+                    {autopilotStatus[p.id].running && (
+                      <p className="text-green-600 dark:text-green-400 font-medium flex items-center gap-1">
+                        <Spinner className="w-3 h-3" /> Generuję...
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
