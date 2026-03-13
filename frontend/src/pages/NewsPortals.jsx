@@ -892,6 +892,7 @@ function ReviewQueueTab({ portals }) {
   const [portalFilter, setPortalFilter] = useState('')
   const [previewDraft, setPreviewDraft] = useState(null)
   const [editDraft, setEditDraft] = useState(null)
+  const [publishedUrls, setPublishedUrls] = useState([])
 
   const loadDrafts = useCallback(async () => {
     setLoading(true)
@@ -916,7 +917,11 @@ function ReviewQueueTab({ portals }) {
 
   const handleApprove = async (draftId) => {
     try {
-      await api.post(`/api/news-portals/drafts/${draftId}/approve`)
+      const res = await api.post(`/api/news-portals/drafts/${draftId}/approve`)
+      const url = res.data?.wp_post_url
+      if (url) {
+        setPublishedUrls(prev => [{ url, title: res.data?.title || drafts.find(d => d.id === draftId)?.title || '', id: draftId }, ...prev])
+      }
       setPreviewDraft(null)
       await loadDrafts()
     } catch {}
@@ -961,6 +966,30 @@ function ReviewQueueTab({ portals }) {
           {pendingDrafts.length} {pendingDrafts.length === 1 ? 'artykuł oczekuje' : 'artykułów oczekuje'}
         </span>
       </div>
+
+      {/* Recently published URLs */}
+      {publishedUrls.length > 0 && (
+        <div className="mb-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-sm font-semibold text-green-700 dark:text-green-300">Opublikowane linki</h4>
+            <button onClick={() => setPublishedUrls([])} className="text-xs text-green-600 dark:text-green-400 hover:underline">Wyczyść</button>
+          </div>
+          <div className="space-y-1">
+            {publishedUrls.map(pu => (
+              <div key={pu.id} className="flex items-center gap-2 text-sm">
+                <svg className="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                <span className="text-gray-700 dark:text-gray-300 truncate max-w-xs">{pu.title}</span>
+                <a href={pu.url} target="_blank" rel="noopener noreferrer"
+                  className="text-blue-600 dark:text-blue-400 hover:underline text-xs truncate">
+                  {pu.url}
+                </a>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {pendingDrafts.length === 0 ? (
         <div className="text-center py-16">
