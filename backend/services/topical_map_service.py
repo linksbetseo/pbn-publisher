@@ -153,19 +153,24 @@ def _stem_pl(token: str) -> str:
         _core = _core[3:]
 
     for suffix in (
-        # nominal/verbal long suffixes
+        # nominal/verbal long suffixes (longest first)
         "owania", "owego", "owej", "owym", "owych",
         "nych", "nego", "nemu",
-        "eniu", "anie", "enie", "osci",
+        "eniu", "anie", "enie", "enia", "osci",
         # adjectival suffixes (FIX #2)
         "iczne", "iczny", "iczna", "owego", "cznym", "cznej",
         "czny", "czna", "czne",
         "skim", "skie", "skiej",
         "owym", "owej", "owe", "owy", "owa",
         "ski", "ska",
-        # case suffixes
+        # case suffixes (expanded for Polish declensions)
         "ach", "ami", "iem", "ego", "emu", "owi",
+        "nia", "niu",
         "ie", "ej", "ow", "om",
+        "cy", "ce", "ca",
+        "tu", "ty", "ta",
+        "ki", "ka", "ku", "ke",
+        "ny", "na", "ne",
     ):
         if _core.endswith(suffix) and len(_core) - len(suffix) >= 3:
             return _core[:-len(suffix)]

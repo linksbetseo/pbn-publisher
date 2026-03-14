@@ -25,7 +25,7 @@ from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from config import DB_PATH
-from services.topical_map_service import generate_topical_map, _compute_site_metrics
+from services.topical_map_service import generate_topical_map, _compute_site_metrics, _coherence_score, _seed_tokens
 from services.dataforseo_service import DataForSEOClient
 from services.openai_service import generate_article
 from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
@@ -531,6 +531,39 @@ async def get_site_metrics(schedule_id: int):
     pillars = list(pillars_map.values())
     metrics = _compute_site_metrics(pillars, sched["seed_keyword"], rows)
     return {"site_metrics": metrics}
+
+
+@router.post("/schedules/{schedule_id}/recalculate-coherence")
+async def recalculate_coherence(schedule_id: int):
+    """Przelicz coherence dla istniejących keywordów (po poprawce stemmera)."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sched = await get_schedule(db, schedule_id)
+        if not sched:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Schedule not found")
+
+        seed = sched["seed_keyword"]
+        seed_toks = _seed_tokens(seed)
+
+        async with db.execute(
+            "SELECT id, keyword FROM domain_keywords WHERE schedule_id = ?",
+            (schedule_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+
+        updated = 0
+        for row in rows:
+            coh = _coherence_score(row["keyword"], seed_toks, seed)
+            await db.execute(
+                "UPDATE domain_keywords SET coherence = ? WHERE id = ?",
+                (coh, row["id"]),
+            )
+            updated += 1
+        await db.commit()
+
+    return {"updated": updated, "seed": seed}
 
 
 @router.get("/schedules/{schedule_id}/categories")

@@ -704,8 +704,9 @@ export default function Autopilot() {
     }
   }
 
-  const fetchMetrics = async (id) => {
+  const fetchMetrics = async (id, recalc = false) => {
     try {
+      if (recalc) await api.post(`/api/autopilot/schedules/${id}/recalculate-coherence`)
       const res = await api.get(`/api/autopilot/schedules/${id}/site-metrics`)
       if (res.data.site_metrics) setSiteMetrics(m => ({ ...m, [id]: res.data.site_metrics }))
     } catch {
@@ -1118,9 +1119,8 @@ export default function Autopilot() {
         <div className="space-y-3">
           {schedules.map(sched => (
             <div key={sched.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              {/* Header row */}
-              <div className="flex items-center gap-3 p-4">
-                {/* Active toggle */}
+              {/* Row 1: Toggle + Domain info */}
+              <div className="flex items-center gap-3 px-4 pt-4 pb-2">
                 <button
                   onClick={() => toggleActive(sched)}
                   className={`w-10 h-6 rounded-full transition-colors flex-shrink-0 ${sched.active ? 'bg-green-500' : 'bg-gray-300'}`}
@@ -1128,8 +1128,6 @@ export default function Autopilot() {
                 >
                   <div className={`w-4 h-4 rounded-full bg-white shadow mx-1 transition-transform ${sched.active ? 'translate-x-4' : 'translate-x-0'}`} />
                 </button>
-
-                {/* Domain + seed */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-semibold text-gray-900 text-sm">{sched.domain}</span>
@@ -1146,18 +1144,28 @@ export default function Autopilot() {
                   {siteMetrics[sched.id] && (
                     <div className="flex gap-3 mt-1 flex-wrap text-xs">
                       <span title="SiteFocus: koncentracja semantyczna klastrów (wyżej = lepiej)" className={`px-2 py-0.5 rounded-full font-medium ${siteMetrics[sched.id].focus_rating === 'excellent' ? 'bg-green-100 text-green-700' : siteMetrics[sched.id].focus_rating === 'good' ? 'bg-blue-100 text-blue-700' : siteMetrics[sched.id].focus_rating === 'fair' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-600'}`}>
-                        Focus: {siteMetrics[sched.id].site_focus} ({siteMetrics[sched.id].focus_rating})
+                        Focus: {(siteMetrics[sched.id].site_focus * 100).toFixed(0)}% ({siteMetrics[sched.id].focus_rating})
                       </span>
                       <span title="SiteRadius: dryf semantyczny od rdzenia (niżej = lepiej)" className={`px-2 py-0.5 rounded-full font-medium ${siteMetrics[sched.id].radius_rating === 'tight' ? 'bg-green-100 text-green-700' : siteMetrics[sched.id].radius_rating === 'moderate' ? 'bg-blue-100 text-blue-700' : siteMetrics[sched.id].radius_rating === 'wide' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-600'}`}>
-                        Radius: {siteMetrics[sched.id].site_radius} ({siteMetrics[sched.id].radius_rating})
+                        Radius: {(siteMetrics[sched.id].site_radius * 100).toFixed(0)}% ({siteMetrics[sched.id].radius_rating})
                       </span>
                       <span className="text-gray-400">{siteMetrics[sched.id].total_articles} artykułów</span>
                     </div>
                   )}
                 </div>
+                <button
+                  onClick={() => deleteSchedule(sched.id)}
+                  className="px-2 py-1.5 text-red-500 border border-red-200 rounded-lg text-xs hover:bg-red-50 shrink-0"
+                  title="Usuń harmonogram"
+                >
+                  ✕
+                </button>
+              </div>
 
-                {/* Posts per day */}
-                <div className="flex items-center gap-1 shrink-0">
+              {/* Row 2: Settings + Actions */}
+              <div className="flex items-center gap-2 px-4 pb-3 flex-wrap">
+                {/* Settings */}
+                <div className="flex items-center gap-1">
                   <span className="text-xs text-gray-500">dziennie:</span>
                   <input
                     type="number"
@@ -1168,57 +1176,46 @@ export default function Autopilot() {
                     className="w-14 border border-gray-300 rounded px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
+                <select
+                  defaultValue={sched.min_coherence ?? 0}
+                  onChange={e => updateMinCoherence(sched.id, e.target.value)}
+                  className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  title="SiteRadius filter: min. spójność frazy z seed keyword (0=brak, 0.5=surowy)"
+                >
+                  <option value="0">Spójność: 0</option>
+                  <option value="0.1">Spójność: 0.1</option>
+                  <option value="0.2">Spójność: 0.2</option>
+                  <option value="0.3">Spójność: 0.3</option>
+                  <option value="0.5">Spójność: 0.5</option>
+                </select>
+                <select
+                  defaultValue={sched.image_source || 'freepik_flux'}
+                  onChange={e => updateImageSource(sched.id, e.target.value)}
+                  className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  title="Źródło zdjęć (AI-generowane)"
+                >
+                  <option value="freepik_flux">🌊 Flux</option>
+                  <option value="freepik_zimage">⚡ Z-Image</option>
+                  <option value="freepik_stock">📷 Stock</option>
+                  <option value="gemini">🤖 Gemini</option>
+                  <option value="dalle">🎨 DALL-E</option>
+                  <option value="none">🚫 Brak</option>
+                </select>
+                <select
+                  defaultValue={sched.tone_of_voice || 'ekspert'}
+                  onChange={e => updateTone(sched.id, e.target.value)}
+                  className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  title="Ton artykułu"
+                >
+                  <option value="ekspert">Ekspercki</option>
+                  <option value="przyjazny">Przyjazny</option>
+                  <option value="formalny">Formalny</option>
+                  <option value="poradnikowy">Poradnikowy</option>
+                </select>
 
-                {/* Min coherence */}
-                <div className="flex items-center gap-1 shrink-0">
-                  <select
-                    defaultValue={sched.min_coherence ?? 0}
-                    onChange={e => updateMinCoherence(sched.id, e.target.value)}
-                    className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    title="SiteRadius filter: min. spójność frazy z seed keyword (0=brak, 0.5=surowy)"
-                  >
-                    <option value="0">Spójność: 0</option>
-                    <option value="0.1">Spójność: 0.1</option>
-                    <option value="0.2">Spójność: 0.2</option>
-                    <option value="0.3">Spójność: 0.3</option>
-                    <option value="0.5">Spójność: 0.5</option>
-                  </select>
-                </div>
-
-                {/* Image source */}
-                <div className="flex items-center gap-1 shrink-0">
-                  <select
-                    defaultValue={sched.image_source || 'freepik_flux'}
-                    onChange={e => updateImageSource(sched.id, e.target.value)}
-                    className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    title="Źródło zdjęć (AI-generowane)"
-                  >
-                    <option value="freepik_flux">🌊 Flux</option>
-                    <option value="freepik_zimage">⚡ Z-Image</option>
-                    <option value="freepik_stock">📷 Stock</option>
-                    <option value="gemini">🤖 Gemini</option>
-                    <option value="dalle">🎨 DALL-E</option>
-                    <option value="none">🚫 Brak</option>
-                  </select>
-                </div>
-
-                {/* Tone of voice */}
-                <div className="flex items-center gap-1 shrink-0">
-                  <select
-                    defaultValue={sched.tone_of_voice || 'ekspert'}
-                    onChange={e => updateTone(sched.id, e.target.value)}
-                    className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    title="Ton artykułu"
-                  >
-                    <option value="ekspert">Ekspercki</option>
-                    <option value="przyjazny">Przyjazny</option>
-                    <option value="formalny">Formalny</option>
-                    <option value="poradnikowy">Poradnikowy</option>
-                  </select>
-                </div>
+                <div className="w-px h-5 bg-gray-200 mx-1" />
 
                 {/* Actions */}
-                <div className="flex items-center gap-2 shrink-0">
                   {!sched.map_generated ? (
                     <button
                       onClick={() => generateMap(sched.id)}
@@ -1259,8 +1256,8 @@ export default function Autopilot() {
                         </button>
                       )}
                       <button
-                        onClick={() => fetchMetrics(sched.id)}
-                        title="Sprawdź SiteFocus / SiteRadius"
+                        onClick={() => fetchMetrics(sched.id, true)}
+                        title="Przelicz coherence i sprawdź SiteFocus / SiteRadius"
                         className="px-2 py-1.5 text-indigo-600 border border-indigo-200 rounded-lg text-xs hover:bg-indigo-50 disabled:opacity-50"
                       >
                         📊 Metryki
@@ -1306,13 +1303,6 @@ export default function Autopilot() {
                       ↓ CSV
                     </button>
                   )}
-                  <button
-                    onClick={() => deleteSchedule(sched.id)}
-                    className="px-2 py-1.5 text-red-500 border border-red-200 rounded-lg text-xs hover:bg-red-50"
-                  >
-                    ✕
-                  </button>
-                </div>
               </div>
 
               {/* Category sync result */}
