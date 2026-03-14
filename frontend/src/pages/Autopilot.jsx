@@ -46,6 +46,7 @@ function BulkTab() {
   const [customPrompt, setCustomPrompt] = useState('')
   const [runLimit, setRunLimit] = useState(1)
   const [autoSeed, setAutoSeed] = useState(true)
+  const [autoTone, setAutoTone] = useState(true)
 
   const [csvImporting, setCsvImporting] = useState(false)
   const csvInputRef = useRef(null)
@@ -159,6 +160,7 @@ function BulkTab() {
     setRunning(true)
     setActionLog([])
 
+    let createdIds = []
     if (autoSeed) {
       log(`AI dobiera seed keywords dla ${selectedList.length} domen... (to może potrwać kilka minut)`)
       try {
@@ -174,6 +176,7 @@ function BulkTab() {
           else log(`  ✓ ${r.domain}: seed "${r.seed_keyword}"`, 'ok')
         })
         log(`✓ Utworzono: ${res.data.created}, pominięto: ${res.data.skipped}, błędy: ${res.data.errors}`, 'ok')
+        createdIds = (res.data.results || []).filter(r => r.schedule_id).map(r => r.schedule_id)
         await load()
         setSelected(new Set())
       } catch (e) {
@@ -191,12 +194,30 @@ function BulkTab() {
           custom_prompt: customPrompt,
         })
         log(`✓ Utworzono: ${res.data.created}, pominięto: ${res.data.skipped}, błędy: ${res.data.errors}`, 'ok')
+        createdIds = (res.data.details?.created || []).filter(r => r.schedule_id).map(r => r.schedule_id)
         await load()
         setSelected(new Set())
       } catch (e) {
         log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
       }
     }
+
+    // Auto-generate Tone of Voice for newly created schedules
+    if (autoTone && createdIds.length > 0) {
+      log(`Generuję Tone of Voice (AI) dla ${createdIds.length} domen... (to potrwa kilka minut)`)
+      try {
+        const res = await api.post('/api/autopilot/bulk-generate-tones', { schedule_ids: createdIds }, { timeout: 600000 })
+        log(`✓ Tone of Voice: ${res.data.ok}/${res.data.total} wygenerowanych`, 'ok')
+        res.data.results?.forEach(r => {
+          if (r.error) log(`  ✗ ${r.domain || r.schedule_id}: ${r.error}`, 'err')
+          else log(`  ✓ ${r.domain}: Tone wygenerowany (keyword: ${r.main_keyword})`, 'ok')
+        })
+        await load()
+      } catch (e) {
+        log(`✗ Błąd generowania tone: ${e.response?.data?.detail || e.message}`, 'err')
+      }
+    }
+
     setRunning(false)
   }
 
@@ -255,6 +276,26 @@ function BulkTab() {
           break
         }
       }
+      await load()
+    } catch (e) {
+      log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const bulkGenerateTones = async () => {
+    if (!selectedList.length) return addToast('Zaznacz harmonogramy', 'warning')
+    setRunning(true)
+    setActionLog([])
+    log(`Generuję Tone of Voice (AI) dla ${selectedList.length} harmonogramów...`)
+    try {
+      const res = await api.post('/api/autopilot/bulk-generate-tones', { schedule_ids: selectedList }, { timeout: 600000 })
+      log(`✓ Tone of Voice: ${res.data.ok}/${res.data.total} wygenerowanych`, 'ok')
+      res.data.results?.forEach(r => {
+        if (r.error) log(`  ✗ ${r.domain || r.schedule_id}: ${r.error}`, 'err')
+        else log(`  ✓ ${r.domain}: Tone wygenerowany (keyword: ${r.main_keyword})`, 'ok')
+      })
       await load()
     } catch (e) {
       log(`✗ Błąd: ${e.response?.data?.detail || e.message}`, 'err')
@@ -438,6 +479,23 @@ function BulkTab() {
               )}
             </div>
 
+            <div className="bg-amber-50 rounded-lg p-3 mb-2 border border-amber-100">
+              <label className="flex items-center gap-2 text-xs font-semibold text-amber-800 cursor-pointer">
+                <input type="checkbox" checked={autoTone} onChange={e => setAutoTone(e.target.checked)}
+                  className="rounded border-amber-300 text-amber-600" />
+                Auto Tone of Voice (AI)
+              </label>
+              {autoTone ? (
+                <p className="text-xs text-amber-600 mt-1.5">
+                  Po utworzeniu harmonogramów system wygeneruje unikalny Tone of Voice dla każdej domeny (analiza treści, SERP, profil klienta, konkurencja).
+                </p>
+              ) : (
+                <p className="text-xs text-gray-400 mt-1.5">
+                  Wyłączony — artykuły będą generowane bez specyficznego tonu.
+                </p>
+              )}
+            </div>
+
             {tab === 'domains' && (
               <>
                 {!autoSeed && (
@@ -492,6 +550,10 @@ function BulkTab() {
                 <button onClick={bulkGenerateMaps} disabled={running || !selectedList.length}
                   className="w-full py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:opacity-50">
                   {running ? '⟳ Generuję...' : `↻ Generuj mapy (${selectedList.length})`}
+                </button>
+                <button onClick={bulkGenerateTones} disabled={running || !selectedList.length}
+                  className="w-full py-2 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50">
+                  {running ? '⟳ Generuję tone...' : `🎤 Generuj Tone of Voice (${selectedList.length})`}
                 </button>
                 <button onClick={bulkRun} disabled={running || !selectedList.length}
                   className="w-full py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50">

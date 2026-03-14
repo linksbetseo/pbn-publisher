@@ -2192,6 +2192,33 @@ Return: {{"seed": "specific niche keyword in {body.language}", "reason": "short 
     }
 
 
+@router.post("/bulk-generate-tones")
+async def bulk_generate_tones(body: BulkActionRequest):
+    """
+    Generuj Tone of Voice hurtowo dla wielu harmonogramów.
+    Sekwencyjnie — każdy krok korzysta z DataForSEO + GPT.
+    """
+    await ensure_tables()
+    results = []
+    ok_count = 0
+
+    for schedule_id in body.schedule_ids:
+        try:
+            result = await _generate_tone_for_schedule(schedule_id)
+            if result.get("error"):
+                results.append({"schedule_id": schedule_id, "error": result["error"]})
+            else:
+                results.append(result)
+                ok_count += 1
+        except Exception as e:
+            logger.error(f"[BulkTone] Failed for {schedule_id}: {e}")
+            results.append({"schedule_id": schedule_id, "error": str(e)})
+        # Rate limit between domains
+        await asyncio.sleep(2)
+
+    return {"ok": ok_count, "total": len(body.schedule_ids), "results": results}
+
+
 @router.post("/bulk-generate-maps")
 async def bulk_generate_maps(body: BulkActionRequest):
     """
