@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { history as historyApi, clients as clientsApi } from '../api/client'
 import api from '../api/client'
 import { useToast } from '../components/Toast'
+import { sanitizeHtml } from '../sanitize'
 
 const STATUS_COLORS = {
   published: 'bg-green-100 text-green-700',
@@ -452,7 +453,7 @@ export default function History() {
               ) : (
                 <div
                   className="text-gray-800 text-sm leading-relaxed [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mb-2 [&_p]:mb-3 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_li]:mb-1 [&_strong]:font-semibold [&_a]:text-blue-600 [&_a]:underline"
-                  dangerouslySetInnerHTML={{ __html: preview.content || '' }}
+                  dangerouslySetInnerHTML={{ __html: sanitizeHtml(preview.content || '') }}
                 />
               )}
             </div>

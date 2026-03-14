@@ -392,6 +392,10 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str, l
         title = post.get("title", "") or post.get("keyword", "")
         if not url or not title or url in used_urls:
             continue
+        # FIX: skip self-link — don't link to current article's keyword
+        _post_kw = (post.get("keyword", "") or post.get("title", "")).strip().lower()
+        if _post_kw and _post_kw == topic.strip().lower():
+            continue
 
         title_words = set(re.findall(r'\w{3,}', title.lower()))
         if not title_words:
@@ -513,6 +517,7 @@ async def generate_article(
     layout_variant: Optional[str] = None,  # "faq_top" | "tldr" | "short_answer" | None (random)
     pillar_page_url: str = "",  # PBN inter-link: supporting → pillar
     pillar_page_anchor: str = "",  # anchor text for pillar link
+    pbn_domain: str = "",  # FIX: PBN domain for Article JSON-LD publisher (avoids money site footprint)
 ) -> dict:
     _t0 = time.time()
 
@@ -648,6 +653,9 @@ async def generate_article(
         outline_user, temperature=0.5, max_tokens=500, model=_resolved_model
     )
     sections = [s.strip() for s in outline_raw.split("<<<<") if s.strip()]
+    # FIX: GPT often returns "H2: Title" or "## Title" — strip these prefixes
+    sections = [re.sub(r'^(?:H[2-4]:\s*|#{1,4}\s*)', '', s).strip() for s in sections]
+    sections = [s for s in sections if s]
     if not sections:
         sections = [topic]
     logger.info(f"[Article] Sections ({len(sections)}): {sections}")
@@ -782,7 +790,10 @@ async def generate_article(
             "Używaj pytań retorycznych, porównań, konkretnych przykładów liczbowych. "
             "Nie pisz monotonnie — każdy akapit innym tonem.\n"
             "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # na początku linii. "
-            "NIE używaj **tekst** ani *tekst*. TYLKO czysty HTML — tagi <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>."
+            "NIE używaj **tekst** ani *tekst*. TYLKO czysty HTML — tagi <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>.\n"
+            "BEZWZGLĘDNY ZAKAZ #2: NIE generuj instrukcji, zadań, kroków, planów ani list TODO. "
+            "NIE pisz 'Krok 1:', 'Zadanie:', 'Zidentyfikuj', 'Zbierz dane'. "
+            "Pisz GOTOWY artykuł dla czytelnika, NIE instrukcję jak go napisać."
         )
     else:
         section_system = (
@@ -805,7 +816,10 @@ async def generate_article(
             "Use rhetorical questions, comparisons, specific numeric examples. "
             "Don't write monotonously — vary tone across paragraphs.\n"
             "STRICT: NO markdown. Never use ## or ### or # at line start. "
-            "Never use **text** or *text*. ONLY pure HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>."
+            "Never use **text** or *text*. ONLY pure HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>.\n"
+            "STRICT #2: Do NOT generate instructions, tasks, steps, plans or TODO lists. "
+            "Do NOT write 'Step 1:', 'Task:', 'Identify', 'Collect data'. "
+            "Write FINISHED article content for readers, NOT instructions on how to write it."
         )
 
     # Semaphore: max 4 concurrent GPT calls for sections (avoid rate limit)
@@ -819,7 +833,7 @@ async def generate_article(
             if lang_pl:
                 section_user = (
                     f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
-                    f"H2: '{heading}'\n"
+                    f"Nagłówek sekcji: '{heading}'\n"
                     f"Intencja: {intent_analysis}\n"
                     f"Cel: ~{words_per_section} słów, użyj '{topic}' ~{kw_per_section}x{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
@@ -828,7 +842,7 @@ async def generate_article(
             else:
                 section_user = (
                     f"Write section for '{title}' (keyword: '{topic}').\n"
-                    f"H2: '{heading}'\n"
+                    f"Section heading: '{heading}'\n"
                     f"Intent: {intent_analysis}\n"
                     f"Target: ~{words_per_section} words, use '{topic}' ~{kw_per_section}x{lsi_section_block}{_entity_block}\n"
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
@@ -838,6 +852,19 @@ async def generate_article(
             if not sec_html.strip().startswith("<"):
                 sec_html = _markdown_to_html(sec_html)
             sec_html = _strip_markdown_remnants(sec_html)
+            # FIX: detect GPT prompt leakage — task/instruction instead of article
+            _leakage = re.search(
+                r'(?:Zadanie\s+dotycz|Krok\s+\d+:\s*(Zidentyfikuj|Zbierz|Przeanalizuj|Porównaj|Sformułuj|Przygotuj)'
+                r'|Step\s+\d+:\s*(Identify|Collect|Analyze|Compare|Prepare))',
+                sec_html,
+            )
+            if _leakage:
+                logger.warning(f"[Article] Prompt leakage detected in section '{heading[:40]}', retrying...")
+                _retry_suffix = "\nWAŻNE: Pisz TREŚĆ artykułu, NIE instrukcje ani zadania. NIE pisz 'Krok 1', 'Zadanie'. Pisz gotowy tekst dla czytelnika." if lang_pl else "\nIMPORTANT: Write article CONTENT, NOT instructions or tasks. Do NOT write 'Step 1', 'Task'. Write ready text for the reader."
+                sec_html = await _gpt(section_system, section_user + _retry_suffix, temperature=0.8, max_tokens=1100, model=_resolved_model)
+                if not sec_html.strip().startswith("<"):
+                    sec_html = _markdown_to_html(sec_html)
+                sec_html = _strip_markdown_remnants(sec_html)
             logger.info(f"[Article] Section {i+1}/{len(sections)}: {heading[:40]}")
             return sec_html
 
@@ -1051,6 +1078,29 @@ async def generate_article(
     if published_posts:
         content = _inject_internal_links(content, published_posts, topic, language=language)
 
+    # SEO #130: "Related articles" section at bottom — 5 published posts for interlinking
+    if published_posts:
+        # Pick up to 5 posts that are NOT the current topic
+        _related = [p for p in published_posts
+                    if (p.get("keyword", "") or p.get("title", "")).strip().lower() != topic.strip().lower()
+                    and p.get("url")]
+        random.shuffle(_related)
+        _related = _related[:5]
+        if _related:
+            _rel_heading = "Podobne artykuły" if lang_pl else "Related Articles"
+            _rel_items = []
+            for _rp in _related:
+                _rp_title = _rp.get("title") or _rp.get("keyword", "")
+                _rp_url = _rp["url"]
+                _rel_items.append(f'<li><a href="{_rp_url}">{_rp_title}</a></li>')
+            _rel_html = (
+                f'<div style="margin-top:2em;padding:1.2em 1.5em;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;">'
+                f'<h2 style="font-size:1.15em;margin:0 0 0.7em 0;">{_rel_heading}</h2>'
+                f'<ul style="margin:0;padding-left:1.2em;">{"".join(_rel_items)}</ul>'
+                f'</div>'
+            )
+            content += "\n\n" + _rel_html
+
     # Final strip of any remaining ## markdown before enrichment
     content = _strip_markdown_remnants(content)
 
@@ -1131,12 +1181,13 @@ async def generate_article(
     # SEO #62 + SEO #118: publisher should be PBN domain, not client domain (avoids footprint)
     # client_domain is the money site — publisher should be the PBN domain where article is hosted
     _publisher_name = "Publisher"
-    _pub_src = client_domain
+    _pub_src = pbn_domain or ""
     if _pub_src and _pub_src.strip():
         _publisher_name = _pub_src.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
 
     # SEO #120: author URL for E-E-A-T (Google premiuje artykuły z profilem autora)
     _author_slug = re.sub(r'[^a-z0-9]+', '-', _author["name"].lower()).strip('-')
+    _author_base = _pub_src.replace("https://", "").replace("http://", "").rstrip("/") if _pub_src else ""
 
     # SEO #101: extract first image from content for Article schema image field
     _first_img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE)
@@ -1153,7 +1204,7 @@ async def generate_article(
             "@type": "Person",
             "name": _author["name"],
             "description": _author["description"],
-            "url": f"/author/{_author_slug}",  # SEO #120: author page URL
+            "url": f"https://{_author_base}/author/{_author_slug}" if _author_base else f"/author/{_author_slug}",
         },
         "publisher": {
             "@type": "Organization",

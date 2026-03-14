@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import api from '../api/client'
 import { useToast } from '../components/Toast'
+import { sanitizeHtml } from '../sanitize'
 
 const STATUS_COLOR = {
   pending: 'bg-yellow-100 text-yellow-700',
@@ -636,6 +637,7 @@ export default function Autopilot() {
     min_coherence: 0,
     image_source: 'freepik_flux',
     custom_prompt: '',
+    tone_of_voice: 'ekspert',
   })
   const [addError, setAddError] = useState('')
   const [adding, setAdding] = useState(false)
@@ -652,6 +654,13 @@ export default function Autopilot() {
     setDomains(domRes.data.filter(d => d.active && d.wp_ok !== 0))
     setStats(stRes.data)
     setLoading(false)
+    // Auto-load site metrics for schedules with map
+    schRes.data.filter(s => s.map_generated).forEach(s => {
+      api.get(`/api/autopilot/schedules/${s.id}/site-metrics`).then(r => {
+        if (r.data.site_metrics && Object.keys(r.data.site_metrics).length)
+          setSiteMetrics(m => ({ ...m, [s.id]: r.data.site_metrics }))
+      }).catch(() => {})
+    })
   }
 
   useEffect(() => { load() }, [])
@@ -672,7 +681,7 @@ export default function Autopilot() {
         min_coherence: Number(newForm.min_coherence),
       })
       setShowAdd(false)
-      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, min_coherence: 0, image_source: 'freepik_flux', custom_prompt: '' })
+      setNewForm({ my_domain_id: '', seed_keyword: '', posts_per_day: 1, language: 'pl', min_volume: 10, min_coherence: 0, image_source: 'freepik_flux', custom_prompt: '', tone_of_voice: 'ekspert' })
       await load()
     } catch (e) {
       setAddError(e.response?.data?.detail || e.message)
@@ -692,6 +701,15 @@ export default function Autopilot() {
       setRunLog(l => ({ ...l, [id]: [{ status: 'failed', keyword: '—', error: 'Błąd mapy: ' + (e.response?.data?.detail || e.message) }] }))
     } finally {
       setGeneratingMap(g => ({ ...g, [id]: false }))
+    }
+  }
+
+  const fetchMetrics = async (id) => {
+    try {
+      const res = await api.get(`/api/autopilot/schedules/${id}/site-metrics`)
+      if (res.data.site_metrics) setSiteMetrics(m => ({ ...m, [id]: res.data.site_metrics }))
+    } catch {
+      // silent
     }
   }
 
@@ -913,6 +931,11 @@ export default function Autopilot() {
     await load()
   }
 
+  const updateTone = async (id, val) => {
+    await api.patch(`/api/autopilot/schedules/${id}`, { tone_of_voice: val })
+    await load()
+  }
+
   const set = (f, v) => setNewForm(n => ({ ...n, [f]: v }))
   const fmt = (s) => s ? new Date(s).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
 
@@ -1054,6 +1077,15 @@ export default function Autopilot() {
                 <option value="none">🚫 Bez zdjęcia</option>
               </select>
             </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Ton artykułu</label>
+              <select value={newForm.tone_of_voice} onChange={e => set('tone_of_voice', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="ekspert">Ekspercki</option>
+                <option value="przyjazny">Przyjazny</option>
+                <option value="formalny">Formalny</option>
+                <option value="poradnikowy">Poradnikowy</option>
+              </select>
+            </div>
             <div className="sm:col-span-2 lg:col-span-3">
               <label className="block text-xs font-medium text-gray-600 mb-1">Custom prompt (opcjonalnie)</label>
               <textarea value={newForm.custom_prompt} onChange={e => set('custom_prompt', e.target.value)}
@@ -1170,6 +1202,21 @@ export default function Autopilot() {
                   </select>
                 </div>
 
+                {/* Tone of voice */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <select
+                    defaultValue={sched.tone_of_voice || 'ekspert'}
+                    onChange={e => updateTone(sched.id, e.target.value)}
+                    className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    title="Ton artykułu"
+                  >
+                    <option value="ekspert">Ekspercki</option>
+                    <option value="przyjazny">Przyjazny</option>
+                    <option value="formalny">Formalny</option>
+                    <option value="poradnikowy">Poradnikowy</option>
+                  </select>
+                </div>
+
                 {/* Actions */}
                 <div className="flex items-center gap-2 shrink-0">
                   {!sched.map_generated ? (
@@ -1211,6 +1258,13 @@ export default function Autopilot() {
                           ↺ Retry failed
                         </button>
                       )}
+                      <button
+                        onClick={() => fetchMetrics(sched.id)}
+                        title="Sprawdź SiteFocus / SiteRadius"
+                        className="px-2 py-1.5 text-indigo-600 border border-indigo-200 rounded-lg text-xs hover:bg-indigo-50 disabled:opacity-50"
+                      >
+                        📊 Metryki
+                      </button>
                       <button
                         onClick={() => generateMap(sched.id)}
                         disabled={generatingMap[sched.id]}
@@ -1474,7 +1528,7 @@ export default function Autopilot() {
               )}
               <div
                 className="prose prose-sm max-w-none"
-                dangerouslySetInnerHTML={{ __html: previewModal.content }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(previewModal.content) }}
               />
             </div>
           </div>

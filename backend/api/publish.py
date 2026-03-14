@@ -380,6 +380,7 @@ async def publish_posts(body: PublishRequest):
                     dfs_login=DFS_LOGIN,
                     dfs_password=DFS_PASSWORD,
                     published_posts=_published_posts,
+                    pbn_domain=d.get("domain", ""),
                 )
                 title = article["title"]
                 content = article["content"]
@@ -507,6 +508,7 @@ async def _process_one_domain(
                         dfs_login=DFS_LOGIN,
                         dfs_password=DFS_PASSWORD,
                         published_posts=_published_posts,
+                        pbn_domain=d.get("domain", ""),
                     ),
                     timeout=_ARTICLE_TIMEOUT,
                 )

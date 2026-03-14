@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { projects as projectsApi, clients as clientsApi, publish as publishApi } from '../api/client'
 import { useToast } from '../components/Toast'
 import DomainSelector from '../components/DomainSelector'
+import { sanitizeHtml } from '../sanitize'
 
 const STEPS = ['Konfiguracja', 'Wybór domen', 'Generowanie', 'Publikacja']
 
@@ -612,7 +613,7 @@ export default function Publisher() {
             ) : (
               <div
                 className="prose prose-sm max-w-none text-gray-700 border border-gray-100 rounded-lg p-3 max-h-64 overflow-y-auto text-sm"
-                dangerouslySetInnerHTML={{ __html: editContent }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(editContent) }}
               />
             )}
           </div>

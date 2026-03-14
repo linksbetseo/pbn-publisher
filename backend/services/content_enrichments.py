@@ -116,9 +116,11 @@ def _build_toc(sections: list[str], lang_pl: bool) -> str:
     heading = "Spis treści" if lang_pl else "Table of Contents"
     items = ""
     for section in sections:
+        # FIX: strip any leftover "H2:" prefix from GPT outline
+        clean = re.sub(r'^H[2-4]:\s*', '', section).strip() or section
         # FIX #39: use slugify_heading for proper Polish char handling (ąćę → ace)
-        anchor = _slugify_heading(section)
-        items += f'<li><a href="#{anchor}" style="color:#1a73e8;text-decoration:none;">{section}</a></li>\n'
+        anchor = _slugify_heading(clean)
+        items += f'<li><a href="#{anchor}" style="color:#1a73e8;text-decoration:none;">{clean}</a></li>\n'
     # SEO #32: add role="navigation" and aria-label for accessibility
     return (
         f'<nav role="navigation" aria-label="{heading}" {_s("stats")}>\n'
@@ -130,10 +132,18 @@ def _build_toc(sections: list[str], lang_pl: bool) -> str:
 
 def _add_toc_anchors(content: str, sections: list[str]) -> str:
     for section in sections:
-        # FIX #40: use slugify_heading for consistent anchors matching TOC links
+        # FIX #40: use slugify_heading for proper Polish char handling (ąćę → ace)
         anchor = _slugify_heading(section)
         escaped = re.escape(section)
-        content = re.sub(rf'<h2>({escaped})</h2>', rf'<h2 id="{anchor}">\1</h2>', content)
+        # FIX: match <h2> with optional existing attributes (id=, class=, etc.)
+        # Replace/override the id attribute to ensure TOC links work
+        content = re.sub(
+            rf'<h2([^>]*)>({escaped})</h2>',
+            rf'<h2 id="{anchor}"\1>\2</h2>',
+            content,
+        )
+        # Clean up duplicate id attrs if _fix_heading_hierarchy already added one
+        content = re.sub(r'(<h2\s+id="[^"]*")\s+id="[^"]*"', r'\1', content)
     # Also add ids to all h3 that don't have one yet
     def _add_h3_id(m: re.Match) -> str:
         if 'id=' in m.group(0):

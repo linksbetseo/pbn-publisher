@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import api from '../api/client'
+import { sanitizeHtml } from '../sanitize'
 
 const TABS = ['Portale', 'Kolejka Review', 'Opublikowane', 'Statystyki']
 
@@ -866,7 +867,7 @@ function PreviewDraftModal({ draft, onClose, onApprove, onReject, onEdit }) {
 
           {/* Content */}
           <div className="prose prose-sm dark:prose-invert max-w-none"
-            dangerouslySetInnerHTML={{ __html: (draft.content || '<p class="text-gray-400">Brak treści</p>').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '') }} />
+            dangerouslySetInnerHTML={{ __html: sanitizeHtml(draft.content || '<p class="text-gray-400">Brak treści</p>') }} />
         </div>
 
         <div className="p-6 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between">

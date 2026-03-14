@@ -218,6 +218,15 @@ def strip_markdown_remnants(html: str) -> str:
     html = re.sub(r"<p>\s*###\s+(.+?)\s*</p>", r"<h3>\1</h3>", html, flags=re.DOTALL)
     html = re.sub(r"<p>\s*##\s+(.+?)\s*</p>", r"<h2>\1</h2>", html, flags=re.DOTALL)
     html = re.sub(r"<p>\s*#\s+(.+?)\s*</p>", r"<h2>\1</h2>", html, flags=re.DOTALL)
+    # FIX: GPT sometimes puts "H2: Title" or "H3: Title" inside heading tags — strip the prefix
+    html = re.sub(r'(<h[2-4][^>]*>)\s*H[2-4]:\s*', r'\1', html)
+    # FIX: GPT prompt leakage — remove task/instruction blocks that aren't article content
+    # Patterns: "📋 Zadanie...", "Krok 1: ...", "Step 1: ...", numbered instructions
+    html = re.sub(r'(?m)^[📋🔍✅📊🎯]*\s*Zadanie[^<\n]*$', '', html)
+    html = re.sub(r'(?m)^Krok\s+\d+:\s*[^<\n]*$', '', html)
+    html = re.sub(r'(?m)^Step\s+\d+:\s*[^<\n]*$', '', html)
+    html = re.sub(r'<p>\s*[📋🔍✅📊🎯]*\s*Zadanie[^<]*</p>', '', html)
+    html = re.sub(r'<li>\s*Krok\s+\d+:\s*', '<li>', html)
     html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
     html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
     html = re.sub(r"`([^`]+?)`", r"<code>\1</code>", html)

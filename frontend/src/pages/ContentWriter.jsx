@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import api from '../api/client'
 import { useToast } from '../components/Toast'
+import { sanitizeHtml } from '../sanitize'
 
 const TONES = [
   { value: 'ekspert', label: 'Ekspert (autorytatywny)' },
@@ -360,7 +361,7 @@ export default function ContentWriter() {
                 {previewMode ? (
                   <div
                     className="prose prose-sm max-w-none text-gray-800 max-h-[600px] overflow-y-auto"
-                    dangerouslySetInnerHTML={{ __html: result.content }}
+                    dangerouslySetInnerHTML={{ __html: sanitizeHtml(result.content) }}
                   />
                 ) : (
                   <textarea

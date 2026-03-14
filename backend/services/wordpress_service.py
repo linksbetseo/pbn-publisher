@@ -222,44 +222,49 @@ async def detect_toc_plugin(
 
     Checks for Easy TOC, LuckyWP TOC, Rank Math TOC, and TOC+ by querying
     the WP plugins list or checking for known REST endpoints / shortcodes.
+    FIX: uses _base_url() for HTTP/HTTPS fallback (was hardcoded https://).
     """
-    base_url = f"https://{domain}"
-    if base_url in _toc_plugin_cache:
-        return _toc_plugin_cache[base_url]
+    # FIX: use _base_url() for HTTP fallback (some PBN domains don't have SSL)
+    cache_key = domain.replace("https://", "").replace("http://", "").rstrip("/")
+    if cache_key in _toc_plugin_cache:
+        return _toc_plugin_cache[cache_key]
     auth = _auth_header(wp_login, wp_pass)
     site_auth = (http_user, http_pass) if http_user and http_pass else None
     has_toc = False
     try:
         async with httpx.AsyncClient(timeout=6, verify=False, auth=site_auth) as client:
             headers = {"Authorization": auth}
-            # Method 1: check installed plugins list
-            try:
-                r = await client.get(f"{base_url}/wp-json/wp/v2/plugins", headers=headers)
-                if r.status_code == 200:
-                    plugins = r.json()
-                    toc_slugs = ["ez-toc", "table-of-contents", "luckywp-table-of-contents",
-                                 "easy-table-of-contents", "toc-plus", "joli-table-of-contents",
-                                 "flavor-flavor-toc", "rich-table-of-contents"]
-                    for p in plugins:
-                        slug = p.get("textdomain", "") or p.get("plugin", "")
-                        if any(ts in slug.lower() for ts in toc_slugs):
-                            if p.get("status") == "active":
-                                has_toc = True
-                                break
-            except Exception:
-                pass
-            # Method 2: check if Rank Math TOC module is active (common)
-            if not has_toc:
+            for base_url in _base_url(domain):
+                # Method 1: check installed plugins list
                 try:
-                    r = await client.get(f"{base_url}/wp-json/rankmath/v1/", headers=headers)
-                    if r.status_code in (200, 301):
-                        # Rank Math has built-in TOC block — assume active if RM present
-                        has_toc = True
+                    r = await client.get(f"{base_url}/wp-json/wp/v2/plugins", headers=headers)
+                    if r.status_code == 200:
+                        plugins = r.json()
+                        toc_slugs = ["ez-toc", "table-of-contents", "luckywp-table-of-contents",
+                                     "easy-table-of-contents", "toc-plus", "joli-table-of-contents",
+                                     "flavor-flavor-toc", "rich-table-of-contents"]
+                        for p in plugins:
+                            slug = p.get("textdomain", "") or p.get("plugin", "")
+                            if any(ts in slug.lower() for ts in toc_slugs):
+                                if p.get("status") == "active":
+                                    has_toc = True
+                                    break
+                        if has_toc:
+                            break
                 except Exception:
                     pass
+                # Method 2: check if Rank Math TOC module is active (common)
+                if not has_toc:
+                    try:
+                        r = await client.get(f"{base_url}/wp-json/rankmath/v1/", headers=headers)
+                        if r.status_code in (200, 301):
+                            has_toc = True
+                            break
+                    except Exception:
+                        pass
     except Exception:
         pass
-    _cache_put(_toc_plugin_cache, base_url, has_toc)
+    _cache_put(_toc_plugin_cache, cache_key, has_toc)
     return has_toc
 
 
@@ -477,9 +482,10 @@ async def publish_post(
                     if tag_ids:
                         post_data["tags"] = tag_ids
                 # SEO #93: detect active SEO plugin to avoid fingerprint
+                # FIX: when plugin is "yoast" (default/fallback), only write Yoast meta — not both
                 _seo_plugin = await _detect_seo_plugin(base_url, auth, http_user, http_pass)
-                _is_yoast = _seo_plugin in ("yoast", "unknown")
-                _is_rankmath = _seo_plugin in ("rankmath", "unknown")
+                _is_yoast = _seo_plugin == "yoast"
+                _is_rankmath = _seo_plugin == "rankmath"
                 _is_aioseo = _seo_plugin == "aioseo"
 
                 # SEO meta — only write keys for the detected plugin

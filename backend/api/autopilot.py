@@ -25,7 +25,7 @@ from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from config import DB_PATH
-from services.topical_map_service import generate_topical_map
+from services.topical_map_service import generate_topical_map, _compute_site_metrics
 from services.dataforseo_service import DataForSEOClient
 from services.openai_service import generate_article
 from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
@@ -61,6 +61,7 @@ class ScheduleCreate(BaseModel):
     anchor_text: str = ""
     image_source: str = "freepik_flux"
     custom_prompt: str = ""
+    tone_of_voice: str = "ekspert"
 
 
 class ScheduleUpdate(BaseModel):
@@ -73,6 +74,7 @@ class ScheduleUpdate(BaseModel):
     min_volume: Optional[int] = None
     min_coherence: Optional[float] = None
     language: Optional[str] = None
+    tone_of_voice: Optional[str] = None
 
 
 class RunNowRequest(BaseModel):
@@ -84,6 +86,22 @@ class RunNowRequest(BaseModel):
 # Uses dict {schedule_id: timestamp} for auto-cleanup of stale entries (10min timeout)
 _map_generating: dict = {}
 _MAP_GEN_TIMEOUT = 600  # 10 minutes max
+
+# ── Tone of voice ────────────────────────────────────────────────────────────
+_TONE_MAP = {
+    "ekspert": "Pisz w tonie eksperckim, autorytatywnym.",
+    "przyjazny": "Pisz w tonie przyjaznym, doradczym.",
+    "formalny": "Pisz w tonie formalnym, biznesowym.",
+    "poradnikowy": "Pisz w tonie poradnikowym, krok po kroku.",
+}
+
+def _effective_prompt(sched: dict) -> str:
+    """Build custom_prompt with tone_of_voice prefix."""
+    base = (sched.get("custom_prompt") or "").strip()
+    tone = (sched.get("tone_of_voice") or "").strip()
+    if tone and tone in _TONE_MAP:
+        return f"{_TONE_MAP[tone]} {base}".strip()
+    return base
 
 # ── DB helpers ───────────────────────────────────────────────────────────────
 
@@ -168,6 +186,7 @@ async def ensure_tables():
             ("wp_category_id", "INTEGER DEFAULT NULL"),
             ("pillar_anchor", "TEXT DEFAULT ''"),
             ("title", "TEXT DEFAULT ''"),
+            ("coherence", "REAL DEFAULT 0.0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE domain_keywords ADD COLUMN {col} {typedef}")
@@ -178,6 +197,7 @@ async def ensure_tables():
             ("image_source", "TEXT DEFAULT 'freepik_flux'"),
             ("custom_prompt", "TEXT DEFAULT ''"),
             ("min_coherence", "REAL DEFAULT 0.0"),
+            ("tone_of_voice", "TEXT DEFAULT 'ekspert'"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE domain_schedules ADD COLUMN {col} {typedef}")
@@ -241,11 +261,11 @@ async def create_schedule(body: ScheduleCreate):
 
         cursor = await db.execute(
             """INSERT INTO domain_schedules
-               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, min_coherence, client_domain, anchor_text, image_source, custom_prompt)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, min_coherence, client_domain, anchor_text, image_source, custom_prompt, tone_of_voice)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (body.my_domain_id, body.seed_keyword, body.posts_per_day,
              body.language, body.min_volume, body.min_coherence, body.client_domain, body.anchor_text,
-             body.image_source, body.custom_prompt)
+             body.image_source, body.custom_prompt, body.tone_of_voice)
         )
         schedule_id = cursor.lastrowid
         await db.commit()
@@ -260,7 +280,7 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate):
         # FIX #64: consolidate into single UPDATE instead of N separate queries per field
         updates = {}
         for field in ("posts_per_day", "active", "client_domain", "anchor_text",
-                      "image_source", "custom_prompt", "min_volume", "min_coherence", "language"):
+                      "image_source", "custom_prompt", "min_volume", "min_coherence", "language", "tone_of_voice"):
             val = getattr(body, field, None)
             if val is not None:
                 updates[field] = val
@@ -409,10 +429,11 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
                     cannibal_flagged += 1
                 await db.execute(
                     """INSERT INTO domain_keywords
-                       (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, status)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                       (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, coherence, status)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (schedule_id, sched["my_domain_id"], pk, "pillar",
-                     label, anchor, pillar.get("pillar_volume", 0), pillar.get("pillar_difficulty", 0), init_status)
+                     label, anchor, pillar.get("pillar_volume", 0), pillar.get("pillar_difficulty", 0),
+                     pillar.get("focus_score", 0), init_status)
                 )
                 existing_kws.add(pk)
                 published_stems.setdefault(stem, pk)
@@ -428,10 +449,11 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
                         cannibal_flagged += 1
                     await db.execute(
                         """INSERT INTO domain_keywords
-                           (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, status)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                           (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, coherence, status)
+                           VALUES (?,?,?,?,?,?,?,?,?,?)""",
                         (schedule_id, sched["my_domain_id"], kw, "supporting",
-                         label, anchor, sk.get("search_volume", 0), sk.get("keyword_difficulty", 0), init_status)
+                         label, anchor, sk.get("search_volume", 0), sk.get("keyword_difficulty", 0),
+                         sk.get("coherence", 0), init_status)
                     )
                     existing_kws.add(kw)
                     published_stems.setdefault(stem, kw)
@@ -456,6 +478,59 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
         "cannibal_flagged": cannibal_flagged,
         "site_metrics": tmap.get("site_metrics", {}),
     }
+
+
+@router.get("/schedules/{schedule_id}/site-metrics")
+async def get_site_metrics(schedule_id: int):
+    """Oblicz SiteFocus / SiteRadius z istniejących keywords (bez regeneracji mapy)."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sched = await get_schedule(db, schedule_id)
+        if not sched:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Schedule not found")
+
+        # Fetch all keywords for this schedule
+        async with db.execute(
+            """SELECT keyword, keyword_type, pillar_label, search_volume, keyword_difficulty,
+                      coherence, status
+               FROM domain_keywords WHERE schedule_id = ?""",
+            (schedule_id,),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    if not rows:
+        return {"site_metrics": {}, "message": "Brak fraz — wygeneruj mapę najpierw"}
+
+    # Build pillar structure from DB keywords
+    pillars_map: dict[str, dict] = {}
+    for kw in rows:
+        label = kw.get("pillar_label") or "default"
+        if label not in pillars_map:
+            pillars_map[label] = {
+                "label": label,
+                "total_volume": 0,
+                "focus_score": 0.0,
+                "supporting_keywords": [],
+            }
+        vol = kw.get("search_volume") or 0
+        coh = kw.get("coherence") or 0.0
+        pillars_map[label]["total_volume"] += vol
+        if kw["keyword_type"] == "pillar":
+            pillars_map[label]["focus_score"] = coh
+        else:
+            pillars_map[label]["supporting_keywords"].append(kw)
+
+    # Compute focus_score as avg coherence if pillar didn't have it
+    for p in pillars_map.values():
+        if p["focus_score"] == 0 and p["supporting_keywords"]:
+            scores = [s.get("coherence") or 0 for s in p["supporting_keywords"]]
+            p["focus_score"] = sum(scores) / len(scores) if scores else 0
+
+    pillars = list(pillars_map.values())
+    metrics = _compute_site_metrics(pillars, sched["seed_keyword"], rows)
+    return {"site_metrics": metrics}
 
 
 @router.get("/schedules/{schedule_id}/categories")
@@ -838,7 +913,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                         anchor_text=sched["anchor_text"] or keyword,
                         language=sched["language"],
                         variation_hint=variation,
-                        custom_prompt=sched.get("custom_prompt", "") or "",
+                        custom_prompt=_effective_prompt(sched),
                         dfs_login=DFS_LOGIN,
                         dfs_password=DFS_PASSWORD,
                         location_code=location_code,
@@ -846,6 +921,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                         domain_fingerprints=domain_fingerprints,
                         pillar_page_url=_pillar_url,
                         pillar_page_anchor=_pillar_anchor,
+                        pbn_domain=sched["domain"],
                     ))
                     title = article["title"]
                     content = article["content"]
@@ -1043,12 +1119,13 @@ async def preview_keyword(keyword_id: int):
         anchor_text=sched["anchor_text"] or keyword,
         language=sched["language"],
         variation_hint=variation,
-        custom_prompt=sched.get("custom_prompt", "") or "",
+        custom_prompt=_effective_prompt(sched),
         dfs_login=DFS_LOGIN,
         dfs_password=DFS_PASSWORD,
         location_code=location_code,
         pillar_page_url=pillar_url,
         pillar_page_anchor=pillar_keyword or kw_row.get("pillar_label", ""),
+        pbn_domain=sched["domain"],
     )
 
     return {
@@ -1205,7 +1282,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                             anchor_text=sched["anchor_text"] or keyword,
                             language=sched["language"],
                             variation_hint=variation,
-                            custom_prompt=sched.get("custom_prompt", "") or "",
+                            custom_prompt=_effective_prompt(sched),
                             dfs_login=DFS_LOGIN,
                             dfs_password=DFS_PASSWORD,
                             location_code=location_code,
@@ -1213,6 +1290,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                             domain_fingerprints=domain_fingerprints,
                             pillar_page_url=_pillar_url,
                             pillar_page_anchor=_pillar_anchor,
+                            pbn_domain=sched["domain"],
                         ))
                         excerpt = article.get("excerpt", "")
                         lsi_tags = article.get("lsi_tags", [])
@@ -1658,14 +1736,19 @@ async def bulk_create_auto(body: BulkCreateAutoRequest):
             top_kws = sorted(site_keywords, key=lambda x: x["search_volume"], reverse=True)[:60]
             kw_list = "\n".join(f"- {k['keyword']} (vol: {k['search_volume']})" for k in top_kws)
             gpt_prompt = f"""Pick the single best seed keyword for building a topical map on this PBN domain.
-The seed should be a broad topic (2-3 words) that covers the most keywords this domain ranks for.
-It should allow generating 15-30 supporting articles for long tail traffic.
+
+RULES:
+- The seed must be a SPECIFIC niche topic (2-4 words), NOT a generic term
+- BAD examples: "sklep internetowy", "prawo pracy", "zdrowie" — too broad, no topical authority
+- GOOD examples: "buty do biegania", "prawo pracy zdalnej", "suplementy diety sportowców" — specific niche
+- The seed should match the ACTUAL content/niche of the domain, not be a generic category
+- It should allow generating 15-30 supporting articles with long tail keywords
 
 Domain: {domain_name}
 Keywords it ranks for:
 {kw_list}
 
-Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason"}}"""
+Return: {{"seed": "specific niche keyword in {body.language}", "reason": "short reason"}}"""
         else:
             # New domain — scrape page content to determine niche
             page_content = ""
@@ -1685,23 +1768,33 @@ Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason"}
                 # Trim to reasonable length for GPT
                 content_snippet = page_content[:4000]
                 gpt_prompt = f"""Analyze the content of this website and pick the best seed keyword for building a topical map.
-The seed should be a broad topic (2-3 words, in {body.language} language) matching the site's existing content and niche.
-It should allow generating 15-30 supporting articles for long tail organic traffic.
+
+RULES:
+- The seed must be a SPECIFIC niche topic (2-4 words, in {body.language}), NOT a generic term
+- BAD: "sklep internetowy", "zdrowie", "moda" — too broad
+- GOOD: "buty do biegania", "kosmetyki naturalne", "meble ogrodowe" — specific niche
+- Match the seed to the ACTUAL products/services/content on the page
+- It should allow generating 15-30 supporting articles with long tail keywords
 
 Domain: {domain_name}
 Page content:
 {content_snippet}
 
-Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason based on page content"}}"""
+Return: {{"seed": "specific niche keyword in {body.language}", "reason": "short reason based on page content"}}"""
             else:
                 # Last resort — analyze domain name
                 gpt_prompt = f"""Analyze this domain name and pick the best seed keyword for building a topical map.
-Look at the domain name, interpret what niche/topic it suggests, and pick a broad seed keyword (2-3 words, in {body.language} language).
-The seed should allow generating 15-30 supporting articles for long tail organic traffic.
+
+RULES:
+- Look at the domain name, interpret what niche/topic it suggests
+- The seed must be a SPECIFIC niche topic (2-4 words, in {body.language}), NOT a generic term
+- BAD: "sklep internetowy", "zdrowie" — too broad, useless for topical authority
+- GOOD: "zabawki edukacyjne dla dzieci", "naturalne kosmetyki do włosów" — specific niche
+- It should allow generating 15-30 supporting articles with long tail keywords
 
 Domain: {domain_name}
 
-Return: {{"seed": "keyword phrase in {body.language}", "reason": "short reason"}}"""
+Return: {{"seed": "specific niche keyword in {body.language}", "reason": "short reason"}}"""
 
         try:
             response = await _oai.chat.completions.create(
@@ -1931,12 +2024,13 @@ async def _bulk_run_bg(job_id: str, schedule_ids: list[int], limit_override: int
                         anchor_text=sched["anchor_text"] or keyword,
                         language=sched["language"],
                         variation_hint=variation,
-                        custom_prompt=sched.get("custom_prompt", "") or "",
+                        custom_prompt=_effective_prompt(sched),
                         dfs_login=DFS_LOGIN,
                         dfs_password=DFS_PASSWORD,
                         location_code=location_code,
                         published_posts=published_posts,
                         domain_fingerprints=domain_fingerprints,
+                        pbn_domain=sched["domain"],
                     )
                     img_prompt_bulk = (
                         f"A photorealistic scene that visually represents: {article['title']}. "
@@ -2331,15 +2425,17 @@ async def ai_seed_keywords(body: AISeedRequest):
     prompt = f"""Analyze these keywords that a website ranks for and suggest {body.count} best seed keywords for building PBN topical maps.
 
 Each seed keyword should:
-- Represent a broad topic cluster (not too specific, not too generic)
-- Have enough related subtopics for 15-30 supporting articles
-- Be commercially relevant (the site wants traffic in this niche)
+- Be a SPECIFIC niche topic (2-4 words), NOT a generic broad term
+- BAD: "sklep internetowy", "zdrowie", "prawo pracy" — too broad, no topical authority
+- GOOD: "buty do biegania", "prawo pracy zdalnej", "suplementy dla sportowców" — specific niche
+- Have enough related subtopics for 15-30 supporting long-tail articles
+- Match the actual niche/products the site operates in
 
 Keywords the site ranks for:
 {kw_list}
 
 Return ONLY a JSON array of objects, no markdown:
-[{{"seed": "keyword phrase", "reason": "short reason why this is a good seed", "estimated_articles": 20}}]"""
+[{{"seed": "specific niche keyword", "reason": "short reason why this is a good seed", "estimated_articles": 20}}]"""
 
     try:
         response = await openai_client.chat.completions.create(
