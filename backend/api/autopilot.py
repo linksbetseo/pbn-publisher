@@ -1556,6 +1556,188 @@ async def preview_keyword(keyword_id: int):
     }
 
 
+# ── Add keyword manually ──────────────────────────────────────────────────────
+
+class AddKeywordRequest(BaseModel):
+    keyword: str
+    keyword_type: str = "supporting"  # pillar | supporting
+    pillar_label: str = ""
+    search_volume: int = 0
+    keyword_difficulty: float = 0
+
+@router.post("/schedules/{schedule_id}/keywords")
+async def add_keyword_manually(schedule_id: int, req: AddKeywordRequest):
+    """Add a keyword manually to a schedule's queue."""
+    await ensure_tables()
+    keyword = req.keyword.strip()
+    if not keyword:
+        raise HTTPException(400, "Fraza nie może być pusta")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sched = await get_schedule(db, schedule_id)
+        if not sched:
+            raise HTTPException(404, "Harmonogram nie istnieje")
+
+        # Check for duplicate
+        async with db.execute(
+            "SELECT id FROM domain_keywords WHERE schedule_id=? AND LOWER(keyword)=LOWER(?)",
+            (schedule_id, keyword),
+        ) as cur:
+            if await cur.fetchone():
+                raise HTTPException(409, f"Fraza '{keyword}' już istnieje w kolejce")
+
+        # Determine pillar_anchor from pillar_label
+        pillar_anchor = ""
+        if req.keyword_type == "supporting" and req.pillar_label:
+            async with db.execute(
+                "SELECT pillar_anchor FROM domain_categories WHERE schedule_id=? AND pillar_label=?",
+                (schedule_id, req.pillar_label),
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    pillar_anchor = row["pillar_anchor"]
+
+        await db.execute(
+            """INSERT INTO domain_keywords
+               (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor,
+                search_volume, keyword_difficulty, status)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (schedule_id, sched["my_domain_id"], keyword, req.keyword_type,
+             req.pillar_label, pillar_anchor, req.search_volume, req.keyword_difficulty, "pending"),
+        )
+        kw_id = db.last_insert_rowid if hasattr(db, 'last_insert_rowid') else None
+        # Get actual id
+        async with db.execute("SELECT last_insert_rowid()") as cur:
+            row = await cur.fetchone()
+            kw_id = row[0]
+        await db.execute(
+            "UPDATE domain_schedules SET total_keywords = total_keywords + 1 WHERE id=?",
+            (schedule_id,),
+        )
+        await db.commit()
+
+    return {"id": kw_id, "keyword": keyword, "status": "pending"}
+
+
+# ── Generate & publish single keyword NOW ──────────────────────────────────────
+
+@router.post("/keywords/{keyword_id}/generate-now")
+async def generate_keyword_now(keyword_id: int):
+    """Generate article and publish to WP for a single keyword immediately."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM domain_keywords WHERE id=?", (keyword_id,)) as cur:
+            kw_row = await cur.fetchone()
+        if not kw_row:
+            raise HTTPException(404, "Keyword nie istnieje")
+        kw_row = dict(kw_row)
+        if kw_row["status"] == "published":
+            raise HTTPException(409, "Keyword już opublikowany")
+
+        sched = await get_schedule(db, kw_row["schedule_id"])
+    if not sched:
+        raise HTTPException(404, "Harmonogram nie istnieje")
+
+    keyword = kw_row["keyword"]
+    variation = random.choice(VARIATION_HINTS)
+    location_code = 2616 if sched["language"] == "pl" else 2840
+
+    # Internal linking to pillar
+    pillar_url, pillar_keyword = "", ""
+    if kw_row.get("keyword_type") == "supporting" and kw_row.get("pillar_anchor"):
+        pillar_url, pillar_keyword = await _get_pillar_url(
+            kw_row["schedule_id"], sched["my_domain_id"], kw_row["pillar_anchor"]
+        )
+
+    # Generate article
+    article = await generate_article(
+        topic=keyword,
+        client_domain=sched["client_domain"] or "",
+        anchor_text=sched["anchor_text"] or keyword,
+        language=sched["language"],
+        variation_hint=variation,
+        custom_prompt=_effective_prompt(sched),
+        dfs_login=DFS_LOGIN,
+        dfs_password=DFS_PASSWORD,
+        location_code=location_code,
+        pillar_page_url=pillar_url,
+        pillar_page_anchor=pillar_keyword or kw_row.get("pillar_label", ""),
+        pbn_domain=sched["domain"],
+    )
+
+    title = article["title"]
+    content = article["content"]
+    excerpt = article.get("excerpt", "")
+    lsi_tags = article.get("lsi_tags", [])
+
+    # WP category
+    category_id = kw_row.get("wp_category_id")
+    if not category_id and kw_row.get("pillar_label"):
+        try:
+            category_id = await get_or_create_category(
+                domain=sched["domain"], wp_login=sched["wp_login"], wp_pass=sched["wp_pass"],
+                category_name=kw_row["pillar_label"],
+                http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""),
+            )
+        except Exception:
+            pass
+
+    # Featured image
+    img_prompt = (
+        f"A photorealistic scene that visually represents: {title}. "
+        f"Show a concrete moment or setting related to '{keyword}'. "
+        f"Editorial photography style, natural lighting, shallow depth of field. "
+        f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
+    )
+    image_b64, image_provider = await _fetch_image(
+        sched.get("image_source", "freepik_flux"), keyword, title, img_prompt
+    )
+
+    # Publish to WP
+    result = await publish_post(
+        domain=sched["domain"],
+        wp_login=sched["wp_login"],
+        wp_pass=sched["wp_pass"],
+        title=title,
+        content=content,
+        image_b64=image_b64,
+        category_id=category_id,
+        excerpt=excerpt,
+        keyword=keyword,
+        tags=lsi_tags,
+        http_user=sched.get("http_user", ""),
+        http_pass=sched.get("http_pass", ""),
+    )
+
+    if result.get("success"):
+        wp_url = result.get("url", "")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
+                   wp_post_url, status, keyword) VALUES (?,?,?,?,?,?,?,?)""",
+                (None, sched["client_domain"] or sched["domain"],
+                 sched["my_domain_id"], title, content, wp_url, "published", keyword),
+            )
+            await db.execute(
+                """UPDATE domain_keywords SET status='published', title=?, wp_post_url=?, published_at=?
+                   WHERE id=?""",
+                (title, wp_url, datetime.now(timezone.utc).isoformat(), keyword_id),
+            )
+            await db.execute(
+                "UPDATE domain_schedules SET published_count = published_count + 1 WHERE id=?",
+                (kw_row["schedule_id"],),
+            )
+            await db.commit()
+        return {"status": "published", "keyword": keyword, "title": title, "url": wp_url, "image": image_provider}
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (keyword_id,))
+            await db.commit()
+        raise HTTPException(500, f"Publikacja nie powiodła się: {result.get('error', 'unknown')}")
+
+
 @router.post("/schedules/{schedule_id}/run-all")
 async def run_all_keywords(schedule_id: int, background_tasks: BackgroundTasks):
     """

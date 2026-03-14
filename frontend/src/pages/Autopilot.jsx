@@ -693,6 +693,9 @@ export default function Autopilot() {
   const [toneGenerating, setToneGenerating] = useState({})
   const [toneModal, setToneModal] = useState(null) // { scheduleId, tone, isGenerated } | null
   const [toneEditing, setToneEditing] = useState('')
+  const [addKwForm, setAddKwForm] = useState({})  // { [scheduleId]: { keyword, keyword_type, pillar_label } }
+  const [addingKw, setAddingKw] = useState({})
+  const [generatingKw, setGeneratingKw] = useState({})  // { [keywordId]: true }
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -799,6 +802,42 @@ export default function Autopilot() {
     const res = await api.get(`/api/autopilot/schedules/${id}/keywords`, { params })
     setKeywords(k => ({ ...k, [id]: res.data }))
     setKwFilter(f => ({ ...f, [id]: status }))
+  }
+
+  const addKeyword = async (scheduleId) => {
+    const form = addKwForm[scheduleId] || {}
+    const keyword = (form.keyword || '').trim()
+    if (!keyword) return
+    setAddingKw(a => ({ ...a, [scheduleId]: true }))
+    try {
+      await api.post(`/api/autopilot/schedules/${scheduleId}/keywords`, {
+        keyword,
+        keyword_type: form.keyword_type || 'supporting',
+        pillar_label: form.pillar_label || '',
+      })
+      setAddKwForm(f => ({ ...f, [scheduleId]: { keyword: '', keyword_type: 'supporting', pillar_label: '' } }))
+      await loadKeywords(scheduleId)
+      await load()
+    } catch (e) {
+      alert(e.response?.data?.detail || e.message)
+    } finally {
+      setAddingKw(a => ({ ...a, [scheduleId]: false }))
+    }
+  }
+
+  const generateKeywordNow = async (kwId, scheduleId) => {
+    if (!confirm('Wygenerować i opublikować artykuł dla tej frazy teraz?')) return
+    setGeneratingKw(g => ({ ...g, [kwId]: true }))
+    try {
+      const res = await api.post(`/api/autopilot/keywords/${kwId}/generate-now`, {}, { timeout: 300000 })
+      setRunLog(l => ({ ...l, [scheduleId]: [{ status: 'published', keyword: res.data.keyword, error: `Opublikowano: ${res.data.title}` }] }))
+      await loadKeywords(scheduleId)
+      await load()
+    } catch (e) {
+      setRunLog(l => ({ ...l, [scheduleId]: [{ status: 'failed', keyword: '—', error: e.response?.data?.detail || e.message }] }))
+    } finally {
+      setGeneratingKw(g => ({ ...g, [kwId]: false }))
+    }
   }
 
   const toggleExpand = async (id) => {
@@ -1528,6 +1567,45 @@ export default function Autopilot() {
                       )
                     })}
                   </div>
+                  {/* Add keyword form */}
+                  <div className="flex items-center gap-2 mb-3">
+                    <input
+                      type="text"
+                      value={addKwForm[sched.id]?.keyword || ''}
+                      onChange={e => setAddKwForm(f => ({ ...f, [sched.id]: { ...f[sched.id], keyword: e.target.value } }))}
+                      onKeyDown={e => e.key === 'Enter' && addKeyword(sched.id)}
+                      placeholder="Dodaj frazę ręcznie..."
+                      className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                    <select
+                      value={addKwForm[sched.id]?.keyword_type || 'supporting'}
+                      onChange={e => setAddKwForm(f => ({ ...f, [sched.id]: { ...f[sched.id], keyword_type: e.target.value } }))}
+                      className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs"
+                    >
+                      <option value="supporting">Supporting</option>
+                      <option value="pillar">Pillar</option>
+                    </select>
+                    {addKwForm[sched.id]?.keyword_type !== 'pillar' && (keywords[sched.id] || []).some(k => k.keyword_type === 'pillar') && (
+                      <select
+                        value={addKwForm[sched.id]?.pillar_label || ''}
+                        onChange={e => setAddKwForm(f => ({ ...f, [sched.id]: { ...f[sched.id], pillar_label: e.target.value } }))}
+                        className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs max-w-[150px]"
+                      >
+                        <option value="">Klaster...</option>
+                        {[...new Set((keywords[sched.id] || []).filter(k => k.keyword_type === 'pillar').map(k => k.pillar_label))].map(label => (
+                          <option key={label} value={label}>{label}</option>
+                        ))}
+                      </select>
+                    )}
+                    <button
+                      onClick={() => addKeyword(sched.id)}
+                      disabled={addingKw[sched.id] || !(addKwForm[sched.id]?.keyword || '').trim()}
+                      className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700 disabled:opacity-50"
+                    >
+                      {addingKw[sched.id] ? '...' : '+ Dodaj'}
+                    </button>
+                  </div>
+
                   {!keywords[sched.id] ? (
                     <p className="text-sm text-gray-400">Ładowanie...</p>
                   ) : keywords[sched.id].length === 0 ? (
@@ -1574,18 +1652,32 @@ export default function Autopilot() {
                                 ) : '—'}
                               </td>
                               <td className="py-1.5 flex gap-1">
-                                {kw.status === 'pending' && (
-                                  <button
-                                    onClick={() => previewKeyword(kw.id)}
-                                    disabled={previewLoading[kw.id]}
-                                    className="text-xs px-2 py-0.5 bg-blue-50 text-blue-600 rounded hover:bg-blue-100 disabled:opacity-50"
-                                  >{previewLoading[kw.id] ? '...' : 'Podgląd'}</button>
+                                {(kw.status === 'pending' || kw.status === 'cannibal_risk') && (
+                                  <>
+                                    <button
+                                      onClick={() => previewKeyword(kw.id)}
+                                      disabled={previewLoading[kw.id]}
+                                      className="text-xs px-2 py-0.5 bg-blue-50 text-blue-600 rounded hover:bg-blue-100 disabled:opacity-50"
+                                    >{previewLoading[kw.id] ? '...' : 'Podgląd'}</button>
+                                    <button
+                                      onClick={() => generateKeywordNow(kw.id, sched.id)}
+                                      disabled={generatingKw[kw.id]}
+                                      className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded hover:bg-green-100 disabled:opacity-50"
+                                    >{generatingKw[kw.id] ? (<><span className="animate-spin inline-block w-2.5 h-2.5 border border-green-600 border-t-transparent rounded-full" /> Gen...</>) : 'Generuj'}</button>
+                                  </>
                                 )}
                                 {kw.status === 'failed' && (
-                                  <button
-                                    onClick={() => retryKeyword(kw.id, sched.id)}
-                                    className="text-xs px-2 py-0.5 bg-orange-100 text-orange-700 rounded hover:bg-orange-200"
-                                  >↺ retry</button>
+                                  <>
+                                    <button
+                                      onClick={() => retryKeyword(kw.id, sched.id)}
+                                      className="text-xs px-2 py-0.5 bg-orange-100 text-orange-700 rounded hover:bg-orange-200"
+                                    >↺ retry</button>
+                                    <button
+                                      onClick={() => generateKeywordNow(kw.id, sched.id)}
+                                      disabled={generatingKw[kw.id]}
+                                      className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded hover:bg-green-100 disabled:opacity-50"
+                                    >{generatingKw[kw.id] ? '...' : 'Generuj'}</button>
+                                  </>
                                 )}
                               </td>
                             </tr>
