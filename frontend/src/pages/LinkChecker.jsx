@@ -243,20 +243,43 @@ export default function LinkChecker() {
                 <span className="text-red-500 font-medium">{results.without_links} bez linkow</span>
               </p>
             </div>
-            <div className="flex gap-1">
-              {['all', 'with_links', 'without_links'].map(mode => (
-                <button
-                  key={mode}
-                  onClick={() => setFilterMode(mode)}
-                  className={`px-3 py-1.5 text-xs rounded-lg font-medium transition-colors ${
-                    filterMode === mode
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
-                  }`}
-                >
-                  {mode === 'all' ? 'Wszystkie' : mode === 'with_links' ? 'Z linkami' : 'Bez linkow'}
-                </button>
-              ))}
+            <div className="flex gap-2 items-center">
+              <div className="flex gap-1">
+                {['all', 'with_links', 'without_links'].map(mode => (
+                  <button
+                    key={mode}
+                    onClick={() => setFilterMode(mode)}
+                    className={`px-3 py-1.5 text-xs rounded-lg font-medium transition-colors ${
+                      filterMode === mode
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                    }`}
+                  >
+                    {mode === 'all' ? 'Wszystkie' : mode === 'with_links' ? 'Z linkami' : 'Bez linkow'}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await api.get(`/api/link-checker/export/${results.scan_id}`, { responseType: 'blob' })
+                    const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }))
+                    const a = document.createElement('a')
+                    a.href = url
+                    const cd = res.headers['content-disposition'] || ''
+                    const match = cd.match(/filename="?([^"]+)"?/)
+                    a.download = match ? match[1] : `link_check_${results.scan_id}.csv`
+                    a.click()
+                    URL.revokeObjectURL(url)
+                  } catch { alert('Blad eksportu') }
+                }}
+                className="px-3 py-1.5 text-xs rounded-lg font-medium bg-green-600 text-white hover:bg-green-700 transition-colors flex items-center gap-1"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Export CSV
+              </button>
             </div>
           </div>
 

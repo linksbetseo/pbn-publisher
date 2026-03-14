@@ -5,9 +5,13 @@ import re
 from typing import Optional, List
 from datetime import datetime, timezone
 
+import csv
+import io
+
 import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import DB_PATH
@@ -494,6 +498,55 @@ async def list_scans(limit: int = Query(20)):
         r['status'] = p['status'] if p else 'done'
 
     return rows
+
+
+@router.get("/export/{scan_id}")
+async def export_csv(scan_id: str):
+    """Export scan results as CSV."""
+    await _ensure()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT domain, target_domain, page_url, link_found,
+                      link_location, link_url, anchor_text, article_excerpt, checked_at
+               FROM link_checks
+               WHERE scan_id = ?
+               ORDER BY domain, link_found DESC""",
+            (scan_id,)
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    if not rows:
+        raise HTTPException(404, "No results for this scan")
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        'Domena PBN', 'Domena docelowa', 'URL strony', 'Link znaleziony',
+        'Lokalizacja', 'URL linka', 'Anchor text', 'Fragment artykulu', 'Data sprawdzenia',
+    ])
+    for r in rows:
+        writer.writerow([
+            r['domain'],
+            r['target_domain'],
+            r['page_url'],
+            'Tak' if r['link_found'] else 'Nie',
+            r['link_location'] or '',
+            r['link_url'] or '',
+            r['anchor_text'] or '',
+            (r['article_excerpt'] or '').replace('\n', ' ')[:1000],
+            r['checked_at'] or '',
+        ])
+
+    target = rows[0]['target_domain'] if rows else 'export'
+    filename = f"link_check_{target}_{scan_id.split('_')[-1]}.csv"
+
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.delete("/scan/{scan_id}")
