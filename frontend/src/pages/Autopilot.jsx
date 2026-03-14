@@ -887,7 +887,13 @@ export default function Autopilot() {
     }
   }
 
-  const pending_count = (id) => keywords[id]?.filter(k => k.status === 'pending' || k.status === 'cannibal_risk').length ?? '?'
+  const pending_count = (id) => {
+    // Use backend counts from schedule data (always available, no need to expand keywords)
+    const sched = schedules.find(s => s.id === id)
+    if (sched && sched.pending_count != null) return sched.pending_count + (sched.cannibal_count || 0)
+    // Fallback: count from loaded keywords if available
+    return keywords[id]?.filter(k => k.status === 'pending' || k.status === 'cannibal_risk').length ?? '?'
+  }
 
   const runNow = async (sched, limitOverride = null) => {
     const id = sched.id
@@ -912,7 +918,12 @@ export default function Autopilot() {
 
   const runAll = async (sched) => {
     const id = sched.id
-    const total = pending_count(id)
+    let total = pending_count(id)
+    if (total === '?') {
+      // Keywords not loaded yet — load them first
+      await loadKeywords(id)
+      total = pending_count(id)
+    }
     if (total === '?' || total === 0) { addToast('Brak pending keywords do opublikowania.', 'warning'); return }
     const estMinutes = Math.ceil(total * 3)
     if (!confirm(

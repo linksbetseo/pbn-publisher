@@ -489,12 +489,16 @@ async def get_schedule(db, schedule_id: int) -> Optional[dict]:
 
 @router.get("/schedules")
 async def list_schedules():
-    """Lista wszystkich harmonogramów z domenami."""
+    """Lista wszystkich harmonogramów z domenami + pending/published counts."""
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT s.*, md.domain, md.active as domain_active, md.wp_ok
+            """SELECT s.*, md.domain, md.active as domain_active, md.wp_ok,
+                      (SELECT COUNT(*) FROM domain_keywords dk WHERE dk.schedule_id = s.id AND dk.status = 'pending') as pending_count,
+                      (SELECT COUNT(*) FROM domain_keywords dk WHERE dk.schedule_id = s.id AND dk.status = 'published') as published_count,
+                      (SELECT COUNT(*) FROM domain_keywords dk WHERE dk.schedule_id = s.id AND dk.status = 'failed') as failed_count,
+                      (SELECT COUNT(*) FROM domain_keywords dk WHERE dk.schedule_id = s.id AND dk.status = 'cannibal_risk') as cannibal_count
                FROM domain_schedules s
                JOIN my_domains md ON md.id = s.my_domain_id
                ORDER BY s.created_at DESC"""
