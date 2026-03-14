@@ -760,7 +760,7 @@ export default function Autopilot() {
   const generateMap = async (id) => {
     setGeneratingMap(g => ({ ...g, [id]: true }))
     try {
-      const res = await api.post(`/api/autopilot/schedules/${id}/generate-map`)
+      const res = await api.post(`/api/autopilot/schedules/${id}/generate-map?force_refresh=true`)
       if (res.data.site_metrics) setSiteMetrics(m => ({ ...m, [id]: res.data.site_metrics }))
       setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Mapa gotowa: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz` }] }))
       await load()
