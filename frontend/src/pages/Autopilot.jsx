@@ -760,7 +760,7 @@ export default function Autopilot() {
   const generateMap = async (id) => {
     setGeneratingMap(g => ({ ...g, [id]: true }))
     try {
-      const res = await api.post(`/api/autopilot/schedules/${id}/generate-map?force_refresh=true`)
+      const res = await api.post(`/api/autopilot/schedules/${id}/generate-map?force_refresh=true`, {}, { timeout: 300000 })
       if (res.data.site_metrics) setSiteMetrics(m => ({ ...m, [id]: res.data.site_metrics }))
       setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Mapa gotowa: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz` }] }))
       await load()
@@ -1385,10 +1385,10 @@ export default function Autopilot() {
                       <button
                         onClick={() => generateMap(sched.id)}
                         disabled={generatingMap[sched.id]}
-                        title="Odśwież mapę tematyczną"
-                        className="px-2 py-1.5 text-gray-500 border border-gray-300 rounded-lg text-xs hover:bg-gray-50 disabled:opacity-50"
+                        title="Odśwież mapę tematyczną (force refresh)"
+                        className="px-2 py-1.5 text-gray-500 border border-gray-300 rounded-lg text-xs hover:bg-gray-50 disabled:opacity-50 flex items-center gap-1"
                       >
-                        {generatingMap[sched.id] ? '...' : '↻ Mapa'}
+                        {generatingMap[sched.id] ? (<><span className="animate-spin inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full" />Generuję...</>) : '↻ Mapa'}
                       </button>
                       <button
                         onClick={() => syncCategories(sched)}

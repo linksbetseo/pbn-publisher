@@ -530,9 +530,11 @@ async def _gpt_relevance_filter(
     """
     from openai import AsyncOpenAI as _AO
     from services.openai_service import get_gpt_model
+    from config import OPENAI_API_KEY
 
-    client = _AO()
+    client = _AO(api_key=OPENAI_API_KEY)
     model = await get_gpt_model()
+    logger.info(f"[TopicalMap] GPT relevance filter starting: {len(keywords)} keywords, model={model}, seed='{seed}'")
 
     is_pl = language_code == "pl"
 
@@ -544,33 +546,44 @@ async def _gpt_relevance_filter(
     else:
         context_block = ""
 
+    from datetime import datetime
+    current_year = datetime.now().year
+
     system_prompt = (
         "Jesteś ekspertem SEO. Oceniasz trafność fraz kluczowych dla topical map.\n\n"
         f"TEMAT (SEED): {seed}\n"
-        f"{context_block}\n\n"
+        f"{context_block}\n"
+        f"ROK: {current_year}\n\n"
         "Fraza jest TRAFNA (1) jeśli:\n"
         "- Dotyczy DOKŁADNIE tego tematu co seed\n"
         "- Osoba szukająca tego seeda mogłaby naturalnie szukać też tej frazy\n"
-        "- Jest przydatna dla bloga/strony o tym temacie\n\n"
+        "- Jest przydatna dla bloga/strony o tym temacie\n"
+        f"- Jeśli zawiera rok — tylko {current_year} lub {current_year+1} są aktualne\n\n"
         "Fraza jest NIETRAFNA (0) jeśli:\n"
         "- Dotyczy zupełnie innego tematu (np. seed='muzyka country' a fraza='piramidy finansowe')\n"
         "- Zawiera słowa z seeda ale w innym kontekście (np. seed='kamień naturalny' a fraza='parafia kamień')\n"
         "- Jest o nazwie miejsca, grze, filmie, medycynie, sporcie — niezwiązanej z tematem seeda\n"
-        "- Tylko przypadkowo zawiera te same słowa co seed\n\n"
+        "- Tylko przypadkowo zawiera te same słowa co seed\n"
+        f"- Zawiera przestarzały rok (2018, 2019, 2020, 2021, 2022, 2023, 2024) — odrzuć\n"
+        "- Jest hasłem krzyżówkowym, pytaniem quizowym, lub encyklopedycznym niezwiązanym z tematem\n\n"
         "Odpowiedz TYLKO tablicą JSON z 1 i 0, np: [1,1,0,1,0]\n"
         "Bez wyjaśnień, bez dodatkowego tekstu."
     ) if is_pl else (
         "You are an SEO expert evaluating keyword relevance for a topical map.\n\n"
         f"TOPIC (SEED): {seed}\n"
-        f"{context_block}\n\n"
+        f"{context_block}\n"
+        f"YEAR: {current_year}\n\n"
         "A keyword is RELEVANT (1) if:\n"
         "- It's directly about the seed topic\n"
         "- Someone interested in the seed would also search for it\n"
-        "- It's useful for a blog/site about this topic\n\n"
+        "- It's useful for a blog/site about this topic\n"
+        f"- If it contains a year, only {current_year} or {current_year+1} are current\n\n"
         "A keyword is IRRELEVANT (0) if:\n"
         "- It's about a completely different topic\n"
         "- It contains seed words but in a different context (e.g., place names, games, movies)\n"
-        "- It only accidentally shares words with the seed\n\n"
+        "- It only accidentally shares words with the seed\n"
+        "- It contains an outdated year (2018-2024) — reject\n"
+        "- It's a crossword clue, quiz question, or unrelated encyclopedic query\n\n"
         "Respond ONLY with a JSON array of 1s and 0s, e.g: [1,1,0,1,0]\n"
         "No explanations, no extra text."
     )

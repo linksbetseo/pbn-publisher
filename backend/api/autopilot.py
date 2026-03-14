@@ -718,7 +718,15 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
     inserted = 0
     cannibal_flagged = 0
     async with aiosqlite.connect(DB_PATH) as db:
-        # Pobierz istniejące frazy żeby nie duplikować
+        # Delete old pending/cannibal_risk keywords — keep only published/generated ones
+        await db.execute(
+            "DELETE FROM domain_keywords WHERE schedule_id=? AND status IN ('pending','cannibal_risk')",
+            (schedule_id,),
+        )
+        await db.commit()
+        logger.info(f"[Autopilot] Cleared old pending/cannibal_risk keywords for schedule {schedule_id}")
+
+        # Pobierz istniejące frazy żeby nie duplikować (only published/generated remain)
         async with db.execute(
             "SELECT keyword FROM domain_keywords WHERE schedule_id = ?", (schedule_id,)
         ) as cur:
