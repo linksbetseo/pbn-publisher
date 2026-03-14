@@ -657,12 +657,14 @@ export default function Autopilot() {
     setDomains(domRes.data.filter(d => d.active && d.wp_ok !== 0))
     setStats(stRes.data)
     setLoading(false)
-    // Auto-load site metrics for schedules with map
+    // Auto-load site metrics for schedules with map (recalculate coherence first)
     schRes.data.filter(s => s.map_generated).forEach(s => {
-      api.get(`/api/autopilot/schedules/${s.id}/site-metrics`).then(r => {
-        if (r.data.site_metrics && Object.keys(r.data.site_metrics).length)
-          setSiteMetrics(m => ({ ...m, [s.id]: r.data.site_metrics }))
-      }).catch(() => {})
+      api.post(`/api/autopilot/schedules/${s.id}/recalculate-coherence`).catch(() => {}).then(() =>
+        api.get(`/api/autopilot/schedules/${s.id}/site-metrics`).then(r => {
+          if (r.data.site_metrics && Object.keys(r.data.site_metrics).length)
+            setSiteMetrics(m => ({ ...m, [s.id]: r.data.site_metrics }))
+        }).catch(() => {})
+      )
     })
   }
 
