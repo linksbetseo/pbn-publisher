@@ -42,6 +42,7 @@ class MapGenerateRequest(BaseModel):
     seed_keyword: str
     language: str = "pl"
     min_volume: int = 10
+    min_coherence: float = 0.15
 
 
 class ArticleGenerateRequest(BaseModel):
@@ -148,6 +149,61 @@ async def _gpt_call(system: str, user: str, temperature: float = 0.5,
     return ""
 
 
+# ── Auto site description ──────────────────────────────────────────────────
+
+async def _auto_generate_site_description(domain_url: str, language: str = "pl") -> str:
+    """
+    Fetch homepage content via DataForSEO and generate a 2-3 sentence
+    business description with GPT. Used as context for topical map filtering.
+    """
+    if not DFS_LOGIN or not DFS_PASSWORD:
+        return ""
+
+    content_text = ""
+    try:
+        creds = _b64.b64encode(f"{DFS_LOGIN}:{DFS_PASSWORD}".encode()).decode()
+        headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30) as c:
+            resp = await c.post(
+                "https://api.dataforseo.com/v3/on_page/content_parsing/live",
+                json=[{"url": f"https://{domain_url}/", "enable_javascript": False}],
+                headers=headers,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            for task in data.get("tasks", []):
+                for result in task.get("result", []) or []:
+                    for item in result.get("items", []) or []:
+                        pc = item.get("page_content", {})
+                        for topic in pc.get("main_topic", []) or []:
+                            h_title = topic.get("h_title", "")
+                            texts = [t.get("text", "") for t in topic.get("primary_content", []) or []]
+                            content_text += f"{h_title}: " + " ".join(texts) + "\n"
+    except Exception as e:
+        logger.warning(f"[ClientContent] Content parsing for description failed: {e}")
+
+    if not content_text:
+        content_text = f"Domena: {domain_url}"
+
+    is_pl = language == "pl"
+    system = (
+        "Na podstawie treści ze strony internetowej opisz w 2-3 zdaniach czym zajmuje się ta firma/strona. "
+        "Co sprzedaje lub jakie usługi oferuje? Kto jest grupą docelową? "
+        "Pisz konkretnie, bez ogólników. Odpowiedz TYLKO opisem, bez nagłówków."
+    ) if is_pl else (
+        "Based on the website content, describe in 2-3 sentences what this business does. "
+        "What products/services does it offer? Who is the target audience? "
+        "Be specific, no filler. Respond ONLY with the description."
+    )
+
+    try:
+        desc = await _gpt_call(system, f"URL: {domain_url}\nContent:\n{content_text[:3000]}", temperature=0.3, max_tokens=300)
+        return desc.strip()
+    except Exception as e:
+        logger.warning(f"[ClientContent] GPT site description failed: {e}")
+        return ""
+
+
 # ── Domain info ─────────────────────────────────────────────────────────────
 
 @router.get("/domains/{domain_id}")
@@ -197,7 +253,11 @@ async def update_domain(domain_id: int, body: dict):
 
 @router.post("/domains/{domain_id}/generate-map")
 async def generate_map(domain_id: int, body: MapGenerateRequest):
-    """Generate topical map for client domain."""
+    """Generate topical map for client domain.
+
+    Supports comma-separated seed keywords — runs DFS for each seed
+    and merges results (deduplicates by keyword).
+    """
     await ensure_tables()
     if not DFS_LOGIN or not DFS_PASSWORD:
         raise HTTPException(400, "Brak konfiguracji DataForSEO")
@@ -207,31 +267,105 @@ async def generate_map(domain_id: int, body: MapGenerateRequest):
     if not dom:
         raise HTTPException(404, "Domain not found")
 
+    domain_url = dom["domain"]
+    site_desc = (dom.get("site_description") or "").strip()
+    force_refresh = False
+
+    # Auto-generate site_description if empty — fetches homepage + GPT summary
+    if not site_desc:
+        site_desc = await _auto_generate_site_description(domain_url, body.language)
+        if site_desc:
+            force_refresh = True  # new context = bust old cache
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE client_domains SET site_description=? WHERE id=?",
+                    (site_desc, domain_id),
+                )
+                await db.commit()
+            logger.info(f"[ClientContent] Auto-generated site_description for {domain_url}: {len(site_desc)} chars")
+
+    # Note: cache key now includes domain_url + site_description hash,
+    # so old cached maps (without GPT filter) won't match anyway
+
+    # Support comma-separated seeds
+    seeds = [s.strip() for s in body.seed_keyword.split(",") if s.strip()]
+    if not seeds:
+        raise HTTPException(400, "Brak seed keywords")
+
     location_code = 2616 if body.language == "pl" else 2840
-    result = await generate_topical_map(
-        body.seed_keyword,
-        location_code=location_code,
-        language_code=body.language,
-        min_volume=body.min_volume,
-        dfs_login=DFS_LOGIN,
-        dfs_password=DFS_PASSWORD,
-    )
+    all_pillars = []
+    seed_log = []
 
-    if not result.get("pillars"):
-        raise HTTPException(400, result.get("error", "Brak wyników z DataForSEO"))
+    for seed in seeds:
+        try:
+            result = await generate_topical_map(
+                seed,
+                location_code=location_code,
+                language_code=body.language,
+                min_volume=body.min_volume,
+                min_coherence=body.min_coherence,
+                dfs_login=DFS_LOGIN,
+                dfs_password=DFS_PASSWORD,
+                domain_url=domain_url,
+                site_description=site_desc,
+                force_refresh=force_refresh,
+            )
+            pillars = result.get("pillars", [])
+            all_pillars.extend(pillars)
+            seed_log.append({"seed": seed, "pillars": len(pillars),
+                             "keywords": sum(1 + len(p.get("supporting_keywords", [])) for p in pillars)})
+        except Exception as e:
+            seed_log.append({"seed": seed, "error": str(e)})
+        # Rate limit between seeds
+        if len(seeds) > 1:
+            await asyncio.sleep(2)
 
-    seed_toks = _seed_tokens(body.seed_keyword)
+    if not all_pillars:
+        errors = [s.get("error", "brak wyników") for s in seed_log if s.get("error")]
+        raise HTTPException(400, f"Brak wyników: {'; '.join(errors) if errors else 'puste wyniki DFS'}")
+
+    # Combined seed tokens for coherence scoring (union of all seeds)
+    combined_seed = ", ".join(seeds)
+    all_seed_toks = set()
+    for s in seeds:
+        all_seed_toks |= _seed_tokens(s)
+
+    # Deduplicate pillars by label
+    seen_labels = set()
+    unique_pillars = []
+    for p in all_pillars:
+        label = (p.get("label") or "").lower().strip()
+        if label not in seen_labels:
+            seen_labels.add(label)
+            unique_pillars.append(p)
+
     inserted = 0
+    seen_keywords = set()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # Clear old keywords
-        await db.execute("DELETE FROM client_keywords WHERE client_domain_id=?", (domain_id,))
+        # Keep keywords that already have articles (status='generated') — only remove pending
+        await db.execute(
+            "DELETE FROM client_keywords WHERE client_domain_id=? AND status='pending'",
+            (domain_id,),
+        )
 
-        for pillar in result["pillars"]:
+        # Collect existing keywords (generated ones) to avoid duplicates
+        async with db.execute(
+            "SELECT LOWER(keyword) FROM client_keywords WHERE client_domain_id=?",
+            (domain_id,),
+        ) as cur:
+            existing_kws = {row[0] for row in await cur.fetchall()}
+        seen_keywords = set(existing_kws)
+
+        for pillar in unique_pillars:
             label = pillar.get("label", "")
             anchor = pillar.get("anchor", label)
-            # Insert pillar keyword
-            coh = _coherence_score(label, seed_toks, body.seed_keyword)
+            kw_lower = label.lower().strip()
+            if kw_lower in seen_keywords:
+                continue
+            seen_keywords.add(kw_lower)
+
+            coh = _coherence_score(label, all_seed_toks, combined_seed)
             await db.execute(
                 """INSERT INTO client_keywords
                    (client_domain_id, keyword, keyword_type, pillar_label, pillar_anchor,
@@ -243,7 +377,11 @@ async def generate_map(domain_id: int, body: MapGenerateRequest):
             inserted += 1
 
             for sk in pillar.get("supporting_keywords", []):
-                coh = _coherence_score(sk["keyword"], seed_toks, body.seed_keyword)
+                sk_lower = sk["keyword"].lower().strip()
+                if sk_lower in seen_keywords:
+                    continue
+                seen_keywords.add(sk_lower)
+                coh = _coherence_score(sk["keyword"], all_seed_toks, combined_seed)
                 await db.execute(
                     """INSERT INTO client_keywords
                        (client_domain_id, keyword, keyword_type, pillar_label, pillar_anchor,
@@ -254,18 +392,30 @@ async def generate_map(domain_id: int, body: MapGenerateRequest):
                 )
                 inserted += 1
 
-        total_kw = inserted
+        # Count total (existing generated + newly inserted)
+        async with db.execute(
+            "SELECT COUNT(*) FROM client_keywords WHERE client_domain_id=?",
+            (domain_id,),
+        ) as cur:
+            total = (await cur.fetchone())[0]
+
+        # Append new seed to existing seed list (don't overwrite)
+        old_seed = (dom.get("seed_keyword") or "").strip()
+        if old_seed and combined_seed not in old_seed:
+            combined_seed = f"{old_seed}, {combined_seed}"
+
         await db.execute(
             "UPDATE client_domains SET seed_keyword=?, map_generated=1, total_keywords=?, language=? WHERE id=?",
-            (body.seed_keyword, total_kw, body.language, domain_id),
+            (combined_seed, total, body.language, domain_id),
         )
         await db.commit()
 
     return {
         "domain_id": domain_id,
-        "seed_keyword": body.seed_keyword,
+        "seed_keyword": combined_seed,
+        "seeds": seed_log,
         "inserted": inserted,
-        "pillars": len(result["pillars"]),
+        "pillars": len(unique_pillars),
     }
 
 

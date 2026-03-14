@@ -460,6 +460,7 @@ async def ensure_tables():
             ("custom_prompt", "TEXT DEFAULT ''"),
             ("min_coherence", "REAL DEFAULT 0.0"),
             ("tone_of_voice", "TEXT DEFAULT 'ekspert'"),
+            ("site_description", "TEXT DEFAULT ''"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE domain_schedules ADD COLUMN {col} {typedef}")
@@ -609,6 +610,61 @@ async def generate_map_for_schedule(schedule_id: int, force_refresh: bool = Fals
         _map_generating.pop(schedule_id, None)
 
 
+async def _auto_site_description_for_schedule(sched: dict) -> str:
+    """Auto-generate site_description from homepage if missing (same as client_content)."""
+    import base64 as _b64
+    import httpx
+
+    domain_url = sched["domain"]
+    lang = sched.get("language", "pl")
+
+    if not DFS_LOGIN or not DFS_PASSWORD:
+        return ""
+
+    content_text = ""
+    try:
+        creds = _b64.b64encode(f"{DFS_LOGIN}:{DFS_PASSWORD}".encode()).decode()
+        headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30) as c:
+            resp = await c.post(
+                "https://api.dataforseo.com/v3/on_page/content_parsing/live",
+                json=[{"url": f"https://{domain_url}/", "enable_javascript": False}],
+                headers=headers,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            for task in data.get("tasks", []):
+                for result in task.get("result", []) or []:
+                    for item in result.get("items", []) or []:
+                        pc = item.get("page_content", {})
+                        for topic in pc.get("main_topic", []) or []:
+                            h_title = topic.get("h_title", "")
+                            texts = [t.get("text", "") for t in topic.get("primary_content", []) or []]
+                            content_text += f"{h_title}: " + " ".join(texts) + "\n"
+    except Exception as e:
+        logger.warning(f"[Autopilot] Content parsing for site_description failed: {e}")
+
+    if not content_text:
+        content_text = f"Domena: {domain_url}, seed: {sched.get('seed_keyword', '')}"
+
+    is_pl = lang == "pl"
+    system = (
+        "Na podstawie treści ze strony internetowej opisz w 2-3 zdaniach czym zajmuje się ta firma/strona. "
+        "Co sprzedaje lub jakie usługi oferuje? Kto jest grupą docelową? "
+        "Pisz konkretnie, bez ogólników. Odpowiedz TYLKO opisem, bez nagłówków."
+    ) if is_pl else (
+        "Based on the website content, describe in 2-3 sentences what this business does. "
+        "What products/services does it offer? Who is the target audience? "
+        "Be specific, no filler. Respond ONLY with the description."
+    )
+    try:
+        desc = await _gpt_call(system, f"URL: {domain_url}\nContent:\n{content_text[:3000]}", temperature=0.3, max_tokens=300)
+        return desc.strip()
+    except Exception as e:
+        logger.warning(f"[Autopilot] GPT site_description failed: {e}")
+        return ""
+
+
 async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
     async with aiosqlite.connect(DB_PATH) as db:
         sched = await get_schedule(db, schedule_id)
@@ -620,6 +676,24 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
         from fastapi import HTTPException
         raise HTTPException(400, "Brak konfiguracji DataForSEO (DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD)")
 
+    # Auto-generate site_description if empty
+    site_desc = (sched.get("site_description") or "").strip()
+    domain_url = sched["domain"]
+    if not site_desc:
+        site_desc = await _auto_site_description_for_schedule(sched)
+        if site_desc:
+            force_refresh = True  # new context = bust old cache
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE domain_schedules SET site_description=? WHERE id=?",
+                    (site_desc, schedule_id),
+                )
+                await db.commit()
+            logger.info(f"[Autopilot] Auto-generated site_description for {domain_url}: {len(site_desc)} chars")
+
+    # Note: cache key now includes domain_url + site_description hash,
+    # so old cached maps (without GPT filter) won't match anyway
+
     # Generuj mapę
     tmap = await generate_topical_map(
         seed=sched["seed_keyword"],
@@ -630,7 +704,9 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
         dfs_login=DFS_LOGIN,
         dfs_password=DFS_PASSWORD,
         force_refresh=force_refresh,
-        min_coherence=float(sched.get("min_coherence") or 0.0),
+        min_coherence=float(sched.get("min_coherence") or 0.15),
+        domain_url=domain_url,
+        site_description=site_desc,
     )
 
     # FIX #67: use module-level re import instead of inline import re as _re_cann
@@ -1481,13 +1557,21 @@ async def run_all_keywords(schedule_id: int, background_tasks: BackgroundTasks):
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='pending'",
+            "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status IN ('pending','cannibal_risk')",
             (schedule_id,)
         ) as cur:
             pending_count = (await cur.fetchone())[0]
 
     if pending_count == 0:
         return {"job_id": None, "total_pending": 0, "message": "Brak pending keywords"}
+
+    # Reset cannibal_risk → pending so they get picked up by _run_job
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE domain_keywords SET status='pending' WHERE schedule_id=? AND status='cannibal_risk'",
+            (schedule_id,)
+        )
+        await db.commit()
 
     job_id = str(_uuid.uuid4())
     body = RunNowRequest(schedule_id=schedule_id, limit=pending_count)
@@ -2240,6 +2324,20 @@ async def bulk_generate_maps(body: BulkActionRequest):
             results.append({"schedule_id": schedule_id, "error": "not found"})
             continue
         try:
+            # Auto-generate site_description if empty
+            site_desc = (sched.get("site_description") or "").strip()
+            domain_url = sched["domain"]
+            bulk_force = False
+            if not site_desc:
+                site_desc = await _auto_site_description_for_schedule(sched)
+                if site_desc:
+                    bulk_force = True
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE domain_schedules SET site_description=? WHERE id=?",
+                            (site_desc, schedule_id),
+                        )
+                        await db.commit()
             async with _dfs_sem:
                 tmap = await generate_topical_map(
                     seed=sched["seed_keyword"],
@@ -2249,6 +2347,10 @@ async def bulk_generate_maps(body: BulkActionRequest):
                     max_clusters=8,
                     dfs_login=DFS_LOGIN,
                     dfs_password=DFS_PASSWORD,
+                    force_refresh=bulk_force,
+                    min_coherence=float(sched.get("min_coherence") or 0.15),
+                    domain_url=domain_url,
+                    site_description=site_desc,
                 )
             await asyncio.sleep(0.5)  # small delay between DFS requests
             inserted = 0

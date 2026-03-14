@@ -29,6 +29,8 @@ function DomainWorkspace({ domainId, domainName, onBack }) {
   const [seedKw, setSeedKw] = useState('')
   const [lang, setLang] = useState('pl')
   const [minVol, setMinVol] = useState(10)
+  const [siteDesc, setSiteDesc] = useState('')
+  const [mapLog, setMapLog] = useState(null) // { seeds: [...], inserted, pillars } | null
 
   // Article generation
   const [selectedKws, setSelectedKws] = useState(new Set())
@@ -58,6 +60,7 @@ function DomainWorkspace({ domainId, domainName, onBack }) {
       if (infoRes.data.seed_keyword) setSeedKw(infoRes.data.seed_keyword)
       if (infoRes.data.language) setLang(infoRes.data.language)
       if (infoRes.data.tone_of_voice) setToneText(infoRes.data.tone_of_voice)
+      if (infoRes.data.site_description) setSiteDesc(infoRes.data.site_description)
 
       // Load metrics if map exists
       if (infoRes.data.map_generated) {
@@ -76,13 +79,25 @@ function DomainWorkspace({ domainId, domainName, onBack }) {
   const generateMap = async () => {
     if (!seedKw.trim()) return addToast('Wpisz seed keyword', 'warning')
     setGenerating(true)
+    setMapLog(null)
     try {
+      // Save site description if provided (used for GPT relevance filtering)
+      if (siteDesc.trim()) {
+        await api.patch(`/api/client-content/domains/${domainId}`, { site_description: siteDesc.trim() }).catch(() => {})
+      }
       const res = await api.post(`/api/client-content/domains/${domainId}/generate-map`, {
         seed_keyword: seedKw.trim(),
         language: lang,
         min_volume: Number(minVol),
       }, { timeout: 300000 })
-      addToast(`Topical Map: ${res.data.inserted} fraz, ${res.data.pillars} klastrow`, 'success')
+      const data = res.data
+      setMapLog({ seeds: data.seeds || [], inserted: data.inserted, pillars: data.pillars })
+      if (data.seeds && data.seeds.length > 1) {
+        const breakdown = data.seeds.map(s => `${s.seed}: ${s.keywords} fraz`).join(', ')
+        addToast(`Topical Map: ${data.inserted} fraz, ${data.pillars} klastrow (${breakdown})`, 'success')
+      } else {
+        addToast(`Topical Map: ${data.inserted} fraz, ${data.pillars} klastrow`, 'success')
+      }
       await loadAll()
     } catch (e) {
       addToast('Blad generowania mapy: ' + (e.response?.data?.detail || e.message), 'error')
@@ -234,7 +249,7 @@ function DomainWorkspace({ domainId, domainName, onBack }) {
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-500 mb-1">Seed keyword *</label>
                 <input value={seedKw} onChange={e => setSeedKw(e.target.value)}
-                  placeholder="np. ubezpieczenia na życie"
+                  placeholder="np. pokemony, pokemon karty, pokemon go (po przecinku = więcej fraz)"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
@@ -251,11 +266,64 @@ function DomainWorkspace({ domainId, domainName, onBack }) {
                 </select>
               </div>
             </div>
+            <div className="mt-3">
+              <label className="block text-xs font-medium text-gray-500 mb-1">
+                Opis biznesu <span className="text-gray-400">(opcjonalnie — auto-generowany z homepage jeśli puste)</span>
+              </label>
+              <textarea value={siteDesc} onChange={e => setSiteDesc(e.target.value)}
+                placeholder="np. Sklep z kamieniami naturalnymi — granit, marmur, kwarc. Sprzedaż hurtowa i detaliczna materiałów budowlanych i dekoracyjnych."
+                rows={2}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+              {siteDesc && (
+                <p className="text-xs text-green-600 mt-1">Opis biznesu pomoże odfiltrować nietrafne frazy z topical map</p>
+              )}
+            </div>
             <button onClick={generateMap} disabled={generating}
               className="mt-3 px-5 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2">
               {generating ? <><Spinner className="w-4 h-4" /> Generuję mapę...</> : 'Generuj Topical Map'}
             </button>
+            {seedKw.includes(',') && !generating && (
+              <p className="mt-2 text-xs text-purple-600">
+                {seedKw.split(',').filter(s => s.trim()).length} seedów — wyniki zostaną połączone i zdeduplikowane
+              </p>
+            )}
           </div>
+
+          {/* Loader overlay during generation */}
+          {generating && (
+            <div className="bg-purple-50 border border-purple-200 rounded-xl p-6 text-center">
+              <Spinner className="w-8 h-8 text-purple-600 mx-auto mb-3" />
+              <p className="text-sm font-medium text-purple-800">Generuję Topical Map...</p>
+              <p className="text-xs text-purple-500 mt-1">
+                {seedKw.includes(',')
+                  ? `Pobieram dane z DataForSEO dla ${seedKw.split(',').filter(s => s.trim()).length} seedów i łączę wyniki`
+                  : 'Pobieram frazy z DataForSEO i tworzę klastry tematyczne'}
+              </p>
+              <p className="text-xs text-purple-400 mt-2">To może potrwać 30-120 sekund...</p>
+            </div>
+          )}
+
+          {/* Seed log after generation */}
+          {mapLog && mapLog.seeds && mapLog.seeds.length > 1 && !generating && (
+            <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h5 className="text-sm font-semibold text-green-800">Wyniki generowania (multi-seed)</h5>
+                <button onClick={() => setMapLog(null)} className="text-green-400 hover:text-green-600 text-xs">zamknij</button>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                {mapLog.seeds.map((s, i) => (
+                  <div key={i} className="flex items-center gap-2 bg-white rounded-lg px-3 py-2">
+                    <span className="font-medium text-green-700">{s.seed}</span>
+                    <span className="text-gray-400">→</span>
+                    <span className="text-gray-600">{s.pillars} klastrow, {s.keywords} fraz</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-green-600 mt-2 font-medium">
+                Razem po deduplikacji: {mapLog.inserted} fraz, {mapLog.pillars} klastrow
+              </p>
+            </div>
+          )}
 
           {/* Keywords list */}
           {keywords.length > 0 && (

@@ -24,8 +24,10 @@ class TopicalMapRequest(BaseModel):
     min_volume: int = 50
     max_clusters: int = 8
     force_refresh: bool = False
-    min_coherence: float = 0.0
+    min_coherence: float = 0.15
     competitor_domain: str = ""  # FIX #17: check what domain already ranks for
+    domain_url: str = ""
+    site_description: str = ""
 
     # FIX #27: validate seed
     @field_validator("seed")
@@ -63,5 +65,7 @@ async def build_topical_map(req: TopicalMapRequest):
         force_refresh=req.force_refresh,
         min_coherence=req.min_coherence,
         competitor_domain=req.competitor_domain.strip(),
+        domain_url=req.domain_url.strip(),
+        site_description=req.site_description.strip(),
     )
     return result

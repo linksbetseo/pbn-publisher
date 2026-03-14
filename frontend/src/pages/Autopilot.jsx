@@ -839,7 +839,7 @@ export default function Autopilot() {
     }
   }
 
-  const pending_count = (id) => keywords[id]?.filter(k => k.status === 'pending').length ?? '?'
+  const pending_count = (id) => keywords[id]?.filter(k => k.status === 'pending' || k.status === 'cannibal_risk').length ?? '?'
 
   const runNow = async (sched, limitOverride = null) => {
     const id = sched.id

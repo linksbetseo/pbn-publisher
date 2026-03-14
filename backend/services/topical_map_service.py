@@ -513,6 +513,120 @@ def _compute_site_metrics(pillars: list[dict], seed: str, all_keywords: list[dic
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
+async def _gpt_relevance_filter(
+    keywords: list[dict],
+    seed: str,
+    site_description: str,
+    domain_url: str = "",
+    language_code: str = "pl",
+    batch_size: int = 40,
+) -> list[dict]:
+    """
+    GPT-based semantic relevance filter.
+    Sends keyword batches to GPT and asks which ones are relevant
+    to the seed topic (and optionally domain's business).
+    Always runs — uses seed alone if no site_description provided.
+    Returns only the relevant keywords.
+    """
+    from openai import AsyncOpenAI as _AO
+    from services.openai_service import get_gpt_model
+
+    client = _AO()
+    model = await get_gpt_model()
+
+    is_pl = language_code == "pl"
+
+    # Build context: use site_description if available, otherwise seed is the context
+    if site_description:
+        context_block = f"DOMENA: {domain_url}\nOPIS BIZNESU: {site_description}" if is_pl else f"DOMAIN: {domain_url}\nBUSINESS: {site_description}"
+    elif domain_url:
+        context_block = f"DOMENA: {domain_url}" if is_pl else f"DOMAIN: {domain_url}"
+    else:
+        context_block = ""
+
+    system_prompt = (
+        "Jesteś ekspertem SEO. Oceniasz trafność fraz kluczowych dla topical map.\n\n"
+        f"TEMAT (SEED): {seed}\n"
+        f"{context_block}\n\n"
+        "Fraza jest TRAFNA (1) jeśli:\n"
+        "- Dotyczy DOKŁADNIE tego tematu co seed\n"
+        "- Osoba szukająca tego seeda mogłaby naturalnie szukać też tej frazy\n"
+        "- Jest przydatna dla bloga/strony o tym temacie\n\n"
+        "Fraza jest NIETRAFNA (0) jeśli:\n"
+        "- Dotyczy zupełnie innego tematu (np. seed='muzyka country' a fraza='piramidy finansowe')\n"
+        "- Zawiera słowa z seeda ale w innym kontekście (np. seed='kamień naturalny' a fraza='parafia kamień')\n"
+        "- Jest o nazwie miejsca, grze, filmie, medycynie, sporcie — niezwiązanej z tematem seeda\n"
+        "- Tylko przypadkowo zawiera te same słowa co seed\n\n"
+        "Odpowiedz TYLKO tablicą JSON z 1 i 0, np: [1,1,0,1,0]\n"
+        "Bez wyjaśnień, bez dodatkowego tekstu."
+    ) if is_pl else (
+        "You are an SEO expert evaluating keyword relevance for a topical map.\n\n"
+        f"TOPIC (SEED): {seed}\n"
+        f"{context_block}\n\n"
+        "A keyword is RELEVANT (1) if:\n"
+        "- It's directly about the seed topic\n"
+        "- Someone interested in the seed would also search for it\n"
+        "- It's useful for a blog/site about this topic\n\n"
+        "A keyword is IRRELEVANT (0) if:\n"
+        "- It's about a completely different topic\n"
+        "- It contains seed words but in a different context (e.g., place names, games, movies)\n"
+        "- It only accidentally shares words with the seed\n\n"
+        "Respond ONLY with a JSON array of 1s and 0s, e.g: [1,1,0,1,0]\n"
+        "No explanations, no extra text."
+    )
+
+    relevant = []
+    for i in range(0, len(keywords), batch_size):
+        batch = keywords[i:i + batch_size]
+        kw_list = "\n".join(f"{j+1}. {kw['keyword']}" for j, kw in enumerate(batch))
+
+        for attempt in range(3):
+            try:
+                resp = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": kw_list},
+                    ],
+                    temperature=0.0,
+                    max_tokens=len(batch) * 3 + 20,
+                )
+                text = resp.choices[0].message.content.strip()
+                # Parse JSON array from response
+                import re as _re
+                match = _re.search(r'\[[\d\s,]+\]', text)
+                if match:
+                    verdicts = _json.loads(match.group())
+                else:
+                    # Fallback: try to parse individual numbers
+                    verdicts = [int(c) for c in text if c in '01']
+
+                if len(verdicts) >= len(batch):
+                    verdicts = verdicts[:len(batch)]
+                elif len(verdicts) < len(batch):
+                    # Pad with 1s (keep by default if GPT response is short)
+                    verdicts.extend([1] * (len(batch) - len(verdicts)))
+
+                kept = 0
+                for kw, v in zip(batch, verdicts):
+                    if v == 1:
+                        relevant.append(kw)
+                        kept += 1
+
+                logger.info(f"[TopicalMap] GPT relevance batch {i//batch_size+1}: {kept}/{len(batch)} kept")
+                break
+            except Exception as e:
+                if attempt == 2:
+                    logger.warning(f"[TopicalMap] GPT relevance filter failed, keeping batch: {e}")
+                    relevant.extend(batch)
+                else:
+                    import random
+                    await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+
+    logger.info(f"[TopicalMap] GPT relevance filter: {len(relevant)}/{len(keywords)} keywords kept")
+    return relevant
+
+
 async def generate_topical_map(
     seed: str,
     location_code: int = 2616,
@@ -524,6 +638,8 @@ async def generate_topical_map(
     force_refresh: bool = False,
     min_coherence: float = 0.0,
     competitor_domain: str = "",
+    domain_url: str = "",
+    site_description: str = "",
 ) -> dict:
     """
     Generate topical map: pillar pages + supporting pages.
@@ -533,8 +649,11 @@ async def generate_topical_map(
     FIX #12: CPC used in priority scoring.
     FIX #13: unified pillar_score formula used everywhere.
     """
+    # Include domain context + filter version in cache key
+    # v2: GPT relevance filter always runs (invalidates all pre-filter caches)
+    _desc_hash = hashlib.md5(site_description.encode()).hexdigest()[:8] if site_description else ""
     cache_key = hashlib.md5(
-        f"{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}:{competitor_domain}".encode()
+        f"v2:{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}:{competitor_domain}:{domain_url}:{_desc_hash}".encode()
     ).hexdigest()
     if not force_refresh:
         cached = await _map_cache_get(cache_key)
@@ -581,6 +700,13 @@ async def generate_topical_map(
     filtered = [k for k in keywords if k.get("search_volume", 0) >= min_volume]
     keywords = filtered if filtered else keywords
     logger.info(f"[TopicalMap] after volume filter (>={min_volume}): {len(keywords)}")
+
+    # GPT relevance filter — removes keywords semantically irrelevant to the topic/domain
+    # Always runs: uses site_description if available, otherwise seed alone is enough context
+    keywords = await _gpt_relevance_filter(
+        keywords, seed, site_description, domain_url, language_code,
+    )
+    logger.info(f"[TopicalMap] after GPT relevance filter: {len(keywords)}")
 
     # Add coherence score to each keyword (computed once, reused everywhere — FIX #30)
     # FIX #17: mark keywords the competitor domain already ranks for
