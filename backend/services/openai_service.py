@@ -714,6 +714,8 @@ async def generate_article(
             "2) Drugi akapit = dlaczego to ważne, kontekst praktyczny.\n"
             "3) Trzeci akapit = co czytelnik znajdzie w artykule (zapowiedź sekcji).\n"
             "Używaj tagów <p> i <strong> dla kluczowych terminów.\n"
+            f"AKTUALNOŚĆ: Mamy rok {_current_year}. NIE pisz 'W 2023 roku' ani 'trendy 2024' jako aktualne. "
+            f"Używaj '{_current_year}' lub 'obecnie/aktualnie'.\n"
             "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani # ani **tekst**. TYLKO tagi HTML <p> i <strong>."
         )
         intro_user = (
@@ -735,6 +737,8 @@ async def generate_article(
             "3) Third = what reader will find (section preview).\n"
             "Use <p> and <strong> for key terms.\n"
             "HUMANIZATION: Mix short and long sentences. Use 1 rhetorical question.\n"
+            f"CURRENCY: Current year is {_current_year}. Do NOT write 'In 2023' or '2024 trends' as current. "
+            f"Use '{_current_year}' or 'currently/nowadays'.\n"
             "STRICT: NO markdown. Never use ## or # or **text**. ONLY HTML tags <p> and <strong>."
         )
         intro_user = (
@@ -789,6 +793,10 @@ async def generate_article(
             "- HUMANIZACJA: Mieszaj krótkie zdania (5-8 słów) z długimi (20-30 słów). "
             "Używaj pytań retorycznych, porównań, konkretnych przykładów liczbowych. "
             "Nie pisz monotonnie — każdy akapit innym tonem.\n"
+            f"AKTUALNOŚĆ: Mamy rok {_current_year}. NIE pisz o poprzednich latach jako aktualnych "
+            f"(np. 'W 2023 roku...', 'trendy 2024'). Jeśli podajesz dane/statystyki — "
+            f"pisz '{_current_year}' lub 'obecnie/aktualnie'. Stare daty (2023, 2024) tylko w kontekście historycznym "
+            f"('od 2023 roku', 'w porównaniu z 2024').\n"
             "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # na początku linii. "
             "NIE używaj **tekst** ani *tekst*. TYLKO czysty HTML — tagi <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>.\n"
             "BEZWZGLĘDNY ZAKAZ #2: NIE generuj instrukcji, zadań, kroków, planów ani list TODO. "
@@ -815,6 +823,9 @@ async def generate_article(
             "- HUMANIZATION: Mix short sentences (5-8 words) with long ones (20-30 words). "
             "Use rhetorical questions, comparisons, specific numeric examples. "
             "Don't write monotonously — vary tone across paragraphs.\n"
+            f"CURRENCY: The current year is {_current_year}. Do NOT refer to previous years as current "
+            f"(e.g., 'In 2023...', '2024 trends'). Use '{_current_year}' or 'currently/nowadays' for data/statistics. "
+            f"Old dates (2023, 2024) only in historical context ('since 2023', 'compared to 2024').\n"
             "STRICT: NO markdown. Never use ## or ### or # at line start. "
             "Never use **text** or *text*. ONLY pure HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>.\n"
             "STRICT #2: Do NOT generate instructions, tasks, steps, plans or TODO lists. "
