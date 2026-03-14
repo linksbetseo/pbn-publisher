@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import api from '../api/client'
 
 const Badge = ({ color, children }) => {
@@ -297,8 +297,8 @@ export default function LinkChecker() {
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
                 {filteredDomains.map(d => (
-                  <>
-                    <tr key={d.domain} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                  <React.Fragment key={d.domain}>
+                    <tr className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                       <td className="py-2.5 px-3">
                         <span className="font-medium text-gray-900 dark:text-white">{d.domain}</span>
                       </td>
@@ -377,7 +377,7 @@ export default function LinkChecker() {
                         </td>
                       </tr>
                     ))}
-                  </>
+                  </React.Fragment>
                 ))}
                 {filteredDomains.length === 0 && (
                   <tr>

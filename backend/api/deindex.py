@@ -105,12 +105,17 @@ async def run_deindex_scan() -> dict:
     if not urls_to_check:
         return {"total_checked": 0, "alive": 0, "dead": 0, "dead_urls": []}
 
-    # Check all URLs concurrently
+    # Check all URLs in batches to limit memory usage
     async def _do_check(item: dict) -> dict:
         status_code, is_alive = await _check_url(item["url"])
         return {**item, "status_code": status_code, "is_alive": is_alive}
 
-    results = await asyncio.gather(*[_do_check(item) for item in urls_to_check])
+    results = []
+    _batch_size = 50
+    for i in range(0, len(urls_to_check), _batch_size):
+        batch = urls_to_check[i:i + _batch_size]
+        batch_results = await asyncio.gather(*[_do_check(item) for item in batch])
+        results.extend(batch_results)
 
     # Store results in DB
     now = datetime.now(timezone.utc).isoformat()

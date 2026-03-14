@@ -375,7 +375,7 @@ async def start_scan(body: ScanRequest):
                 timeout=20,
                 verify=False,
                 follow_redirects=True,
-                headers={'User-Agent': 'Mozilla/5.0 (compatible; PBNChecker/1.0)'},
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'},
             ) as client:
                 # Process domains in batches of 5 for controlled parallelism
                 batch_size = 5
@@ -394,6 +394,9 @@ async def start_scan(body: ScanRequest):
             progress['errors'].append(str(e)[:200])
 
     asyncio.create_task(_run_scan())
+
+    # Cleanup stale progress entries on each new scan
+    _cleanup_progress()
 
     return {
         'scan_id': scan_id,
@@ -520,6 +523,7 @@ async def export_csv(scan_id: str):
         raise HTTPException(404, "No results for this scan")
 
     buf = io.StringIO()
+    buf.write('\ufeff')  # BOM for Excel to recognize UTF-8
     writer = csv.writer(buf)
     writer.writerow([
         'Domena PBN', 'Domena docelowa', 'URL strony', 'Link znaleziony',

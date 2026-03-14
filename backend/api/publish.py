@@ -173,11 +173,13 @@ def _drip_delay_range(domain_count: int) -> tuple[int, int]:
 async def check_duplicate(topic: str, domain_id: int):
     """Check if a keyword/topic has already been published to a specific domain."""
     async with aiosqlite.connect(DB_PATH) as db:
+        # Escape LIKE wildcards in user input to prevent LIKE injection
+        _escaped = topic.lower()[:50].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         async with db.execute(
             """SELECT id, title, wp_post_url, created_at FROM posts
-               WHERE my_domain_id = ? AND LOWER(title) LIKE ? AND status = 'published'
+               WHERE my_domain_id = ? AND LOWER(title) LIKE ? ESCAPE '\\' AND status = 'published'
                ORDER BY created_at DESC LIMIT 5""",
-            (domain_id, f"%{topic.lower()[:50]}%"),
+            (domain_id, f"%{_escaped}%"),
         ) as cur:
             rows = await cur.fetchall()
     if rows:

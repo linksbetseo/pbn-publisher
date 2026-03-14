@@ -56,10 +56,11 @@ async def get_settings():
 
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            _all_keys = ['telegram_bot_token', 'telegram_chat_id', 'gpt_model'] + _notify_keys
+            _placeholders = ','.join('?' * len(_all_keys))
             async with db.execute(
-                "SELECT key, value FROM settings WHERE key IN "
-                "('telegram_bot_token', 'telegram_chat_id', 'gpt_model',"
-                + ",".join(f"'{k}'" for k in _notify_keys) + ")"
+                f"SELECT key, value FROM settings WHERE key IN ({_placeholders})",
+                _all_keys,
             ) as cur:
                 for key, value in await cur.fetchall():
                     if key == "telegram_bot_token" and value:
