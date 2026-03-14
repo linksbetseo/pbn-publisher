@@ -209,10 +209,12 @@ async def generate_map(domain_id: int, body: MapGenerateRequest):
 
     location_code = 2616 if body.language == "pl" else 2840
     result = await generate_topical_map(
-        body.seed_keyword, DFS_LOGIN, DFS_PASSWORD,
+        body.seed_keyword,
         location_code=location_code,
         language_code=body.language,
         min_volume=body.min_volume,
+        dfs_login=DFS_LOGIN,
+        dfs_password=DFS_PASSWORD,
     )
 
     if not result.get("pillars"):
