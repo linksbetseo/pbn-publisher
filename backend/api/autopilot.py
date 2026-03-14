@@ -584,14 +584,19 @@ async def list_keywords(schedule_id: int, status: Optional[str] = None):
     return [dict(r) for r in rows]
 
 
+class GenerateMapRequest(BaseModel):
+    new_seed: str = ""
+
 @router.post("/schedules/{schedule_id}/generate-map")
-async def generate_map_for_schedule(schedule_id: int, force_refresh: bool = False):
+async def generate_map_for_schedule(schedule_id: int, force_refresh: bool = False, body: Optional[GenerateMapRequest] = None):
     """
     Wygeneruj Topical Map dla harmonogramu i zapisz frazy do kolejki.
     Jeśli mapa już istnieje — dodaje tylko nowe frazy.
-    force_refresh=true pomija cache DataForSEO (kosztowne, używaj tylko gdy potrzebujesz świeżych danych).
+    force_refresh=true pomija cache DataForSEO.
+    body.new_seed — opcjonalny nowy seed (dopisuje się do istniejącego).
     """
     await ensure_tables()
+    new_seed = (body.new_seed.strip() if body and body.new_seed else "").strip()
 
     # FIX #65: use module-level time import instead of inline import
     now = time.time()
@@ -605,7 +610,7 @@ async def generate_map_for_schedule(schedule_id: int, force_refresh: bool = Fals
         raise HTTPException(409, "Generowanie mapy już w toku dla tego harmonogramu")
     _map_generating[schedule_id] = now
     try:
-        return await _do_generate_map(schedule_id, force_refresh=force_refresh)
+        return await _do_generate_map(schedule_id, force_refresh=force_refresh, new_seed=new_seed)
     finally:
         _map_generating.pop(schedule_id, None)
 
@@ -665,7 +670,7 @@ async def _auto_site_description_for_schedule(sched: dict) -> str:
         return ""
 
 
-async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
+async def _do_generate_map(schedule_id: int, force_refresh: bool = False, new_seed: str = ""):
     async with aiosqlite.connect(DB_PATH) as db:
         sched = await get_schedule(db, schedule_id)
     if not sched:
@@ -675,6 +680,24 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
     if not DFS_LOGIN or not DFS_PASSWORD:
         from fastapi import HTTPException
         raise HTTPException(400, "Brak konfiguracji DataForSEO (DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD)")
+
+    # If new_seed provided — use it as the seed for this generation
+    # and append to existing seed_keyword in the schedule
+    effective_seed = sched["seed_keyword"]
+    if new_seed:
+        effective_seed = new_seed
+        # Append to existing seeds (comma-separated), avoid duplicates
+        old_seeds = [s.strip().lower() for s in (sched["seed_keyword"] or "").split(",") if s.strip()]
+        if new_seed.lower().strip() not in old_seeds:
+            updated_seed = f"{sched['seed_keyword']}, {new_seed}" if sched["seed_keyword"] else new_seed
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE domain_schedules SET seed_keyword=? WHERE id=?",
+                    (updated_seed, schedule_id),
+                )
+                await db.commit()
+            logger.info(f"[Autopilot] Appended new seed '{new_seed}' to schedule {schedule_id}")
+        force_refresh = True  # new seed = always bust cache
 
     # Auto-generate site_description if empty
     site_desc = (sched.get("site_description") or "").strip()
@@ -696,7 +719,7 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
 
     # Generuj mapę
     tmap = await generate_topical_map(
-        seed=sched["seed_keyword"],
+        seed=effective_seed,
         location_code=2616 if sched["language"] == "pl" else 2840,
         language_code=sched["language"],
         min_volume=sched["min_volume"],
@@ -718,13 +741,17 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False):
     inserted = 0
     cannibal_flagged = 0
     async with aiosqlite.connect(DB_PATH) as db:
-        # Delete old pending/cannibal_risk keywords — keep only published/generated ones
-        await db.execute(
-            "DELETE FROM domain_keywords WHERE schedule_id=? AND status IN ('pending','cannibal_risk')",
-            (schedule_id,),
-        )
-        await db.commit()
-        logger.info(f"[Autopilot] Cleared old pending/cannibal_risk keywords for schedule {schedule_id}")
+        # Delete old pending/cannibal_risk keywords ONLY when refreshing existing seed
+        # When adding a new seed map — keep existing keywords (additive)
+        if not new_seed:
+            await db.execute(
+                "DELETE FROM domain_keywords WHERE schedule_id=? AND status IN ('pending','cannibal_risk')",
+                (schedule_id,),
+            )
+            await db.commit()
+            logger.info(f"[Autopilot] Cleared old pending/cannibal_risk keywords for schedule {schedule_id}")
+        else:
+            logger.info(f"[Autopilot] Additive map for new seed '{new_seed}' — keeping existing keywords")
 
         # Pobierz istniejące frazy żeby nie duplikować (only published/generated remain)
         async with db.execute(

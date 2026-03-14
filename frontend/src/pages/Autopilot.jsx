@@ -696,6 +696,8 @@ export default function Autopilot() {
   const [addKwForm, setAddKwForm] = useState({})  // { [scheduleId]: { keyword, keyword_type, pillar_label } }
   const [addingKw, setAddingKw] = useState({})
   const [generatingKw, setGeneratingKw] = useState({})  // { [keywordId]: true }
+  const [newSeedInput, setNewSeedInput] = useState({})  // { [scheduleId]: string }
+  const [showNewSeed, setShowNewSeed] = useState({})  // { [scheduleId]: bool }
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -760,12 +762,18 @@ export default function Autopilot() {
     }
   }
 
-  const generateMap = async (id) => {
+  const generateMap = async (id, seedOverride = '') => {
     setGeneratingMap(g => ({ ...g, [id]: true }))
     try {
-      const res = await api.post(`/api/autopilot/schedules/${id}/generate-map?force_refresh=true`, {}, { timeout: 300000 })
+      const body = seedOverride ? { new_seed: seedOverride } : {}
+      const res = await api.post(`/api/autopilot/schedules/${id}/generate-map?force_refresh=true`, body, { timeout: 300000 })
       if (res.data.site_metrics) setSiteMetrics(m => ({ ...m, [id]: res.data.site_metrics }))
-      setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Mapa gotowa: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz` }] }))
+      const seedInfo = seedOverride ? ` (seed: ${seedOverride})` : ''
+      setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Mapa gotowa: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz${seedInfo}` }] }))
+      if (seedOverride) {
+        setNewSeedInput(s => ({ ...s, [id]: '' }))
+        setShowNewSeed(s => ({ ...s, [id]: false }))
+      }
       await load()
       await loadKeywords(id)
     } catch (e) {
@@ -1431,6 +1439,14 @@ export default function Autopilot() {
                         {generatingMap[sched.id] ? (<><span className="animate-spin inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full" />Generuję...</>) : '↻ Mapa'}
                       </button>
                       <button
+                        onClick={() => setShowNewSeed(s => ({ ...s, [sched.id]: !s[sched.id] }))}
+                        disabled={generatingMap[sched.id]}
+                        title="Wygeneruj mapę z nowego słowa kluczowego"
+                        className="px-2 py-1.5 text-emerald-600 border border-emerald-200 rounded-lg text-xs hover:bg-emerald-50 disabled:opacity-50"
+                      >
+                        + Nowa mapa
+                      </button>
+                      <button
                         onClick={() => syncCategories(sched)}
                         disabled={syncingCats[sched.id]}
                         title="Utwórz kategorie WP z klastrów topical map"
@@ -1464,6 +1480,37 @@ export default function Autopilot() {
                     </button>
                   )}
               </div>
+
+              {/* New seed input */}
+              {showNewSeed[sched.id] && (
+                <div className="border-t border-emerald-100 bg-emerald-50/50 px-4 py-2.5 flex items-center gap-2">
+                  <span className="text-xs text-emerald-700 font-medium whitespace-nowrap">Nowy seed:</span>
+                  <input
+                    type="text"
+                    value={newSeedInput[sched.id] || ''}
+                    onChange={e => setNewSeedInput(s => ({ ...s, [sched.id]: e.target.value }))}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && (newSeedInput[sched.id] || '').trim()) {
+                        generateMap(sched.id, newSeedInput[sched.id].trim())
+                      }
+                    }}
+                    placeholder="Wpisz nowe słowo kluczowe na mapę..."
+                    className="flex-1 border border-emerald-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => generateMap(sched.id, (newSeedInput[sched.id] || '').trim())}
+                    disabled={generatingMap[sched.id] || !(newSeedInput[sched.id] || '').trim()}
+                    className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1"
+                  >
+                    {generatingMap[sched.id] ? (<><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Generuję...</>) : 'Generuj mapę'}
+                  </button>
+                  <button
+                    onClick={() => setShowNewSeed(s => ({ ...s, [sched.id]: false }))}
+                    className="text-gray-400 hover:text-gray-600 text-sm"
+                  >&times;</button>
+                </div>
+              )}
 
               {/* Category sync result */}
               {catResults[sched.id] && (
