@@ -25,7 +25,7 @@ from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from config import DB_PATH
-from services.topical_map_service import generate_topical_map, _compute_site_metrics, _coherence_score, _seed_tokens
+from services.topical_map_service import generate_topical_map, _compute_site_metrics, _coherence_score, _seed_tokens, _tokenize
 from services.dataforseo_service import DataForSEOClient
 from services.openai_service import generate_article
 from services.wordpress_service import publish_post, get_or_create_category, get_categories, check_wp_credentials
@@ -734,9 +734,14 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False, new_se
 
     # FIX #67: use module-level re import instead of inline import re as _re_cann
 
-    def _kw_stem(kw: str) -> str:
-        tokens = re.sub(r"[^a-z0-9ąćęłńóśźż ]+", "", kw.lower()).split()
-        return " ".join(tokens[:2])
+    def _kw_stem(kw: str) -> frozenset:
+        """Return stemmed token set for cannibalization comparison."""
+        tokens = _tokenize(kw)
+        if tokens:
+            return frozenset(tokens)
+        # Fallback: simple lowercase split if _tokenize returns empty
+        parts = re.sub(r'[^a-ząćęłńóśźż0-9\s]', '', kw.lower()).split()
+        return frozenset(parts[:3])
 
     inserted = 0
     cannibal_flagged = 0
@@ -776,7 +781,7 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False, new_se
         existing_kws |= domain_published_kws
 
         # Build stem index from already-published keywords + manual post titles for cannibalization detection
-        published_stems: dict[str, str] = {_kw_stem(kw): kw for kw in domain_published_kws}
+        published_stems: dict[frozenset, str] = {_kw_stem(kw): kw for kw in domain_published_kws}
         for title in manual_titles:
             stem = _kw_stem(title)
             published_stems.setdefault(stem, title)
@@ -1181,6 +1186,14 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             await _job_update(job_id, done=1, error="Harmonogram nie istnieje")
             return
 
+        # Recover keywords stuck in 'publishing' (WP publish succeeded but DB update failed on previous run)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE domain_keywords SET status='published' WHERE schedule_id=? AND status='publishing'",
+                (schedule_id,)
+            )
+            await db.commit()
+
         limit = body.limit if body.limit else sched["posts_per_day"]
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1307,15 +1320,15 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
         for kw_row in keywords:
             keyword = kw_row["keyword"]
 
-            # Skip if already published on this domain (race condition guard)
+            # Skip if already published or in-flight on this domain (race condition guard)
             async with aiosqlite.connect(DB_PATH) as db:
                 async with db.execute(
-                    "SELECT COUNT(*) FROM domain_keywords WHERE my_domain_id=? AND keyword=? AND status='published'",
+                    "SELECT COUNT(*) FROM domain_keywords WHERE my_domain_id=? AND keyword=? AND status IN ('published','publishing')",
                     (sched["my_domain_id"], keyword)
                 ) as cur:
                     already = (await cur.fetchone())[0]
             if already:
-                logger.info(f"[Autopilot] Skipping '{keyword}' — already published on this domain")
+                logger.info(f"[Autopilot] Skipping '{keyword}' — already published/publishing on this domain")
                 # Mark as published to remove from pending queue
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("UPDATE domain_keywords SET status='published' WHERE id=?", (kw_row["id"],))
@@ -1420,6 +1433,11 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     image_b64, image_provider = await _fetch_image(
                         sched.get("image_source", "freepik_flux"), keyword, title, img_prompt
                     )
+
+                    # Mark as 'publishing' BEFORE calling WP — safety net against DB failure after publish
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("UPDATE domain_keywords SET status='publishing' WHERE id=?", (kw_row["id"],))
+                        await db.commit()
 
                     async def _do_publish():
                         r = await publish_post(
@@ -1766,15 +1784,24 @@ async def generate_keyword_now(keyword_id: int):
 
 
 @router.post("/schedules/{schedule_id}/run-all")
-async def run_all_keywords(schedule_id: int, background_tasks: BackgroundTasks):
+async def run_all_keywords(schedule_id: int, background_tasks: BackgroundTasks, include_cannibal_risk: bool = False):
     """
     Opublikuj WSZYSTKIE pending keywords dla harmonogramu (ignoruje posts_per_day).
     Zwraca job_id — odpytuj /run-status/{job_id} co 3s.
+
+    By default, keywords flagged as cannibal_risk are skipped.
+    Pass include_cannibal_risk=true to force-publish them as well.
     """
     await ensure_tables()
+
+    if include_cannibal_risk:
+        status_filter = "status IN ('pending','cannibal_risk')"
+    else:
+        status_filter = "status='pending'"
+
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status IN ('pending','cannibal_risk')",
+            f"SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND {status_filter}",
             (schedule_id,)
         ) as cur:
             pending_count = (await cur.fetchone())[0]
@@ -1782,13 +1809,21 @@ async def run_all_keywords(schedule_id: int, background_tasks: BackgroundTasks):
     if pending_count == 0:
         return {"job_id": None, "total_pending": 0, "message": "Brak pending keywords"}
 
-    # Reset cannibal_risk → pending so they get picked up by _run_job
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE domain_keywords SET status='pending' WHERE schedule_id=? AND status='cannibal_risk'",
-            (schedule_id,)
-        )
-        await db.commit()
+    if include_cannibal_risk:
+        # Reset cannibal_risk → pending only when explicitly requested
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='cannibal_risk'",
+                (schedule_id,)
+            ) as cur:
+                cannibal_count = (await cur.fetchone())[0]
+            if cannibal_count > 0:
+                logger.warning(f"[RunAll] Including {cannibal_count} cannibal_risk keywords for schedule {schedule_id}")
+                await db.execute(
+                    "UPDATE domain_keywords SET status='pending' WHERE schedule_id=? AND status='cannibal_risk'",
+                    (schedule_id,)
+                )
+                await db.commit()
 
     job_id = str(_uuid.uuid4())
     body = RunNowRequest(schedule_id=schedule_id, limit=pending_count)
@@ -1835,6 +1870,14 @@ async def _run_schedule_daily(sched: dict) -> dict:
         failed = 0
         schedule_id = sched["id"]
         limit = sched["posts_per_day"]
+
+        # Recover keywords stuck in 'publishing' (WP publish succeeded but DB update failed on previous run)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE domain_keywords SET status='published' WHERE schedule_id=? AND status='publishing'",
+                (schedule_id,)
+            )
+            await db.commit()
 
         # Velocity throttle: slow down once domain has many articles (anti-spam signal)
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1885,15 +1928,15 @@ async def _run_schedule_daily(sched: dict) -> dict:
                 await asyncio.sleep(delay)
             _first_article = False
 
-            # Skip if already published on this domain (race condition guard)
+            # Skip if already published or in-flight on this domain (race condition guard)
             async with aiosqlite.connect(DB_PATH) as db:
                 async with db.execute(
-                    "SELECT COUNT(*) FROM domain_keywords WHERE my_domain_id=? AND keyword=? AND status='published'",
+                    "SELECT COUNT(*) FROM domain_keywords WHERE my_domain_id=? AND keyword=? AND status IN ('published','publishing')",
                     (sched["my_domain_id"], keyword)
                 ) as cur:
                     already = (await cur.fetchone())[0]
             if already:
-                logger.info(f"[Daily] Skipping '{keyword}' — already published on this domain")
+                logger.info(f"[Daily] Skipping '{keyword}' — already published/publishing on this domain")
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("UPDATE domain_keywords SET status='published' WHERE id=?", (kw_row["id"],))
                     await db.commit()
@@ -1940,6 +1983,11 @@ async def _run_schedule_daily(sched: dict) -> dict:
                         image_b64, _ = await _fetch_image(
                             sched.get("image_source", "freepik_flux"), keyword, article["title"], img_prompt_daily
                         )
+
+                        # Mark as 'publishing' BEFORE calling WP — safety net against DB failure after publish
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("UPDATE domain_keywords SET status='publishing' WHERE id=?", (kw_row["id"],))
+                            await db.commit()
 
                         _art = article  # capture for lambda
                         async def _do_publish_daily():

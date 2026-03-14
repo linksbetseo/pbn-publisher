@@ -20,6 +20,7 @@ import os
 import random
 import re
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -466,6 +467,72 @@ def _inject_internal_links(html: str, published_posts: list[dict], topic: str, l
     return html
 
 
+# ── Authority outbound links — natural editorial link profile ─────────────────
+_AUTHORITY_DOMAINS_PL = [
+    ("pl.wikipedia.org", "Wikipedia"),
+    ("stat.gov.pl", "GUS"),
+    ("biznes.gov.pl", "Biznes.gov.pl"),
+    ("gov.pl", "Gov.pl"),
+    ("europa.eu", "Europa.eu"),
+]
+_AUTHORITY_DOMAINS_EN = [
+    ("en.wikipedia.org", "Wikipedia"),
+    ("scholar.google.com", "Google Scholar"),
+    ("data.gov", "Data.gov"),
+    ("europa.eu", "Europa.eu"),
+    ("who.int", "WHO"),
+]
+_AUTH_CONTEXTS_PL = [
+    lambda lnk: f" Więcej informacji na ten temat można znaleźć na {lnk}.",
+    lambda lnk: f" Zagadnienie to szerzej opisuje {lnk}.",
+    lambda lnk: f" Źródło: {lnk}.",
+    lambda lnk: f" Podstawowe informacje prezentuje {lnk}.",
+]
+_AUTH_CONTEXTS_EN = [
+    lambda lnk: f" More background on this topic is available at {lnk}.",
+    lambda lnk: f" For additional context, see {lnk}.",
+    lambda lnk: f" Source: {lnk}.",
+    lambda lnk: f" Basic information is presented at {lnk}.",
+]
+
+
+def _inject_authority_links(html: str, topic: str, language: str = "pl") -> str:
+    """Inject 1-2 dofollow outbound links to authority domains for natural link profile."""
+    paragraphs = re.findall(r'<p>.*?</p>', html, re.DOTALL)
+    if len(paragraphs) < 6:
+        return html
+
+    pool = _AUTHORITY_DOMAINS_PL if language == "pl" else _AUTHORITY_DOMAINS_EN
+    contexts = _AUTH_CONTEXTS_PL if language == "pl" else _AUTH_CONTEXTS_EN
+    count = random.choice([1, 1, 2])  # ~67% one link, ~33% two links
+    picked = random.sample(pool, min(count, len(pool)))
+
+    topic_slug = urllib.parse.quote(topic.replace(" ", "_"), safe="/_-")
+    # Place in last third of article (different zone from client links in first third)
+    safe_start = len(paragraphs) * 2 // 3
+    safe_end = len(paragraphs) - 2
+    if safe_end <= safe_start:
+        return html
+
+    for i, (domain, label) in enumerate(picked):
+        idx = safe_start + i
+        if idx >= safe_end or idx >= len(paragraphs):
+            break
+        para = paragraphs[idx]
+        if 'href=' in para:
+            continue
+        if domain.endswith("wikipedia.org"):
+            href = f"https://{domain}/wiki/{topic_slug}"
+        else:
+            href = f"https://{domain}"
+        link = f'<a href="{href}">{label}</a>'
+        ctx = random.choice(contexts)
+        new_para = para[:-4] + ctx(link) + "</p>"
+        html = html.replace(para, new_para, 1)
+
+    return html
+
+
 # Anchor text rotation pools — reduces footprint, more natural link profile
 _ANCHOR_GENERIC_PL = ["tutaj", "sprawdź", "dowiedz się więcej", "więcej informacji", "przeczytaj więcej", "na tej stronie"]
 _ANCHOR_GENERIC_EN = ["here", "check it out", "learn more", "find out more", "read more", "on this page"]
@@ -598,8 +665,8 @@ async def generate_article(
 
     # FIX #3: target 10-15% ABOVE competitor avg (beat not match), cap at 3000 to avoid fluff
     target_words = max(800, min(3000, int(avg_words * 1.12)))
-    # FIX #4: tighter density range — 0.8-2.5% optimal per Google leak (not 0.5-3.0)
-    target_density = round(max(0.8, min(2.5, avg_density)), 1)
+    # FIX #4: tighter density range — 0.8-1.8% sweet spot (enrichment blocks add ~0.2-0.5%)
+    target_density = round(max(0.8, min(1.8, avg_density)), 1)
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
     serp_block = f"\n\n[SEO Scraped Info — top 3 konkurentów]\n{serp_text}" if serp_text else ""
 
@@ -884,7 +951,8 @@ async def generate_article(
                     f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
                     f"Nagłówek sekcji: '{heading}'\n"
                     f"Intencja: {intent_analysis}\n"
-                    f"Cel: ~{words_per_section} słów, użyj '{topic}' ~{kw_per_section}x{lsi_section_block}{_entity_block}\n"
+                    f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian naturalnie w tekście (ok. {kw_per_section}x łącznie). "
+                    f"Preferuj odmiany i synonimy zamiast dokładnego powtarzania.{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
                     f"Pisz ekspercko: konkretne fakty, liczby, przykłady. Unikaj ogólników.{custom_block}"
                 )
@@ -893,7 +961,8 @@ async def generate_article(
                     f"Write section for '{title}' (keyword: '{topic}').\n"
                     f"Section heading: '{heading}'\n"
                     f"Intent: {intent_analysis}\n"
-                    f"Target: ~{words_per_section} words, use '{topic}' ~{kw_per_section}x{lsi_section_block}{_entity_block}\n"
+                    f"Target: ~{words_per_section} words. Use '{topic}' or its semantic variations naturally throughout (about {kw_per_section}x total). "
+                    f"Prefer synonyms and paraphrases over exact repetition.{lsi_section_block}{_entity_block}\n"
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
                     f"Write expertly: specific facts, numbers, examples. Avoid vague generalities.{custom_block}"
                 )
@@ -1127,6 +1196,9 @@ async def generate_article(
     if published_posts:
         content = _inject_internal_links(content, published_posts, topic, language=language)
 
+    # Inject 1-2 authority outbound links (Wikipedia, .gov) for natural link profile
+    content = _inject_authority_links(content, topic, language=language)
+
     # SEO #130: "Related articles" section at bottom — 5 published posts for interlinking
     if published_posts:
         # Pick up to 5 posts that are NOT the current topic
@@ -1188,8 +1260,9 @@ async def generate_article(
     # block types, not from raw <h3>/<p> HTML. Inject it explicitly for rich snippets.
     schema_blocks = []
 
+    _include_faq_schema = random.random() < 0.15  # Only 15% of articles get FAQPage schema — avoids schema spam
     faq_pairs = re.findall(r'<h3[^>]*>(.*?)</h3>\s*<p>(.*?)</p>', content, re.DOTALL | re.IGNORECASE)
-    if faq_pairs and len(faq_pairs) >= 3:
+    if _include_faq_schema and faq_pairs and len(faq_pairs) >= 3:
         faq_ld = {
             "@context": "https://schema.org",
             "@type": "FAQPage",
@@ -1209,24 +1282,6 @@ async def generate_article(
 
     # Article JSON-LD — confirmed ranking signal (Google API leak: siteAuthority + entity signals)
     _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    # Author entity pool — consistent per domain for E-E-A-T entity building
-    # SEO #61: expanded author pool for E-E-A-T entity diversity
-    _author_pool_pl = [
-        {"name": "Redakcja", "description": "Zespół ekspertów i specjalistów"},
-        {"name": "Ekspert Tematyczny", "description": "Specjalista z wieloletnim doświadczeniem"},
-        {"name": "Zespół Redakcyjny", "description": "Redaktorzy i autorzy portalu"},
-        {"name": "Dział Analiz", "description": "Analitycy i badacze tematyczni"},
-        {"name": "Centrum Wiedzy", "description": "Specjaliści ds. treści i edukacji"},
-    ]
-    _author_pool_en = [
-        {"name": "Editorial Team", "description": "Team of experts and specialists"},
-        {"name": "Subject Matter Expert", "description": "Specialist with years of experience"},
-        {"name": "Staff Writers", "description": "Professional writers and editors"},
-        {"name": "Research Desk", "description": "Research analysts and topic experts"},
-        {"name": "Knowledge Center", "description": "Content and education specialists"},
-    ]
-    _author = random.choice(_author_pool_pl if lang_pl else _author_pool_en)
-
     # SEO #62 + SEO #118: publisher should be PBN domain, not client domain (avoids footprint)
     # client_domain is the money site — publisher should be the PBN domain where article is hosted
     _publisher_name = "Publisher"
@@ -1234,9 +1289,13 @@ async def generate_article(
     if _pub_src and _pub_src.strip():
         _publisher_name = _pub_src.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
 
-    # SEO #120: author URL for E-E-A-T (Google premiuje artykuły z profilem autora)
-    _author_slug = re.sub(r'[^a-z0-9]+', '-', _author["name"].lower()).strip('-')
-    _author_base = _pub_src.replace("https://", "").replace("http://", "").rstrip("/") if _pub_src else ""
+    # Use Organization (not Person) — PBN articles are published by the site, not fake individuals
+    _author_entity: dict[str, str] = {
+        "@type": "Organization",
+        "name": _publisher_name,
+    }
+    if _pub_src and _pub_src.strip():
+        _author_entity["url"] = clean_url(_pub_src)
 
     # SEO #101: extract first image from content for Article schema image field
     _first_img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE)
@@ -1249,12 +1308,7 @@ async def generate_article(
         "description": excerpt[:155] if excerpt else "",
         "datePublished": _now_iso,
         "dateModified": _now_iso,
-        "author": {
-            "@type": "Person",
-            "name": _author["name"],
-            "description": _author["description"],
-            "url": f"https://{_author_base}/author/{_author_slug}" if _author_base else f"/author/{_author_slug}",
-        },
+        "author": _author_entity,
         "publisher": {
             "@type": "Organization",
             "name": _publisher_name,
@@ -1369,8 +1423,8 @@ async def generate_article(
 
     # FIX #11: compute keyword density of final article for quality monitoring
     final_density = _keyword_density(content, topic)
-    if final_density < 0.5 or final_density > 3.0:
-        logger.warning(f"[Article] KW density out of range: {final_density}% for '{topic}'")
+    if final_density < 0.5 or final_density > 2.0:
+        logger.warning(f"[Article] KW density out of range: {final_density:.2f}% for '{topic}'")
 
     # SEO #19: expand tags — LSI + pillar label + intent type for richer WP taxonomy
     _all_tags = lsi_terms[:7]  # 7 LSI tags (was 5)
