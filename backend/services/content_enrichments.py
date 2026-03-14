@@ -37,30 +37,30 @@ from services.article_helpers import slugify_heading as _slugify_heading
 
 logger = logging.getLogger(__name__)
 
-# ── Instytucjonalne źródła (zamiast fikcyjnych ekspertów — E-E-A-T) ───────────
-_INSTITUTIONAL_SOURCES_PL = [
-    "GUS (Główny Urząd Statystyczny)",
-    "NIK (Najwyższa Izba Kontroli)",
-    "UOKiK (Urząd Ochrony Konkurencji i Konsumentów)",
-    "ZUS (Zakład Ubezpieczeń Społecznych)",
-    "NFZ (Narodowy Fundusz Zdrowia)",
-    "Ministerstwo Finansów",
-    "Rzecznik Finansowy",
-    "PARP (Polska Agencja Rozwoju Przedsiębiorczości)",
-    "Komisja Nadzoru Finansowego (KNF)",
-    "Polska Izba Ubezpieczeń (PIU)",
+# ── Generic source types (no false attribution to real institutions) ───────────
+_GENERIC_SOURCES_PL = [
+    "badania branżowe",
+    "dane rynkowe",
+    "analizy sektorowe",
+    "obserwacje ekspertów",
+    "opracowania tematyczne",
+    "dostępne statystyki",
+    "raporty branżowe",
+    "analiza danych",
+    "przegląd literatury",
+    "dostępne źródła",
 ]
-_INSTITUTIONAL_SOURCES_EN = [
-    "Bureau of Labor Statistics (BLS)",
-    "Federal Trade Commission (FTC)",
-    "National Institute of Standards and Technology (NIST)",
-    "Centers for Disease Control and Prevention (CDC)",
-    "Consumer Financial Protection Bureau (CFPB)",
-    "U.S. Small Business Administration (SBA)",
-    "World Health Organization (WHO)",
-    "International Monetary Fund (IMF)",
-    "Organisation for Economic Co-operation and Development (OECD)",
-    "National Institutes of Health (NIH)",
+_GENERIC_SOURCES_EN = [
+    "industry research",
+    "market data",
+    "sector analysis",
+    "expert observations",
+    "subject matter reviews",
+    "available statistics",
+    "industry reports",
+    "data analysis",
+    "literature review",
+    "available sources",
 ]
 
 # ── Anti-footprint CSS variation ──────────────────────────────────────────────
@@ -444,17 +444,19 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
     _enrich_model = await get_gpt_model()
     try:
         if element == "expert_quote":
-            source = random.choice(_INSTITUTIONAL_SOURCES_PL if lang_pl else _INSTITUTIONAL_SOURCES_EN)
+            source = random.choice(_GENERIC_SOURCES_PL if lang_pl else _GENERIC_SOURCES_EN)
             prompt = (
-                f"Napisz krótki cytat lub dane statystyczne (2-3 zdania) o temacie: '{topic}', "
-                f"powołując się na {source} lub inną realną polską instytucję powiązaną z tematem. "
-                f"Format: 'Według [Instytucja], ...' lub '[Instytucja] podaje, że...'. "
-                f"Konkretne dane, bez cudzysłowów. Jeśli nie znasz dokładnych danych — podaj przedziały z oznaczeniem 'szacunkowo'."
+                f"Napisz krótką obserwację lub trend (2-3 zdania) związany z tematem: '{topic}'. "
+                f"Kontekst: {source}. "
+                f"Format: 'Według dostępnych danych, ...' lub 'Analizy wskazują, że...'. "
+                f"Podaj ogólne trendy lub przedziały wartości, nie konkretne liczby. "
+                f"Nie przypisuj danych do konkretnych instytucji."
                 if lang_pl else
-                f"Write a short statistic or data point (2-3 sentences) about '{topic}', "
-                f"citing {source} or another real institution relevant to the topic. "
-                f"Format: 'According to [Institution], ...' Specific data only, no quotation marks. "
-                f"If unsure about exact numbers, use ranges and mark as 'estimated'."
+                f"Write a short observation or trend (2-3 sentences) about '{topic}'. "
+                f"Context: {source}. "
+                f"Format: 'According to available data, ...' or 'Analysis suggests that...'. "
+                f"Provide general trends or value ranges, not specific numbers. "
+                f"Do not attribute data to specific institutions."
             )
             resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=150)
             # FIX #24: also strip em-dash, newlines, GPT preamble from quote

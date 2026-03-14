@@ -2033,13 +2033,26 @@ async def run_daily_all():
         ) as cur:
             schedules = [dict(r) for r in await cur.fetchall()]
 
-    results = await asyncio.gather(
-        *[_run_schedule_daily(sched) for sched in schedules],
-        return_exceptions=True,
-    )
-    # Unwrap any exceptions into error entries
+    # Anti-fingerprint: stagger publishing across domains with random delays
+    # Each domain publishes 3-15 minutes after the previous one
+    results = []
+    # Shuffle schedule order so domain publish order varies daily
+    shuffled = list(schedules)
+    random.shuffle(shuffled)
+    for i, sched in enumerate(shuffled):
+        if i > 0:
+            delay_minutes = random.uniform(3, 15)
+            logger.info(f"[Daily] Stagger delay: {delay_minutes:.1f}min before {sched['domain']}")
+            await asyncio.sleep(delay_minutes * 60)
+        try:
+            res = await _run_schedule_daily(sched)
+            results.append((sched, res))
+        except Exception as e:
+            logger.error(f"[Daily] Schedule {sched['id']} ({sched['domain']}) crashed: {e}")
+            results.append((sched, e))
+
     final = []
-    for sched, res in zip(schedules, results):
+    for sched, res in results:
         if isinstance(res, Exception):
             logger.error(f"[Daily] Schedule {sched['id']} ({sched['domain']}) crashed: {res}")
             final.append({"domain": sched["domain"], "schedule_id": sched["id"], "published": 0, "failed": 0, "error": str(res)})

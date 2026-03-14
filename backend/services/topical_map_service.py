@@ -624,8 +624,8 @@ async def _gpt_relevance_filter(
                 if len(verdicts) >= len(batch):
                     verdicts = verdicts[:len(batch)]
                 elif len(verdicts) < len(batch):
-                    # Pad with 1s (keep by default if GPT response is short)
-                    verdicts.extend([1] * (len(batch) - len(verdicts)))
+                    logger.warning(f"[TopicalMap] GPT returned {len(verdicts)} verdicts for batch of {len(batch)} — padding with REJECT (0)")
+                    verdicts.extend([0] * (len(batch) - len(verdicts)))
 
                 kept = 0
                 for kw, v in zip(batch, verdicts):

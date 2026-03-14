@@ -285,6 +285,15 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
             lambda lnk: f" Dodatkowe zasoby: {lnk}.",
             lambda lnk: f" Polecamy również stronę {lnk}.",
             lambda lnk: f" Temat szczegółowo omawia {lnk}.",
+            lambda lnk: f" Jak podaje {lnk}, jest to kluczowy aspekt zagadnienia.",
+            lambda lnk: f" Przeczytaj pełny przewodnik: {lnk}.",
+            lambda lnk: f" Na stronie {lnk} można znaleźć uzupełniające informacje.",
+            lambda lnk: f" Zgodnie z materiałami opublikowanymi na {lnk}, warto zwrócić uwagę na kilka kwestii.",
+            lambda lnk: f" Więcej danych na ten temat publikuje {lnk}.",
+            lambda lnk: f" Obszerną analizę tego zagadnienia przedstawia {lnk}.",
+            lambda lnk: f" Praktyczne wskazówki znajdziesz również na {lnk}.",
+            lambda lnk: f" Powiązane materiały zebrano na stronie {lnk}.",
+            lambda lnk: f" {lnk} prezentuje dodatkowe dane, które mogą okazać się przydatne.",
         ]
     else:
         _LINK_CONTEXTS = [
@@ -294,6 +303,15 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
             lambda lnk: f" Additional resources: {lnk}.",
             lambda lnk: f" Also check out {lnk}.",
             lambda lnk: f" This topic is covered in depth at {lnk}.",
+            lambda lnk: f" As reported by {lnk}, this is a key consideration.",
+            lambda lnk: f" Read the full guide: {lnk}.",
+            lambda lnk: f" You can find additional insights at {lnk}.",
+            lambda lnk: f" According to {lnk}, there are several factors worth noting.",
+            lambda lnk: f" For a broader perspective, see {lnk}.",
+            lambda lnk: f" A comprehensive breakdown is available at {lnk}.",
+            lambda lnk: f" {lnk} offers a useful overview of related data.",
+            lambda lnk: f" Practical tips on this subject can be found at {lnk}.",
+            lambda lnk: f" Further reading on this topic: {lnk}.",
         ]
     for i, link in enumerate(links):
         href_match = re.search(r'href=["\']([^"\']+)["\']', link)
@@ -530,25 +548,31 @@ async def generate_article(
             url = "https://" + url
         return url
 
-    # Anchor text for link 1: use exact anchor_text if explicitly provided by user.
-    # Rotation only happens when anchor equals the raw topic (autopilot default) — not when user typed it.
+    # Build anchor links — always rotate anchors, randomize dofollow/nofollow (never sponsored)
     anchors_info = ""
     if client_domain and client_domain.strip():
-        # Only rotate if anchor_text looks like an auto-generated default (same as topic or empty)
-        if not anchor_text or anchor_text.strip().lower() == topic.strip().lower():
-            rotated_anchor = _rotate_anchor(anchor_text or topic, client_domain, language)
+        # Always rotate anchors — natural variation prevents exact-match footprint
+        rotated_anchor = _rotate_anchor(anchor_text or topic, client_domain, language)
+        # ~70% dofollow (no rel), ~30% nofollow — natural link profile, NEVER sponsored
+        if random.random() < 0.7:
+            anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
         else:
-            rotated_anchor = anchor_text  # user provided explicit anchor — use as-is
-        # FIX #1: use "noopener noreferrer" with sponsored — correct rel combination
-        anchors_info = f'<a href="{clean_url(client_domain)}" rel="sponsored noopener noreferrer">{rotated_anchor}</a>'
+            anchors_info = f'<a href="{clean_url(client_domain)}" rel="nofollow noopener noreferrer">{rotated_anchor}</a>'
     if anchor_text2 and anchor_url2:
-        # FIX #2: rotate anchor for link 2 as well (was always exact match)
-        rotated2 = _rotate_anchor(anchor_text2, anchor_url2, language) if anchor_text2.strip().lower() == topic.strip().lower() else anchor_text2
-        anchors_info += f', <a href="{clean_url(anchor_url2)}" rel="sponsored noopener noreferrer">{rotated2}</a>'
+        # Always rotate anchor for link 2
+        rotated2 = _rotate_anchor(anchor_text2, anchor_url2, language)
+        if random.random() < 0.7:
+            anchors_info += f', <a href="{clean_url(anchor_url2)}">{rotated2}</a>'
+        else:
+            anchors_info += f', <a href="{clean_url(anchor_url2)}" rel="nofollow noopener noreferrer">{rotated2}</a>'
     if anchor_text3 and anchor_url3:
-        rotated3 = _rotate_anchor(anchor_text3, anchor_url3, language) if anchor_text3.strip().lower() == topic.strip().lower() else anchor_text3
-        anchors_info += f', <a href="{clean_url(anchor_url3)}" rel="sponsored noopener noreferrer">{rotated3}</a>'
-    # PBN inter-link: supporting page → pillar page (internal, no rotation)
+        # Always rotate anchor for link 3
+        rotated3 = _rotate_anchor(anchor_text3, anchor_url3, language)
+        if random.random() < 0.7:
+            anchors_info += f', <a href="{clean_url(anchor_url3)}">{rotated3}</a>'
+        else:
+            anchors_info += f', <a href="{clean_url(anchor_url3)}" rel="nofollow noopener noreferrer">{rotated3}</a>'
+    # PBN inter-link: supporting page → pillar page (internal silo, always dofollow, no rotation)
     if pillar_page_url and pillar_page_anchor:
         anchors_info += f', <a href="{clean_url(pillar_page_url)}">{pillar_page_anchor}</a>'
 
@@ -673,6 +697,13 @@ async def generate_article(
             f"- 'Co to jest [keyword] i jak [korzyść]?'\n"
             f"- '[X] najważniejszych faktów o [keyword]'\n"
             f"- '[Keyword]: wszystko co musisz wiedzieć'\n"
+            f"- '[Keyword] od A do Z — praktyczny poradnik'\n"
+            f"- 'Dlaczego [keyword] jest tak ważne? Wyjaśniamy'\n"
+            f"- '[Keyword] vs [alternatywa] — co wybrać?'\n"
+            f"- 'Najlepsze sposoby na [keyword] w {_current_year}'\n"
+            f"- '[Keyword] krok po kroku dla początkujących'\n"
+            f"- 'Prawda o [keyword] — obalamy mity'\n"
+            f"- '[X] błędów przy [keyword] których musisz unikać'\n"
             f"Tylko tytuł, bez cudzysłowów, bez markdown.{custom_block}"
         )
     else:
@@ -687,6 +718,13 @@ async def generate_article(
             f"- 'What is [keyword] and how does it [benefit]?'\n"
             f"- '[X] Key Facts About [keyword]'\n"
             f"- '[Keyword]: Everything You Need to Know'\n"
+            f"- '[Keyword] from A to Z — A Practical Guide'\n"
+            f"- 'Why [keyword] Matters More Than You Think'\n"
+            f"- '[Keyword] vs [alternative] — Which One Wins?'\n"
+            f"- 'Best Ways to [keyword] in {_current_year}'\n"
+            f"- '[Keyword] Step by Step for Beginners'\n"
+            f"- 'The Truth About [keyword] — Myths Debunked'\n"
+            f"- '[X] [Keyword] Mistakes You Must Avoid'\n"
             f"Only the title, no quotes, no markdown.{custom_block}"
         )
     title = await _gpt(
