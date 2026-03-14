@@ -575,13 +575,19 @@ async def _gpt_relevance_filter(
         "No explanations, no extra text."
     )
 
+    # Pre-compute seed tokens for coherence fallback
+    seed_toks = _seed_tokens(seed)
+
     relevant = []
     for i in range(0, len(keywords), batch_size):
         batch = keywords[i:i + batch_size]
         kw_list = "\n".join(f"{j+1}. {kw['keyword']}" for j, kw in enumerate(batch))
+        batch_num = i // batch_size + 1
 
-        for attempt in range(3):
+        gpt_ok = False
+        for attempt in range(5):
             try:
+                logger.info(f"[TopicalMap] GPT relevance batch {batch_num} attempt {attempt+1}, {len(batch)} keywords")
                 resp = await client.chat.completions.create(
                     model=model,
                     messages=[
@@ -592,9 +598,10 @@ async def _gpt_relevance_filter(
                     max_tokens=len(batch) * 3 + 20,
                 )
                 text = resp.choices[0].message.content.strip()
+                logger.info(f"[TopicalMap] GPT response batch {batch_num}: {text[:200]}")
+
                 # Parse JSON array from response
-                import re as _re
-                match = _re.search(r'\[[\d\s,]+\]', text)
+                match = re.search(r'\[[\d\s,]+\]', text)
                 if match:
                     verdicts = _json.loads(match.group())
                 else:
@@ -613,15 +620,25 @@ async def _gpt_relevance_filter(
                         relevant.append(kw)
                         kept += 1
 
-                logger.info(f"[TopicalMap] GPT relevance batch {i//batch_size+1}: {kept}/{len(batch)} kept")
+                logger.info(f"[TopicalMap] GPT relevance batch {batch_num}: {kept}/{len(batch)} kept")
+                gpt_ok = True
                 break
             except Exception as e:
-                if attempt == 2:
-                    logger.warning(f"[TopicalMap] GPT relevance filter failed, keeping batch: {e}")
-                    relevant.extend(batch)
+                logger.warning(f"[TopicalMap] GPT relevance batch {batch_num} attempt {attempt+1} failed: {e}")
+                if attempt == 4:
+                    # GPT completely failed — use coherence-based fallback instead of keeping everything
+                    logger.warning(f"[TopicalMap] GPT filter failed for batch {batch_num}, using coherence fallback (>=0.15)")
+                    for kw in batch:
+                        score = _coherence_score(kw["keyword"], seed_toks, seed)
+                        if score >= 0.15:
+                            relevant.append(kw)
                 else:
                     import random
                     await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+
+        # Small delay between batches to avoid rate limits
+        if i + batch_size < len(keywords):
+            await asyncio.sleep(1.0)
 
     logger.info(f"[TopicalMap] GPT relevance filter: {len(relevant)}/{len(keywords)} keywords kept")
     return relevant
