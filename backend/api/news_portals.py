@@ -298,6 +298,15 @@ async def ensure_tables():
             CREATE INDEX IF NOT EXISTS idx_news_sources_portal ON news_sources(portal_id);
             CREATE INDEX IF NOT EXISTS idx_news_clusters_portal ON news_clusters(portal_id, status);
         """)
+        # Migrate: add tone_of_voice + site_description columns if missing
+        async with db.execute("PRAGMA table_info(news_portals)") as cur:
+            cols = {r[1] for r in await cur.fetchall()}
+        if "tone_of_voice" not in cols:
+            await db.execute("ALTER TABLE news_portals ADD COLUMN tone_of_voice TEXT DEFAULT ''")
+        if "site_description" not in cols:
+            await db.execute("ALTER TABLE news_portals ADD COLUMN site_description TEXT DEFAULT ''")
+        if "main_keyword" not in cols:
+            await db.execute("ALTER TABLE news_portals ADD COLUMN main_keyword TEXT DEFAULT ''")
         await db.commit()
     _tables_ensured = True
 
@@ -566,6 +575,8 @@ async def list_portals():
                 np.id, np.name, np.my_domain_id, np.niche, np.language,
                 np.auto_publish, np.posts_per_day, np.check_interval_min,
                 np.active, np.created_at,
+                CASE WHEN COALESCE(np.tone_of_voice, '') != '' THEN 1 ELSE 0 END AS has_tone,
+                np.main_keyword,
                 md.domain AS domain_name,
                 (SELECT COUNT(*) FROM news_sources ns WHERE ns.portal_id = np.id) AS source_count,
                 (SELECT COUNT(*) FROM news_drafts nd WHERE nd.portal_id = np.id AND nd.status = 'pending') AS pending_count,
@@ -690,6 +701,252 @@ async def manual_autopilot_run():
     """Manually trigger one news autopilot cycle for all auto-publish portals."""
     result = await run_news_autopilot()
     return result
+
+
+@router.post("/generate-tone/{portal_id}")
+async def generate_tone_of_voice(portal_id: int):
+    """Generate Tone of Voice for a portal using n8n-style pipeline:
+    1. Parse domain content (DFS content_parsing)
+    2. Extract main keyword (GPT)
+    3. Generate customer profile (GPT)
+    4. SERP analysis for keyword (DFS)
+    5. Select top 5 competitor blogs (GPT)
+    6. Parse competitor content (DFS)
+    7. Mix tone of voice candidates (GPT)
+    8. Generate final Tone of Voice (GPT)
+    9. Generate site description (GPT)
+    """
+    import base64 as _b64
+    from config import DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
+
+    await ensure_tables()
+
+    # Load portal + domain
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM news_portals WHERE id=?", (portal_id,)) as cur:
+            portal = await cur.fetchone()
+        if not portal:
+            raise HTTPException(404, "Portal not found")
+        portal = dict(portal)
+        async with db.execute("SELECT * FROM my_domains WHERE id=?", (portal["my_domain_id"],)) as cur:
+            domain = await cur.fetchone()
+        if not domain:
+            raise HTTPException(404, "Domain not found")
+        domain = dict(domain)
+
+    domain_url = domain["domain"]
+    lang = portal.get("language", "pl")
+    lang_pl = lang == "pl"
+
+    dfs_ok = bool(DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD)
+    dfs_headers = {}
+    if dfs_ok:
+        creds = _b64.b64encode(f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()).decode()
+        dfs_headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+
+    steps_log = []
+
+    # ── STEP 1: Parse domain content via DFS ──
+    content_text = ""
+    if dfs_ok:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.post(
+                    "https://api.dataforseo.com/v3/on_page/content_parsing/live",
+                    json=[{"url": f"https://{domain_url}/", "enable_javascript": False}],
+                    headers=dfs_headers,
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                for task in data.get("tasks", []):
+                    for result in task.get("result", []) or []:
+                        for item in result.get("items", []) or []:
+                            pc = item.get("page_content", {})
+                            for topic in pc.get("main_topic", []) or []:
+                                h_title = topic.get("h_title", "")
+                                texts = [t.get("text", "") for t in topic.get("primary_content", []) or []]
+                                content_text += f"H{topic.get('level', '')} - {h_title}\n" + "\n".join(texts) + "\n\n"
+            steps_log.append(f"Content parsed: {len(content_text)} chars")
+        except Exception as e:
+            steps_log.append(f"Content parsing failed: {e}")
+
+    if not content_text:
+        content_text = f"Domena: {domain_url}, nisza: {portal.get('niche', '')}"
+        steps_log.append("Using fallback content (domain + niche)")
+
+    # ── STEP 2: Extract main keyword ──
+    kw_system = (
+        "Analizuj podany content ze strony internetowej i zidentyfikuj główne słowo kluczowe. "
+        "Podaj TYLKO jedno słowo kluczowe, bez cudzysłowów, bez wyjaśnień."
+    ) if lang_pl else (
+        "Analyze the website content and identify the main keyword. "
+        "Return ONLY one keyword, no quotes, no explanation."
+    )
+    main_keyword = await _news_gpt(kw_system, f"Content:\n{content_text[:3000]}", temperature=0.4, max_tokens=50)
+    main_keyword = main_keyword.strip().strip('"').strip("'")
+    steps_log.append(f"Main keyword: {main_keyword}")
+
+    # ── STEP 3: Customer profile ──
+    profile_prompt = (
+        f"Stwórz profil klienta dla strony {domain_url} ({portal.get('niche', '')}). Uwzględnij:\n"
+        f"1. Przegląd typowego klienta\n2. Demografię\n3. Wartości i postawy\n"
+        f"4. Problemy i bolączki\n5. Kluczowe motywacje\n6. Proces decyzyjny\n"
+        f"7. Czego szukają na tej stronie\nBądź konkretny i szczegółowy."
+    ) if lang_pl else (
+        f"Create a customer profile for {domain_url} ({portal.get('niche', '')}). Include:\n"
+        f"1. Typical client overview\n2. Demographics\n3. Values and attitudes\n"
+        f"4. Problems and pain points\n5. Key motivations\n6. Decision process\n"
+        f"7. What they're looking for\nBe specific and detailed."
+    )
+    customer_profile = await _news_gpt(
+        "Jesteś ekspertem od marketingu i analizy klientów." if lang_pl else "You are a marketing and customer analysis expert.",
+        profile_prompt, temperature=0.6, max_tokens=1500,
+    )
+    steps_log.append(f"Customer profile: {len(customer_profile)} chars")
+
+    # ── STEP 4: SERP analysis for keyword ──
+    competitor_content = []
+    if dfs_ok and main_keyword:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.post(
+                    "https://api.dataforseo.com/v3/serp/google/organic/live/advanced",
+                    json=[{"keyword": main_keyword, "location_name": "Poland", "language_name": "Polish", "device": "desktop", "depth": 10}],
+                    headers=dfs_headers,
+                )
+            serp_urls = []
+            if resp.status_code == 200:
+                data = resp.json()
+                for task in data.get("tasks", []):
+                    for result in task.get("result", []) or []:
+                        for item in result.get("items", []) or []:
+                            if item.get("type") == "organic" and item.get("url"):
+                                serp_urls.append(item["url"])
+            steps_log.append(f"SERP results: {len(serp_urls)} URLs")
+
+            # ── STEP 5: Select top 5 blog competitors ──
+            if serp_urls:
+                select_system = (
+                    "Wybierz 5 najlepszych URL-i z blogów/portali informacyjnych. "
+                    "Pomiń Wikipedię, strony rządowe, sklepy. Zwróć TYLKO URL-e oddzielone przecinkami."
+                ) if lang_pl else (
+                    "Select 5 best blog/news URLs. Skip Wikipedia, government, shops. "
+                    "Return ONLY URLs separated by commas."
+                )
+                selected = await _news_gpt(
+                    select_system,
+                    f"Keyword: {main_keyword}\nURLs:\n" + "\n".join(serp_urls[:15]),
+                    temperature=0.2, max_tokens=500,
+                )
+                comp_urls = [u.strip() for u in selected.split(",") if u.strip().startswith("http")][:5]
+                steps_log.append(f"Selected {len(comp_urls)} competitors")
+
+                # ── STEP 6: Parse competitor content ──
+                for comp_url in comp_urls:
+                    try:
+                        async with httpx.AsyncClient(timeout=20) as c:
+                            resp = await c.post(
+                                "https://api.dataforseo.com/v3/on_page/content_parsing/live",
+                                json=[{"url": comp_url, "enable_javascript": False}],
+                                headers=dfs_headers,
+                            )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            comp_text = ""
+                            for task in data.get("tasks", []):
+                                for result in task.get("result", []) or []:
+                                    for item in result.get("items", []) or []:
+                                        pc = item.get("page_content", {})
+                                        for topic in pc.get("main_topic", []) or []:
+                                            texts = [t.get("text", "") for t in topic.get("primary_content", []) or []]
+                                            comp_text += f"H{topic.get('level', '')} - {topic.get('h_title', '')}\n" + "\n".join(texts) + "\n\n"
+                            if comp_text:
+                                competitor_content.append(comp_text[:2000])
+                    except Exception:
+                        pass
+                steps_log.append(f"Parsed {len(competitor_content)} competitor pages")
+        except Exception as e:
+            steps_log.append(f"SERP/competitor analysis failed: {e}")
+
+    # ── STEP 7: Mix tone of voice candidates ──
+    mix_system = (
+        "Twoim zadaniem jest wymieszanie tonów głosu i stworzenie 15-20 mieszanych tonów "
+        "pasujących do siebie. Nie dodawaj nic oprócz mieszanek. Lista tonów do mieszania:\n"
+        "Accessible, Conversational, Ambitious, Concise, Assertive, Authentic, Authoritative, "
+        "Educational, Supportive, Bold, Clear, Insightful, Inspiring, Commanding, Confident, "
+        "Compelling, Aspirational, Polished, Considerate, Consultative, Convincing, Relatable, "
+        "Curious, Creative, Decisive, Dependable, Dynamic, Informative, Energetic, Optimistic, "
+        "Approachable, Evaluative, Expository, Systematic, Functional"
+    )
+    mixed_tones = await _news_gpt(mix_system, "Mix these tones.", temperature=0.6, max_tokens=800)
+    steps_log.append("Mixed tones generated")
+
+    # ── STEP 8: Generate final Tone of Voice ──
+    comp_text_combined = "\n---\n".join(competitor_content[:5]) if competitor_content else "Brak danych konkurencji"
+
+    tone_system = (
+        "Stwórz jasną instrukcję Tone of Voice dopasowaną do strony internetowej. "
+        "Ton powinien być zgodny z treścią strony, wynikami SERP i profilem klienta.\n\n"
+        "Wynik powinien zawierać:\n"
+        "- Nazwa i opis tonu\n"
+        "- Wytyczne pisania (styl, słownictwo, emocje)\n"
+        "- Jak ton angażuje grupę docelową\n"
+        "- Wskazówki spójności między artykułami\n\n"
+        "Pisz po polsku, konkretnie, jako instrukcję dla AI piszącego artykuły."
+    ) if lang_pl else (
+        "Create a clear Tone of Voice instruction tailored for a website. "
+        "The tone should align with the website content, SERP results, and customer profile.\n\n"
+        "Output should include:\n"
+        "- Tone name and description\n"
+        "- Writing guidelines (style, vocabulary, emotions)\n"
+        "- How the tone engages the target audience\n"
+        "- Consistency cues across articles\n\n"
+        "Write concretely, as an instruction for AI writing articles."
+    )
+
+    tone_user = (
+        f"<tone_candidates>\n{mixed_tones}\n</tone_candidates>\n\n"
+        f"<website_content>\n{content_text[:2000]}\n</website_content>\n\n"
+        f"<competitor_content>\n{comp_text_combined[:3000]}\n</competitor_content>\n\n"
+        f"<customer_profile>\n{customer_profile[:2000]}\n</customer_profile>\n\n"
+        f"<about_website>\nDomena: {domain_url}, Nisza: {portal.get('niche', '')}\n</about_website>"
+    )
+
+    tone_of_voice = await _news_gpt(tone_system, tone_user, temperature=0.6, max_tokens=2000)
+    steps_log.append(f"Tone of Voice generated: {len(tone_of_voice)} chars")
+
+    # ── STEP 9: Generate site description ──
+    desc_system = (
+        "Napisz krótki opis strony internetowej (max 400 znaków) — o czym jest ta strona. "
+        "Opis jest instrukcją dla bota AI, który później ma pisać content w tematyce tej strony."
+    ) if lang_pl else (
+        "Write a short website description (max 400 chars) — what this site is about. "
+        "This description is an instruction for an AI bot writing content about this site's topic."
+    )
+    site_description = await _news_gpt(
+        desc_system, f"Content:\n{content_text[:2000]}", temperature=0.6, max_tokens=300,
+    )
+    steps_log.append(f"Site description: {len(site_description)} chars")
+
+    # ── Save to DB ──
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE news_portals SET tone_of_voice=?, site_description=?, main_keyword=? WHERE id=?",
+            (tone_of_voice, site_description, main_keyword, portal_id),
+        )
+        await db.commit()
+
+    logger.info(f"[ToneOfVoice] Generated for portal {portal_id} ({domain_url}): keyword={main_keyword}")
+
+    return {
+        "portal_id": portal_id,
+        "domain": domain_url,
+        "main_keyword": main_keyword,
+        "tone_of_voice": tone_of_voice,
+        "site_description": site_description,
+        "steps": steps_log,
+    }
 
 
 @router.post("/bulk-create")
@@ -1217,6 +1474,8 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
     portal_language = portal.get("language", "pl")
     portal_niche = portal.get("niche", "")
     portal_editorial = portal.get("editorial_prompt", "")
+    portal_tone = portal.get("tone_of_voice", "")
+    portal_site_desc = portal.get("site_description", "")
     lang_pl = portal_language == "pl"
     _current_year = datetime.now(timezone.utc).year
 
@@ -1224,6 +1483,10 @@ async def generate_draft(portal_id: int, body: GenerateRequest):
     editorial_ctx = ""
     if portal_editorial:
         editorial_ctx = f"\nWytyczne redakcji: {portal_editorial}" if lang_pl else f"\nEditorial guidelines: {portal_editorial}"
+    if portal_tone:
+        editorial_ctx += f"\n\nTONE OF VOICE (stosuj ten ton w całym artykule):\n{portal_tone[:1500]}" if lang_pl else f"\n\nTONE OF VOICE (apply this tone throughout the article):\n{portal_tone[:1500]}"
+    if portal_site_desc:
+        editorial_ctx += f"\n\nOpis strony: {portal_site_desc}" if lang_pl else f"\n\nSite description: {portal_site_desc}"
     niche_ctx = ""
     if portal_niche:
         niche_ctx = f"\nNisza tematyczna: {portal_niche}" if lang_pl else f"\nThematic niche: {portal_niche}"

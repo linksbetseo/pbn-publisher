@@ -969,6 +969,8 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
   const [confirmDelete, setConfirmDelete] = useState(null)
   const [autopilotStatus, setAutopilotStatus] = useState({})
   const [togglingAuto, setTogglingAuto] = useState(null)
+  const [generatingTovId, setGeneratingTovId] = useState(null)
+  const [tovResult, setTovResult] = useState(null)
 
   // Load autopilot status
   useEffect(() => {
@@ -1050,6 +1052,20 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
     } catch {}
   }
 
+  const handleGenerateTov = async (portalId) => {
+    setGeneratingTovId(portalId)
+    setTovResult(null)
+    try {
+      const res = await api.post(`/api/news-portals/generate-tone/${portalId}`, {}, { timeout: 300000 })
+      setTovResult({ portalId, success: true, message: 'Tone of Voice wygenerowany!' })
+      onRefresh()
+    } catch (err) {
+      setTovResult({ portalId, success: false, message: err.response?.data?.detail || 'Błąd generowania ToV' })
+    }
+    setGeneratingTovId(null)
+    setTimeout(() => setTovResult(null), 10000)
+  }
+
   if (loading) {
     return (
       <div className="flex justify-center py-16">
@@ -1085,13 +1101,15 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
         {portals.map(p => (
           <div key={p.id} className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden relative">
             {/* Loading overlay */}
-            {(fetchingId === p.id || generatingId === p.id) && (
+            {(fetchingId === p.id || generatingId === p.id || generatingTovId === p.id) && (
               <div className="absolute inset-0 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm z-10 flex flex-col items-center justify-center gap-3">
                 <Spinner className="w-8 h-8 text-blue-600" />
                 <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  {fetchingId === p.id ? 'Pobieram newsy z RSS...' : 'Generuję artykuły AI...'}
+                  {fetchingId === p.id ? 'Pobieram newsy z RSS...' : generatingTovId === p.id ? 'Generuję Tone of Voice...' : 'Generuję artykuły AI...'}
                 </p>
-                <p className="text-xs text-gray-400 dark:text-gray-500">To może potrwać kilka minut</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                  {generatingTovId === p.id ? 'Analiza domeny, konkurencji i stylu (~1 min)' : 'To może potrwać kilka minut'}
+                </p>
               </div>
             )}
             {/* Card header */}
@@ -1105,6 +1123,9 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0 ml-2">
                   {p.niche && <Badge color={nicheColor(p.niche)}>{p.niche}</Badge>}
+                  {p.has_tone ? (
+                    <Badge color="green">ToV</Badge>
+                  ) : null}
                   <button
                     onClick={() => handleToggle(p)}
                     className={`relative w-10 h-5 rounded-full transition-colors ${p.active ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
@@ -1206,6 +1227,17 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
                   </svg>
                 )}
               </button>
+              {!p.has_tone && (
+                <button onClick={() => handleGenerateTov(p.id)} disabled={generatingTovId === p.id}
+                  title="Generuj Tone of Voice"
+                  className="p-2 text-gray-400 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded-lg transition-colors disabled:opacity-50">
+                  {generatingTovId === p.id ? <Spinner className="w-4 h-4" /> : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
+                    </svg>
+                  )}
+                </button>
+              )}
               <div className="flex-1" />
               <button onClick={() => setConfirmDelete(p.id)} title="Usuń"
                 className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors">
@@ -1262,6 +1294,22 @@ function PortalsTab({ portals, domains, loading, onRefresh, onOpenForm, onOpenSo
               )}
             </div>
             <button onClick={() => setAutoResult(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 ml-3">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ToV result banner */}
+      {tovResult && (
+        <div className={`mt-4 p-4 rounded-xl border ${tovResult.success ? 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800' : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'}`}>
+          <div className="flex items-center justify-between">
+            <p className={`text-sm font-medium ${tovResult.success ? 'text-orange-800 dark:text-orange-300' : 'text-red-700 dark:text-red-300'}`}>
+              {tovResult.message}
+            </p>
+            <button onClick={() => setTovResult(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 ml-3">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
