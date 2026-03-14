@@ -88,7 +88,7 @@ _map_generating: dict = {}
 _MAP_GEN_TIMEOUT = 600  # 10 minutes max
 
 # ── Tone of voice ────────────────────────────────────────────────────────────
-_TONE_MAP = {
+_TONE_PRESETS = {
     "ekspert": "Pisz w tonie eksperckim, autorytatywnym.",
     "przyjazny": "Pisz w tonie przyjaznym, doradczym.",
     "formalny": "Pisz w tonie formalnym, biznesowym.",
@@ -96,12 +96,274 @@ _TONE_MAP = {
 }
 
 def _effective_prompt(sched: dict) -> str:
-    """Build custom_prompt with tone_of_voice prefix."""
+    """Build custom_prompt with tone_of_voice prefix.
+
+    If tone_of_voice is a short preset key (ekspert/przyjazny/…) → use preset sentence.
+    If it's a long AI-generated tone instruction → inject verbatim.
+    """
     base = (sched.get("custom_prompt") or "").strip()
     tone = (sched.get("tone_of_voice") or "").strip()
-    if tone and tone in _TONE_MAP:
-        return f"{_TONE_MAP[tone]} {base}".strip()
-    return base
+    if not tone:
+        return base
+    # Short preset key?
+    if tone in _TONE_PRESETS:
+        return f"{_TONE_PRESETS[tone]} {base}".strip()
+    # Long AI-generated tone instruction — inject as-is
+    return f"{tone}\n\n{base}".strip()
+
+
+async def _gpt_call(system: str, user: str, temperature: float = 0.5,
+                     max_tokens: int = 1500) -> str:
+    """Simple GPT helper with retry for autopilot tone generation."""
+    from openai import AsyncOpenAI as _AO
+    from services.openai_service import get_gpt_model
+    client = _AO()
+    model = await get_gpt_model()
+    for attempt in range(3):
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            if attempt == 2:
+                raise
+            wait = 2 ** attempt + random.uniform(0, 1.5)
+            logger.warning(f"[AutopilotGPT] attempt {attempt+1} failed: {e} — retrying in {wait:.1f}s")
+            await asyncio.sleep(wait)
+    return ""
+
+
+async def _generate_tone_for_schedule(schedule_id: int) -> dict:
+    """Full AI-generated Tone of Voice pipeline for an autopilot schedule.
+
+    Steps:
+    1. Parse domain content (DataForSEO)
+    2. Extract main keyword (GPT)
+    3. Customer profile (GPT)
+    4. SERP analysis (DataForSEO)
+    5. Select top 5 blog competitors (GPT)
+    6. Parse competitor content (DataForSEO)
+    7. Mix tone of voice candidates (GPT)
+    8. Generate final Tone of Voice (GPT)
+    """
+    import base64 as _b64
+    import httpx
+
+    await ensure_tables()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        sched = await get_schedule(db, schedule_id)
+    if not sched:
+        return {"error": "Schedule not found"}
+
+    domain_url = sched["domain"]
+    seed = sched.get("seed_keyword", "")
+    lang = sched.get("language", "pl")
+    lang_pl = lang == "pl"
+
+    dfs_ok = bool(DFS_LOGIN and DFS_PASSWORD)
+    dfs_headers = {}
+    if dfs_ok:
+        creds = _b64.b64encode(f"{DFS_LOGIN}:{DFS_PASSWORD}".encode()).decode()
+        dfs_headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+
+    steps_log = []
+
+    # ── STEP 1: Parse domain content via DFS ──
+    content_text = ""
+    if dfs_ok:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.post(
+                    "https://api.dataforseo.com/v3/on_page/content_parsing/live",
+                    json=[{"url": f"https://{domain_url}/", "enable_javascript": False}],
+                    headers=dfs_headers,
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                for task in data.get("tasks", []):
+                    for result in task.get("result", []) or []:
+                        for item in result.get("items", []) or []:
+                            pc = item.get("page_content", {})
+                            for topic in pc.get("main_topic", []) or []:
+                                h_title = topic.get("h_title", "")
+                                texts = [t.get("text", "") for t in topic.get("primary_content", []) or []]
+                                content_text += f"H{topic.get('level', '')} - {h_title}\n" + "\n".join(texts) + "\n\n"
+            steps_log.append(f"Content parsed: {len(content_text)} chars")
+        except Exception as e:
+            steps_log.append(f"Content parsing failed: {e}")
+
+    if not content_text:
+        content_text = f"Domena: {domain_url}, nisza/seed: {seed}"
+        steps_log.append("Using fallback content (domain + seed)")
+
+    # ── STEP 2: Extract main keyword ──
+    kw_system = (
+        "Analizuj podany content ze strony internetowej i zidentyfikuj główne słowo kluczowe. "
+        "Podaj TYLKO jedno słowo kluczowe, bez cudzysłowów, bez wyjaśnień."
+    ) if lang_pl else (
+        "Analyze the website content and identify the main keyword. "
+        "Return ONLY one keyword, no quotes, no explanation."
+    )
+    main_keyword = await _gpt_call(kw_system, f"Content:\n{content_text[:3000]}", temperature=0.4, max_tokens=50)
+    main_keyword = main_keyword.strip().strip('"').strip("'")
+    if not main_keyword:
+        main_keyword = seed
+    steps_log.append(f"Main keyword: {main_keyword}")
+
+    # ── STEP 3: Customer profile ──
+    profile_prompt = (
+        f"Stwórz profil klienta dla strony {domain_url} (seed: {seed}). Uwzględnij:\n"
+        f"1. Przegląd typowego klienta\n2. Demografię\n3. Wartości i postawy\n"
+        f"4. Problemy i bolączki\n5. Kluczowe motywacje\n6. Proces decyzyjny\n"
+        f"7. Czego szukają na tej stronie\nBądź konkretny i szczegółowy."
+    ) if lang_pl else (
+        f"Create a customer profile for {domain_url} (seed: {seed}). Include:\n"
+        f"1. Typical client overview\n2. Demographics\n3. Values and attitudes\n"
+        f"4. Problems and pain points\n5. Key motivations\n6. Decision process\n"
+        f"7. What they're looking for\nBe specific and detailed."
+    )
+    customer_profile = await _gpt_call(
+        "Jesteś ekspertem od marketingu i analizy klientów." if lang_pl else "You are a marketing and customer analysis expert.",
+        profile_prompt, temperature=0.6, max_tokens=1500,
+    )
+    steps_log.append(f"Customer profile: {len(customer_profile)} chars")
+
+    # ── STEP 4: SERP analysis for keyword ──
+    competitor_content = []
+    if dfs_ok and main_keyword:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.post(
+                    "https://api.dataforseo.com/v3/serp/google/organic/live/advanced",
+                    json=[{"keyword": main_keyword, "location_name": "Poland", "language_name": "Polish", "device": "desktop", "depth": 10}],
+                    headers=dfs_headers,
+                )
+            serp_urls = []
+            if resp.status_code == 200:
+                data = resp.json()
+                for task in data.get("tasks", []):
+                    for result in task.get("result", []) or []:
+                        for item in result.get("items", []) or []:
+                            if item.get("type") == "organic" and item.get("url"):
+                                serp_urls.append(item["url"])
+            steps_log.append(f"SERP results: {len(serp_urls)} URLs")
+
+            # ── STEP 5: Select top 5 blog competitors ──
+            if serp_urls:
+                select_system = (
+                    "Wybierz 5 najlepszych URL-i z blogów/portali informacyjnych. "
+                    "Pomiń Wikipedię, strony rządowe, sklepy. Zwróć TYLKO URL-e oddzielone przecinkami."
+                ) if lang_pl else (
+                    "Select 5 best blog/news URLs. Skip Wikipedia, government, shops. "
+                    "Return ONLY URLs separated by commas."
+                )
+                selected = await _gpt_call(
+                    select_system,
+                    f"Keyword: {main_keyword}\nURLs:\n" + "\n".join(serp_urls[:15]),
+                    temperature=0.2, max_tokens=500,
+                )
+                comp_urls = [u.strip() for u in selected.split(",") if u.strip().startswith("http")][:5]
+                steps_log.append(f"Selected {len(comp_urls)} competitors")
+
+                # ── STEP 6: Parse competitor content ──
+                for comp_url in comp_urls:
+                    try:
+                        async with httpx.AsyncClient(timeout=30) as c:
+                            resp = await c.post(
+                                "https://api.dataforseo.com/v3/on_page/content_parsing/live",
+                                json=[{"url": comp_url, "enable_javascript": False}],
+                                headers=dfs_headers,
+                            )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            comp_text = ""
+                            for task in data.get("tasks", []):
+                                for result in task.get("result", []) or []:
+                                    for item in result.get("items", []) or []:
+                                        pc = item.get("page_content", {})
+                                        for topic in pc.get("main_topic", []) or []:
+                                            texts = [t.get("text", "") for t in topic.get("primary_content", []) or []]
+                                            comp_text += f"H{topic.get('level', '')} - {topic.get('h_title', '')}\n" + "\n".join(texts) + "\n\n"
+                            if comp_text:
+                                competitor_content.append(comp_text[:2000])
+                    except Exception:
+                        pass
+                steps_log.append(f"Parsed {len(competitor_content)} competitor pages")
+        except Exception as e:
+            steps_log.append(f"SERP/competitor analysis failed: {e}")
+
+    # ── STEP 7: Mix tone of voice candidates ──
+    mix_system = (
+        "Twoim zadaniem jest wymieszanie tonów głosu i stworzenie 15-20 mieszanych tonów "
+        "pasujących do siebie. Nie dodawaj nic oprócz mieszanek. Lista tonów do mieszania:\n"
+        "Accessible, Conversational, Ambitious, Concise, Assertive, Authentic, Authoritative, "
+        "Educational, Supportive, Bold, Clear, Insightful, Inspiring, Commanding, Confident, "
+        "Compelling, Aspirational, Polished, Considerate, Consultative, Convincing, Relatable, "
+        "Curious, Creative, Decisive, Dependable, Dynamic, Informative, Energetic, Optimistic, "
+        "Approachable, Evaluative, Expository, Systematic, Functional"
+    )
+    mixed_tones = await _gpt_call(mix_system, "Mix these tones.", temperature=0.6, max_tokens=800)
+    steps_log.append("Mixed tones generated")
+
+    # ── STEP 8: Generate final Tone of Voice ──
+    comp_text_combined = "\n---\n".join(competitor_content[:5]) if competitor_content else "Brak danych konkurencji"
+
+    tone_system = (
+        "Stwórz jasną instrukcję Tone of Voice dopasowaną do strony internetowej. "
+        "Ton powinien być zgodny z treścią strony, wynikami SERP i profilem klienta.\n\n"
+        "Wynik powinien zawierać:\n"
+        "- Nazwa i opis tonu\n"
+        "- Wytyczne pisania (styl, słownictwo, emocje)\n"
+        "- Jak ton angażuje grupę docelową\n"
+        "- Wskazówki spójności między artykułami\n\n"
+        "Pisz po polsku, konkretnie, jako instrukcję dla AI piszącego artykuły."
+    ) if lang_pl else (
+        "Create a clear Tone of Voice instruction tailored for a website. "
+        "The tone should align with the website content, SERP results, and customer profile.\n\n"
+        "Output should include:\n"
+        "- Tone name and description\n"
+        "- Writing guidelines (style, vocabulary, emotions)\n"
+        "- How the tone engages the target audience\n"
+        "- Consistency cues across articles\n\n"
+        "Write concretely, as an instruction for AI writing articles."
+    )
+
+    tone_user = (
+        f"<tone_candidates>\n{mixed_tones}\n</tone_candidates>\n\n"
+        f"<website_content>\n{content_text[:2000]}\n</website_content>\n\n"
+        f"<competitor_content>\n{comp_text_combined[:3000]}\n</competitor_content>\n\n"
+        f"<customer_profile>\n{customer_profile[:2000]}\n</customer_profile>\n\n"
+        f"<about_website>\nDomena: {domain_url}, Seed keyword: {seed}\n</about_website>"
+    )
+
+    tone_of_voice = await _gpt_call(tone_system, tone_user, temperature=0.6, max_tokens=2000)
+    steps_log.append(f"Tone of Voice generated: {len(tone_of_voice)} chars")
+
+    # ── Save to DB ──
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE domain_schedules SET tone_of_voice=? WHERE id=?",
+            (tone_of_voice, schedule_id),
+        )
+        await db.commit()
+
+    logger.info(f"[ToneOfVoice] Generated for schedule {schedule_id} ({domain_url}): keyword={main_keyword}")
+
+    return {
+        "schedule_id": schedule_id,
+        "domain": domain_url,
+        "main_keyword": main_keyword,
+        "tone_of_voice": tone_of_voice,
+        "steps": steps_log,
+    }
 
 # ── DB helpers ───────────────────────────────────────────────────────────────
 
@@ -564,6 +826,46 @@ async def recalculate_coherence(schedule_id: int):
         await db.commit()
 
     return {"updated": updated, "seed": seed}
+
+
+@router.post("/schedules/{schedule_id}/generate-tone")
+async def generate_tone(schedule_id: int, background_tasks: BackgroundTasks):
+    """Uruchom pełny pipeline generowania Tone of Voice (w tle)."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        sched = await get_schedule(db, schedule_id)
+    if not sched:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Schedule not found")
+
+    async def _run():
+        try:
+            result = await _generate_tone_for_schedule(schedule_id)
+            logger.info(f"[ToneOfVoice] Done for {schedule_id}: {result.get('steps', [])}")
+        except Exception as e:
+            logger.error(f"[ToneOfVoice] Failed for {schedule_id}: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "generating", "schedule_id": schedule_id, "domain": sched["domain"]}
+
+
+@router.get("/schedules/{schedule_id}/tone")
+async def get_tone(schedule_id: int):
+    """Pobierz aktualny tone_of_voice dla harmonogramu."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT tone_of_voice FROM domain_schedules WHERE id=?",
+            (schedule_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Schedule not found")
+    tone = (dict(row).get("tone_of_voice") or "").strip()
+    is_generated = bool(tone and tone not in _TONE_PRESETS)
+    return {"tone_of_voice": tone, "is_generated": is_generated}
 
 
 @router.get("/schedules/{schedule_id}/categories")

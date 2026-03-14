@@ -628,6 +628,9 @@ export default function Autopilot() {
   const [siteMetrics, setSiteMetrics] = useState({})
   const [previewModal, setPreviewModal] = useState(null) // { keyword, title, content, excerpt } | null
   const [previewLoading, setPreviewLoading] = useState({})
+  const [toneGenerating, setToneGenerating] = useState({})
+  const [toneModal, setToneModal] = useState(null) // { scheduleId, tone, isGenerated } | null
+  const [toneEditing, setToneEditing] = useState('')
   const [newForm, setNewForm] = useState({
     my_domain_id: '',
     seed_keyword: '',
@@ -937,6 +940,51 @@ export default function Autopilot() {
     await load()
   }
 
+  const generateTone = async (id) => {
+    setToneGenerating(g => ({ ...g, [id]: true }))
+    try {
+      await api.post(`/api/autopilot/schedules/${id}/generate-tone`)
+      addToast('Generowanie Tone of Voice rozpoczęte...', 'info')
+      // Poll for completion (tone changes from preset to long text)
+      let attempts = 0
+      const poll = setInterval(async () => {
+        attempts++
+        try {
+          const res = await api.get(`/api/autopilot/schedules/${id}/tone`)
+          if (res.data.is_generated || attempts > 60) {
+            clearInterval(poll)
+            setToneGenerating(g => ({ ...g, [id]: false }))
+            if (res.data.is_generated) {
+              addToast('Tone of Voice wygenerowany!', 'success')
+            }
+            await load()
+          }
+        } catch { /* ignore poll errors */ }
+      }, 5000)
+    } catch (e) {
+      addToast('Błąd generowania tone: ' + (e.response?.data?.detail || e.message), 'error')
+      setToneGenerating(g => ({ ...g, [id]: false }))
+    }
+  }
+
+  const viewTone = async (id) => {
+    try {
+      const res = await api.get(`/api/autopilot/schedules/${id}/tone`)
+      setToneModal({ scheduleId: id, tone: res.data.tone_of_voice || '', isGenerated: res.data.is_generated })
+      setToneEditing(res.data.tone_of_voice || '')
+    } catch (e) {
+      addToast('Błąd pobierania tone', 'error')
+    }
+  }
+
+  const saveToneEdit = async () => {
+    if (!toneModal) return
+    await api.patch(`/api/autopilot/schedules/${toneModal.scheduleId}`, { tone_of_voice: toneEditing })
+    addToast('Tone of Voice zapisany', 'success')
+    setToneModal(null)
+    await load()
+  }
+
   const set = (f, v) => setNewForm(n => ({ ...n, [f]: v }))
   const fmt = (s) => s ? new Date(s).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
 
@@ -1080,12 +1128,9 @@ export default function Autopilot() {
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Ton artykułu</label>
-              <select value={newForm.tone_of_voice} onChange={e => set('tone_of_voice', e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="ekspert">Ekspercki</option>
-                <option value="przyjazny">Przyjazny</option>
-                <option value="formalny">Formalny</option>
-                <option value="poradnikowy">Poradnikowy</option>
-              </select>
+              <div className="text-xs text-gray-500 border border-gray-200 rounded-lg px-3 py-2 bg-gray-50">
+                Tone of Voice zostanie wygenerowany automatycznie przez AI po dodaniu domeny. Kliknij "Generuj Tone" w harmonogramie.
+              </div>
             </div>
             <div className="sm:col-span-2 lg:col-span-3">
               <label className="block text-xs font-medium text-gray-600 mb-1">Custom prompt (opcjonalnie)</label>
@@ -1201,17 +1246,28 @@ export default function Autopilot() {
                   <option value="dalle">🎨 DALL-E</option>
                   <option value="none">🚫 Brak</option>
                 </select>
-                <select
-                  defaultValue={sched.tone_of_voice || 'ekspert'}
-                  onChange={e => updateTone(sched.id, e.target.value)}
-                  className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  title="Ton artykułu"
-                >
-                  <option value="ekspert">Ekspercki</option>
-                  <option value="przyjazny">Przyjazny</option>
-                  <option value="formalny">Formalny</option>
-                  <option value="poradnikowy">Poradnikowy</option>
-                </select>
+                <div className="flex items-center gap-1">
+                  {sched.tone_of_voice && !['ekspert','przyjazny','formalny','poradnikowy'].includes(sched.tone_of_voice) ? (
+                    <button
+                      onClick={() => viewTone(sched.id)}
+                      className="px-2 py-1 bg-green-100 text-green-700 border border-green-300 rounded text-xs font-medium hover:bg-green-200"
+                      title="Tone of Voice wygenerowany — kliknij aby zobaczyć/edytować"
+                    >
+                      Tone AI
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => generateTone(sched.id)}
+                      disabled={toneGenerating[sched.id]}
+                      className="px-2 py-1 bg-amber-100 text-amber-700 border border-amber-300 rounded text-xs font-medium hover:bg-amber-200 disabled:opacity-50 flex items-center gap-1"
+                      title="Wygeneruj unikalny Tone of Voice (AI) dla tej domeny"
+                    >
+                      {toneGenerating[sched.id] ? (
+                        <><span className="animate-spin inline-block w-3 h-3 border-2 border-amber-600 border-t-transparent rounded-full" />Generuję...</>
+                      ) : 'Generuj Tone'}
+                    </button>
+                  )}
+                </div>
 
                 <div className="w-px h-5 bg-gray-200 mx-1" />
 
@@ -1482,6 +1538,44 @@ export default function Autopilot() {
       </>}
 
       {/* Preview modal */}
+      {/* Tone of Voice Modal */}
+      {toneModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setToneModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div>
+                <h3 className="font-bold text-gray-900">Tone of Voice</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {toneModal.isGenerated ? 'Wygenerowany przez AI — możesz edytować' : 'Preset — wygeneruj unikalny tone'}
+                </p>
+              </div>
+              <button onClick={() => setToneModal(null)} className="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+            </div>
+            <div className="flex-1 overflow-auto p-6">
+              <textarea
+                value={toneEditing}
+                onChange={e => setToneEditing(e.target.value)}
+                rows={16}
+                className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none font-mono leading-relaxed"
+                placeholder="Tone of Voice instrukcja..."
+              />
+            </div>
+            <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100">
+              <button
+                onClick={() => { generateTone(toneModal.scheduleId); setToneModal(null) }}
+                className="px-4 py-2 bg-amber-100 text-amber-700 border border-amber-300 rounded-lg text-sm font-medium hover:bg-amber-200"
+              >
+                Wygeneruj ponownie
+              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setToneModal(null)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50">Anuluj</button>
+                <button onClick={saveToneEdit} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Zapisz</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {previewModal && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setPreviewModal(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
