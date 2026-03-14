@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 
 from config import DB_PATH, CSV_PATH
 from services.crypto_service import encrypt_password, is_encrypted, get_plain_password
-from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health, dashboard, analytics, deindex, notifications, news_portals, link_checker
+from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health, dashboard, analytics, deindex, notifications, news_portals, link_checker, client_content
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +567,7 @@ app.include_router(deindex.router)
 app.include_router(notifications.router)
 app.include_router(news_portals.router)
 app.include_router(link_checker.router)
+app.include_router(client_content.router)
 
 
 @app.get("/health")
