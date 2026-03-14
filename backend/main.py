@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 
 from config import DB_PATH, CSV_PATH
 from services.crypto_service import encrypt_password, is_encrypted, get_plain_password
-from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health, dashboard, analytics, deindex, notifications, news_portals
+from api import projects, clients, domains, publish, history, topical_map, content_writer, autopilot, health, dashboard, analytics, deindex, notifications, news_portals, link_checker
 
 logger = logging.getLogger(__name__)
 
@@ -450,7 +450,13 @@ _RATE_LIMIT_WINDOW = 60  # seconds
 _RATE_LIMIT_MAX = 300  # requests per window (UI makes many API calls per click)
 _rate_limit_last_cleanup = _time.time()
 # Stricter limits for expensive endpoints (article generation, publishing)
-_RATE_LIMIT_STRICT = {"/api/publish/post": 20, "/api/content-writer/generate": 20, "/api/autopilot/run": 30}
+_RATE_LIMIT_STRICT = {
+    "/api/publish/post": 20,
+    "/api/content-writer/generate": 20,
+    "/api/autopilot/run": 30,
+    "/api/news-portals/generate-tone": 10,
+    "/api/news-portals/auto-generate": 15,
+}
 
 
 # SEO #124: X-Robots-Tag noindex on API responses (prevent search engines from indexing API endpoints)
@@ -560,6 +566,7 @@ app.include_router(analytics.router)
 app.include_router(deindex.router)
 app.include_router(notifications.router)
 app.include_router(news_portals.router)
+app.include_router(link_checker.router)
 
 
 @app.get("/health")

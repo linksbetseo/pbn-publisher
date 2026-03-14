@@ -2,6 +2,7 @@
 Content Writer API — SEO article generation with SERP top10 analysis.
 """
 import asyncio
+import time as _time
 import uuid
 import aiosqlite
 from fastapi import APIRouter, HTTPException
@@ -45,10 +46,17 @@ class ContentWriterRequest(BaseModel):
 async def generate_content(req: ContentWriterRequest):
     """Generate SEO article based on keyword + SERP top10 analysis."""
     task_id = str(uuid.uuid4())[:8]
-    _progress[task_id] = {"step": 0, "phase": "init", "label": "Rozpoczynam...", "total_steps": 5, "done": False}
+
+    # Clean stale progress entries (older than 10 minutes)
+    _now = _time.time()
+    stale = [k for k, v in _progress.items() if v.get("_ts", 0) < _now - 600]
+    for k in stale:
+        _progress.pop(k, None)
+
+    _progress[task_id] = {"step": 0, "phase": "init", "label": "Rozpoczynam...", "total_steps": 5, "done": False, "_ts": _now}
 
     def on_step(step_num, phase, label):
-        _progress[task_id] = {"step": step_num, "phase": phase, "label": label, "total_steps": 5, "done": phase == "done"}
+        _progress[task_id] = {"step": step_num, "phase": phase, "label": label, "total_steps": 5, "done": phase == "done", "_ts": _time.time()}
 
     try:
         async with _generate_sem:
@@ -73,7 +81,7 @@ async def generate_content(req: ContentWriterRequest):
                 on_step=on_step,
             )
     except Exception as exc:
-        _progress[task_id] = {"step": 5, "phase": "error", "label": f"Błąd: {str(exc)[:100]}", "total_steps": 5, "done": True, "error": str(exc)[:200]}
+        _progress[task_id] = {"step": 5, "phase": "error", "label": f"Błąd: {str(exc)[:100]}", "total_steps": 5, "done": True, "error": str(exc)[:200], "_ts": _time.time()}
         raise
     finally:
         # Clean up progress after a delay

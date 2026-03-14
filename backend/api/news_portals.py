@@ -61,6 +61,9 @@ router = APIRouter(prefix="/api/news-portals", tags=["news-portals"])
 
 _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
+# Limit concurrent article/ToV generation to avoid overloading OpenAI / DataForSEO
+_NEWS_GENERATE_SEM = asyncio.Semaphore(3)
+
 # ---------------------------------------------------------------------------
 # Predefined RSS Feed Catalog (Polish & international portals)
 # ---------------------------------------------------------------------------
@@ -297,6 +300,7 @@ async def ensure_tables():
             CREATE INDEX IF NOT EXISTS idx_news_drafts_portal ON news_drafts(portal_id, status);
             CREATE INDEX IF NOT EXISTS idx_news_sources_portal ON news_sources(portal_id);
             CREATE INDEX IF NOT EXISTS idx_news_clusters_portal ON news_clusters(portal_id, status);
+            CREATE INDEX IF NOT EXISTS idx_news_drafts_published ON news_drafts(portal_id, published_at);
         """)
         # Migrate: add tone_of_voice + site_description columns if missing
         async with db.execute("PRAGMA table_info(news_portals)") as cur:
@@ -716,6 +720,11 @@ async def generate_tone_of_voice(portal_id: int):
     8. Generate final Tone of Voice (GPT)
     9. Generate site description (GPT)
     """
+    async with _NEWS_GENERATE_SEM:
+        return await _generate_tone_of_voice_inner(portal_id)
+
+
+async def _generate_tone_of_voice_inner(portal_id: int):
     import base64 as _b64
     from config import DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
 
@@ -729,6 +738,8 @@ async def generate_tone_of_voice(portal_id: int):
         if not portal:
             raise HTTPException(404, "Portal not found")
         portal = dict(portal)
+        if not portal.get("my_domain_id"):
+            raise HTTPException(400, "Portal nie ma przypisanej domeny")
         async with db.execute("SELECT * FROM my_domains WHERE id=?", (portal["my_domain_id"],)) as cur:
             domain = await cur.fetchone()
         if not domain:
@@ -845,7 +856,7 @@ async def generate_tone_of_voice(portal_id: int):
                 # ── STEP 6: Parse competitor content ──
                 for comp_url in comp_urls:
                     try:
-                        async with httpx.AsyncClient(timeout=20) as c:
+                        async with httpx.AsyncClient(timeout=30) as c:
                             resp = await c.post(
                                 "https://api.dataforseo.com/v3/on_page/content_parsing/live",
                                 json=[{"url": comp_url, "enable_javascript": False}],
@@ -1414,6 +1425,11 @@ async def _news_gpt(
 @router.post("/{portal_id}/generate")
 async def generate_draft(portal_id: int, body: GenerateRequest):
     """Generate a world-class unique news article from a cluster using multi-step pipeline."""
+    async with _NEWS_GENERATE_SEM:
+        return await _generate_draft_inner(portal_id, body)
+
+
+async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
     _t0 = time.time()
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:

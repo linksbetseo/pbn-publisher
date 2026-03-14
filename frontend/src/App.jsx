@@ -14,6 +14,7 @@ import BulkPublish from './pages/BulkPublish'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
 import NewsPortals from './pages/NewsPortals'
+import LinkChecker from './pages/LinkChecker'
 import { hasAuthToken, setAuthCredentials, clearAuthCredentials, checkCredentials } from './api/client'
 import api from './api/client'
 
@@ -131,6 +132,7 @@ export default function App() {
               <Route path="/bulk-publish" element={<BulkPublish />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/news-portals" element={<NewsPortals />} />
+              <Route path="/link-checker" element={<LinkChecker />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </main>
