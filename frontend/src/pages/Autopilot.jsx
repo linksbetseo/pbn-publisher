@@ -764,6 +764,7 @@ export default function Autopilot() {
       if (res.data.site_metrics) setSiteMetrics(m => ({ ...m, [id]: res.data.site_metrics }))
       setRunLog(l => ({ ...l, [id]: [{ status: 'info', keyword: '—', error: `Mapa gotowa: ${res.data.pillars} klastrów, ${res.data.total_keywords} fraz` }] }))
       await load()
+      await loadKeywords(id)
     } catch (e) {
       setRunLog(l => ({ ...l, [id]: [{ status: 'failed', keyword: '—', error: 'Błąd mapy: ' + (e.response?.data?.detail || e.message) }] }))
     } finally {
