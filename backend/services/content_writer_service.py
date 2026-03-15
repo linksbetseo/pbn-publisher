@@ -8,17 +8,13 @@ import json
 import logging
 import random
 import re
-from openai import AsyncOpenAI
-from config import OPENAI_API_KEY
 from services.dataforseo_service import DataForSEOClient
 from services.content_enrichments import enrich_article
 # Reuse SERP cache from openai_service to avoid duplicate DataForSEO calls
 from services.article_helpers import serp_cache_get as _serp_cache_get, serp_cache_set as _serp_cache_set
-from services.openai_service import get_gpt_model, _fix_heading_hierarchy
+from services.openai_service import get_gpt_model, get_openai_client, _fix_heading_hierarchy
 
 logger = logging.getLogger(__name__)
-
-client_ai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 _SKIP_DOMAINS = re.compile(
@@ -284,10 +280,10 @@ Return JSON with:
 JSON only, no markdown."""
 
     _step(2, "gpt", "Generowanie artykulu (GPT)...")
-    _active_model = await get_gpt_model()
+    _cw_client, _active_model = await get_openai_client()
     for attempt in range(3):
         try:
-            response = await client_ai.chat.completions.create(
+            response = await _cw_client.chat.completions.create(
                 model=_active_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -460,12 +456,13 @@ JSON only, no markdown."""
     # ── Enrichments (TOC + update_box + 2 random elements) ─────────────────
     lang_pl = language == "pl"
     try:
+        _enrich_client, _ = await get_openai_client()
         content = await enrich_article(
             content=content,
             topic=keyword,
             sections=sections,
             lang_pl=lang_pl,
-            openai_client=client_ai,
+            openai_client=_enrich_client,
             serp_urls=serp_urls or None,
         )
     except Exception as e:

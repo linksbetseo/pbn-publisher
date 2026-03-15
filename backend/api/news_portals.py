@@ -42,13 +42,12 @@ from typing import List, Optional
 import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, Query
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from config import DB_PATH, OPENAI_API_KEY
+from config import DB_PATH
 from services.crypto_service import get_plain_password
 from services.wordpress_service import publish_post
-from services.openai_service import get_gpt_model, _fix_heading_hierarchy
+from services.openai_service import get_gpt_model, get_openai_client, _fix_heading_hierarchy
 from services.article_helpers import (
     markdown_to_html as _markdown_to_html,
     strip_markdown_remnants as _strip_markdown_remnants,
@@ -58,8 +57,6 @@ from services.article_helpers import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/news-portals", tags=["news-portals"])
-
-_openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # Limit concurrent article/ToV generation to avoid overloading OpenAI / DataForSEO
 _NEWS_GENERATE_SEM = asyncio.Semaphore(3)
@@ -1398,11 +1395,12 @@ async def _news_gpt(
     max_tokens: int = 1500, model: str = None,
 ) -> str:
     """GPT helper for news pipeline with retry logic."""
+    _client, _default_model = await get_openai_client()
     if model is None:
-        model = await get_gpt_model()
+        model = _default_model
     for attempt in range(3):
         try:
-            response = await _openai_client.chat.completions.create(
+            response = await _client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system},
@@ -1866,12 +1864,13 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
     try:
         from services.content_enrichments import enrich_article as _enrich_news
         _news_sections = [re.sub(r'<[^>]+>', '', h).strip() for h in re.findall(r'<h2[^>]*>(.*?)</h2>', content, re.DOTALL)][:6]
+        _enrich_client, _ = await get_openai_client()
         content = await _enrich_news(
             content=content,
             topic=title,
             sections=_news_sections,
             lang_pl=lang_pl,
-            openai_client=_openai_client,
+            openai_client=_enrich_client,
             serp_urls=None,
         )
     except Exception as _e:
@@ -2070,8 +2069,7 @@ async def _safe_image_prompt(title: str) -> str:
     """
     # Quick GPT call to rephrase — cheaper than a failed image generation
     try:
-        _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        _model = await get_gpt_model()
+        _client, _model = await get_openai_client()
         resp = await _client.chat.completions.create(
             model=_model,
             max_tokens=80,

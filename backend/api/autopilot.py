@@ -21,7 +21,7 @@ from datetime import date, datetime, timezone
 from typing import List, Optional
 
 import aiosqlite
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from config import DB_PATH
@@ -115,10 +115,8 @@ def _effective_prompt(sched: dict) -> str:
 async def _gpt_call(system: str, user: str, temperature: float = 0.5,
                      max_tokens: int = 1500) -> str:
     """Simple GPT helper with retry for autopilot tone generation."""
-    from openai import AsyncOpenAI as _AO
-    from services.openai_service import get_gpt_model
-    client = _AO()
-    model = await get_gpt_model()
+    from services.openai_service import get_openai_client
+    client, model = await get_openai_client()
     for attempt in range(3):
         try:
             resp = await client.chat.completions.create(
@@ -466,6 +464,10 @@ async def ensure_tables():
                 await db.execute(f"ALTER TABLE domain_schedules ADD COLUMN {col} {typedef}")
             except Exception:
                 pass
+        # Performance indexes for common query patterns
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_schedule_status ON domain_keywords(schedule_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_domain_status ON domain_keywords(my_domain_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_schedule_keyword ON domain_keywords(schedule_id, keyword)")
         await db.commit()
     _tables_ensured = True
 
@@ -1190,10 +1192,11 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             await _job_update(job_id, done=1, error="Harmonogram nie istnieje")
             return
 
-        # Recover keywords stuck in 'publishing' (WP publish succeeded but DB update failed on previous run)
+        # Recover keywords stuck in 'publishing' — set back to pending so they are retried
+        # (we cannot be sure the WP post was actually created)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE domain_keywords SET status='published' WHERE schedule_id=? AND status='publishing'",
+                "UPDATE domain_keywords SET status='pending' WHERE schedule_id=? AND status='publishing'",
                 (schedule_id,)
             )
             await db.commit()
@@ -1875,10 +1878,11 @@ async def _run_schedule_daily(sched: dict) -> dict:
         schedule_id = sched["id"]
         limit = sched["posts_per_day"]
 
-        # Recover keywords stuck in 'publishing' (WP publish succeeded but DB update failed on previous run)
+        # Recover keywords stuck in 'publishing' — set back to pending so they are retried
+        # (we cannot be sure the WP post was actually created)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE domain_keywords SET status='published' WHERE schedule_id=? AND status='publishing'",
+                "UPDATE domain_keywords SET status='pending' WHERE schedule_id=? AND status='publishing'",
                 (schedule_id,)
             )
             await db.commit()
@@ -1994,20 +1998,20 @@ async def _run_schedule_daily(sched: dict) -> dict:
                             await db.commit()
 
                         _art = article  # capture for lambda
-                        async def _do_publish_daily():
+                        async def _do_publish_daily(_a=article, _i=image_b64, _k=kw_row, _s=sched, _kw=keyword, _exc=excerpt, _tags=lsi_tags):
                             r = await publish_post(
-                                domain=sched["domain"],
-                                wp_login=sched["wp_login"],
-                                wp_pass=sched["wp_pass"],
-                                title=_art["title"],
-                                content=_art["content"],
-                                image_b64=image_b64,
-                                category_id=kw_row.get("wp_category_id") or None,
-                                excerpt=excerpt,
-                                keyword=keyword,
-                                tags=lsi_tags,
-                                http_user=sched.get("http_user", ""),
-                                http_pass=sched.get("http_pass", ""),
+                                domain=_s["domain"],
+                                wp_login=_s["wp_login"],
+                                wp_pass=_s["wp_pass"],
+                                title=_a["title"],
+                                content=_a["content"],
+                                image_b64=_i,
+                                category_id=_k.get("wp_category_id") or None,
+                                excerpt=_exc,
+                                keyword=_kw,
+                                tags=_tags,
+                                http_user=_s.get("http_user", ""),
+                                http_pass=_s.get("http_pass", ""),
                             )
                             if not r.get("success"):
                                 raise RuntimeError(r.get("error", "WP publish failed"))
@@ -2144,14 +2148,21 @@ async def autopilot_stats():
             total_schedules = (await cur.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM domain_schedules WHERE active=1") as cur:
             active_schedules = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM domain_keywords") as cur:
-            total_keywords = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='pending'") as cur:
-            pending = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='published'") as cur:
-            published = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM domain_keywords WHERE status='failed'") as cur:
-            failed = (await cur.fetchone())[0]
+        # Single query for all keyword counts instead of 4 separate COUNT(*)
+        async with db.execute(
+            """SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published,
+                SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
+                SUM(CASE WHEN status='cannibal_risk' THEN 1 ELSE 0 END) as cannibal
+            FROM domain_keywords"""
+        ) as cur:
+            row = await cur.fetchone()
+            total_keywords = row[0] or 0
+            pending = row[1] or 0
+            published = row[2] or 0
+            failed = row[3] or 0
         # Last 3 completed jobs
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -2183,6 +2194,7 @@ async def autopilot_stats():
 @router.get("/jobs")
 async def get_jobs():
     """Return recent run_jobs — both running and completed (last 20)."""
+    await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -2902,6 +2914,7 @@ async def bulk_run_status(job_id: str):
 @router.post("/bulk-set-ppd")
 async def bulk_set_posts_per_day(body: BulkActionRequest):
     """Ustaw posts_per_day hurtowo dla wielu harmonogramów."""
+    await ensure_tables()
     if body.limit is None:
         from fastapi import HTTPException
         raise HTTPException(400, "Podaj limit (= posts_per_day)")
@@ -2918,6 +2931,7 @@ async def bulk_set_posts_per_day(body: BulkActionRequest):
 @router.post("/keywords/{keyword_id}/retry")
 async def retry_keyword(keyword_id: int):
     """Reset a failed keyword back to pending."""
+    await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, status FROM domain_keywords WHERE id = ?", (keyword_id,)) as cur:
             row = await cur.fetchone()
