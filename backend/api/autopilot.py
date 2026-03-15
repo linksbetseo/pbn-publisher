@@ -116,7 +116,7 @@ async def _gpt_call(system: str, user: str, temperature: float = 0.5,
                      max_tokens: int = 1500) -> str:
     """Simple GPT helper with retry for autopilot tone generation."""
     from services.openai_service import get_openai_client
-    client, model = await get_openai_client()
+    client, model, _is_custom = await get_openai_client()
     for attempt in range(3):
         try:
             resp = await client.chat.completions.create(

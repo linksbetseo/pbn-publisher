@@ -189,9 +189,11 @@ async def generate_seo_article(
 
     serp_section = ""
     if serp_context:
+        # Custom LLM (local/small model) — trim SERP context to avoid context window overflow
+        _serp_content = serp_context
         serp_section = f"""
 ANALIZA TOP10 SERP DLA FRAZY "{keyword}":
-{serp_context}
+{_serp_content}
 
 Na podstawie powyższej analizy:
 - Zidentyfikuj wspólne tematy i sekcje, które pokrywają rywale
@@ -280,7 +282,17 @@ Return JSON with:
 JSON only, no markdown."""
 
     _step(2, "gpt", "Generowanie artykulu (GPT)...")
-    _cw_client, _active_model = await get_openai_client()
+    _cw_client, _active_model, _is_custom = await get_openai_client()
+
+    # Custom/local LLMs (Llama, Mistral etc.) have smaller context windows —
+    # trim SERP context and reduce max_tokens to avoid 400 context-exceeded errors
+    if _is_custom and serp_section:
+        # Keep only first 1500 chars of SERP section instead of full ~6000
+        _serp_trimmed = serp_section[:1500]
+        user_prompt = user_prompt.replace(serp_section, _serp_trimmed)
+        serp_section = _serp_trimmed
+    _max_tokens = 2500 if _is_custom else 6000
+
     for attempt in range(3):
         try:
             response = await _cw_client.chat.completions.create(
@@ -290,7 +302,7 @@ JSON only, no markdown."""
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.7,
-                max_tokens=6000,
+                max_tokens=_max_tokens,
                 response_format={"type": "json_object"},
             )
             break
@@ -456,7 +468,7 @@ JSON only, no markdown."""
     # ── Enrichments (TOC + update_box + 2 random elements) ─────────────────
     lang_pl = language == "pl"
     try:
-        _enrich_client, _ = await get_openai_client()
+        _enrich_client, _, _ = await get_openai_client()
         content = await enrich_article(
             content=content,
             topic=keyword,

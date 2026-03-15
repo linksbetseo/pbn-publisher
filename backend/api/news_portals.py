@@ -1395,7 +1395,7 @@ async def _news_gpt(
     max_tokens: int = 1500, model: str = None,
 ) -> str:
     """GPT helper for news pipeline with retry logic."""
-    _client, _default_model = await get_openai_client()
+    _client, _default_model, _is_custom = await get_openai_client()
     if model is None:
         model = _default_model
     for attempt in range(3):
@@ -1864,7 +1864,7 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
     try:
         from services.content_enrichments import enrich_article as _enrich_news
         _news_sections = [re.sub(r'<[^>]+>', '', h).strip() for h in re.findall(r'<h2[^>]*>(.*?)</h2>', content, re.DOTALL)][:6]
-        _enrich_client, _ = await get_openai_client()
+        _enrich_client, _, _is_custom = await get_openai_client()
         content = await _enrich_news(
             content=content,
             topic=title,
@@ -2069,7 +2069,7 @@ async def _safe_image_prompt(title: str) -> str:
     """
     # Quick GPT call to rephrase — cheaper than a failed image generation
     try:
-        _client, _model = await get_openai_client()
+        _client, _model, _is_custom = await get_openai_client()
         resp = await _client.chat.completions.create(
             model=_model,
             max_tokens=80,

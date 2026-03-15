@@ -102,8 +102,13 @@ async def get_custom_llm_config() -> dict:
     return default
 
 
-async def get_openai_client() -> tuple["AsyncOpenAI", str]:
-    """Return (client, model) — uses custom LLM if enabled, otherwise standard OpenAI."""
+async def get_openai_client() -> tuple["AsyncOpenAI", str, bool]:
+    """Return (client, model, is_custom).
+
+    is_custom=True when a custom LLM endpoint is active.
+    Callers should use is_custom to reduce max_tokens and prompt size
+    because local/small models have limited context windows.
+    """
     cfg = await get_custom_llm_config()
     if cfg["enabled"] and cfg["base_url"] and cfg["model"]:
         base = cfg["base_url"].rstrip("/")
@@ -115,10 +120,10 @@ async def get_openai_client() -> tuple["AsyncOpenAI", str]:
             timeout=1200.0,  # 20 min — local/tunneled LLMs can be slow
             max_retries=1,
         )
-        return custom_client, cfg["model"]
+        return custom_client, cfg["model"], True
     # Standard OpenAI
     model = await get_gpt_model()
-    return client, model
+    return client, model, False
 
 
 # Functions _is_blog_url, _count_words, _keyword_density, _extract_lsi,
@@ -210,7 +215,7 @@ async def _fetch_serp_content(
 
 
 async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = None) -> str:
-    _client, _model = await get_openai_client()
+    _client, _model, _is_custom = await get_openai_client()
     if model is None:
         model = _model
     for attempt in range(3):
@@ -720,7 +725,9 @@ async def generate_article(
     # FIX #4: tighter density range — 0.8-1.8% sweet spot (enrichment blocks add ~0.2-0.5%)
     target_density = round(max(0.8, min(1.8, avg_density)), 1)
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
-    serp_block = f"\n\n[SEO Scraped Info — top 3 konkurentów]\n{serp_text}" if serp_text else ""
+    # Custom LLM: trim SERP text to avoid context overflow on small models (Llama 8B etc.)
+    _serp_limit = 1200 if (await get_custom_llm_config())["enabled"] else len(serp_text)
+    serp_block = f"\n\n[SEO Scraped Info — top 3 konkurentów]\n{serp_text[:_serp_limit]}" if serp_text else ""
 
     logger.info(f"[Article] Target: {target_words} słów, density: {target_density}%, LSI: {len(lsi_terms)}")
 

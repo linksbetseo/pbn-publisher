@@ -198,7 +198,7 @@ async def _update_post_content(domain: str, wp_login: str, wp_pass: str,
 async def _gpt(system: str, user: str, temperature: float = 0.3,
                max_tokens: int = 2000) -> str:
     async with _GPT_SEM:
-        client, model = await get_openai_client()
+        client, model, _is_custom = await get_openai_client()
         for attempt in range(3):
             try:
                 resp = await client.chat.completions.create(
