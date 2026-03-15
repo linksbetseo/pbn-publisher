@@ -141,6 +141,16 @@ export const deindex = {
   results: () => api.get('/api/deindex/results'),
 }
 
+export const internalLinks = {
+  analyze: (data) => apiLong.post('/api/internal-links/analyze', data),
+  listJobs: (my_domain_id) => api.get('/api/internal-links/jobs', { params: { my_domain_id } }),
+  getJob: (job_id, status_filter = 'pending') => api.get(`/api/internal-links/jobs/${job_id}`, { params: { status_filter } }),
+  getJobStatus: (job_id) => api.get(`/api/internal-links/jobs/${job_id}/status`),
+  approve: (suggestion_ids) => api.post('/api/internal-links/suggestions/approve', { suggestion_ids }),
+  reject: (suggestion_ids) => api.post('/api/internal-links/suggestions/reject', { suggestion_ids }),
+  apply: (suggestion_ids) => apiLong.post('/api/internal-links/apply', { suggestion_ids }),
+}
+
 export const notifications = {
   telegramTest: () => api.get('/api/notifications/telegram-test'),
   getSettings: () => api.get('/api/notifications/settings'),
