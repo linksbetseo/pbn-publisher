@@ -29,6 +29,44 @@ async def submit_to_indexer(body: dict):
         return {"success": False, "message": str(e)}
 
 
+@router.post("/indexer/submit-telegram")
+async def submit_to_telegram_indexer(body: dict):
+    """Proxy to Telegram Indexer (link-indexing-bot.com) — keeps API key server-side."""
+    import httpx
+    import os
+    api_key = os.getenv("TELEGRAM_INDEXER_TOKEN", "")
+    user_id = os.getenv("TELEGRAM_INDEXER_USER_ID", "")
+    urls = body.get("urls", [])
+    se_type = body.get("se_type", "normal")
+    if not urls:
+        return {"success": False, "message": "No URLs provided"}
+    if not api_key:
+        return {"success": False, "message": "TELEGRAM_INDEXER_TOKEN not configured"}
+    if not user_id:
+        return {"success": False, "message": "TELEGRAM_INDEXER_USER_ID not configured"}
+    if se_type not in ("normal", "hard"):
+        se_type = "normal"
+    links_str = "\n".join(urls)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://link-indexing-bot.com/api/tasks/new",
+                data={
+                    "api_key": api_key,
+                    "user_id": user_id,
+                    "links": links_str,
+                    "searchengine": "google",
+                    "se_type": se_type,
+                },
+            )
+            data = resp.json()
+            if resp.status_code in (200, 201):
+                return {"success": True, "data": data, "submitted": len(urls)}
+            return {"success": False, "message": data.get("message") or f"HTTP {resp.status_code}", "data": data}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 @router.get("")
 async def list_history(
     client_id: Optional[int] = Query(None),

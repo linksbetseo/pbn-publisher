@@ -27,10 +27,14 @@ export default function History() {
   const [copied, setCopied] = useState(false)
   const [indexing, setIndexing] = useState(false)
   const [indexResult, setIndexResult] = useState(null)
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [indexerType, setIndexerType] = useState('rocket') // 'rocket' | 'telegram'
+  const [telegramSeType, setTelegramSeType] = useState('normal')
   const LIMIT = 50
 
   const load = useCallback(async (newOffset = 0) => {
     setLoading(true)
+    setSelectedIds(new Set())
     const params = { limit: LIMIT, offset: newOffset }
     if (clientFilter) params.client_id = clientFilter
     if (statusFilter) params.status = statusFilter
@@ -57,7 +61,7 @@ export default function History() {
   const [retryingAll, setRetryingAll] = useState(false)
   const [retrying, setRetrying] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [preview, setPreview] = useState(null) // { id, title, content }
+  const [preview, setPreview] = useState(null)
   const [previewLoading, setPreviewLoading] = useState(false)
 
   const openPreview = async (p) => {
@@ -106,7 +110,6 @@ export default function History() {
   const exportCsv = async () => {
     setExportingCsv(true)
     try {
-      // Fetch ALL records matching current filters (not just current page)
       const params = { limit: 5000, offset: 0 }
       if (clientFilter) params.client_id = clientFilter
       if (statusFilter) params.status = statusFilter
@@ -141,24 +144,74 @@ export default function History() {
     }
   }
 
+  // ── Checkbox helpers ─────────────────────────────────────────────────────────
+
+  const toggleSelect = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Select all posts whose DATE(created_at) matches dateFrom (if set), else all on current page with a URL
+  const selectAllByDate = () => {
+    const targetDate = dateFrom // e.g. "2026-03-14"
+    const eligible = filteredPosts.filter(p => {
+      if (!p.wp_post_url) return false
+      if (targetDate) {
+        const d = p.created_at ? p.created_at.slice(0, 10) : ''
+        return d === targetDate
+      }
+      return true
+    })
+    const ids = new Set(eligible.map(p => p.id))
+    // If all already selected — deselect all; else select all
+    const allSelected = ids.size > 0 && [...ids].every(id => selectedIds.has(id))
+    if (allSelected) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(ids)
+    }
+  }
+
+  // ── Indexer submit ──────────────────────────────────────────────────────────
+
   const submitToIndexer = async () => {
-    const urls = posts.filter(p => p.wp_post_url).map(p => p.wp_post_url)
-    if (urls.length === 0) return
+    const urls = filteredPosts
+      .filter(p => selectedIds.has(p.id) && p.wp_post_url)
+      .map(p => p.wp_post_url)
+    if (urls.length === 0) {
+      addToast('Zaznacz co najmniej jeden post z URL-em', 'error')
+      return
+    }
     setIndexing(true)
     setIndexResult(null)
     try {
-      const resp = await api.post('/api/history/indexer/submit', { urls })
-      const data = resp.data
-      if (data.success) {
-        setIndexResult({ ok: true, msg: `Wysłano ${data.data?.submitted ?? urls.length} URL-i. Pozostałe kredyty: ${data.data?.credits_remaining ?? '?'}` })
+      let resp
+      if (indexerType === 'telegram') {
+        resp = await api.post('/api/history/indexer/submit-telegram', { urls, se_type: telegramSeType })
+        const data = resp.data
+        if (data.success) {
+          setIndexResult({ ok: true, msg: `Telegram Indexer: wysłano ${data.submitted ?? urls.length} URL-i` })
+        } else {
+          setIndexResult({ ok: false, msg: data.message || 'Błąd Telegram Indexer' })
+        }
       } else {
-        setIndexResult({ ok: false, msg: data.message || 'Błąd API' })
+        resp = await api.post('/api/history/indexer/submit', { urls })
+        const data = resp.data
+        if (data.success) {
+          setIndexResult({ ok: true, msg: `RocketIndexer: wysłano ${data.data?.submitted ?? urls.length} URL-i. Kredyty: ${data.data?.credits_remaining ?? '?'}` })
+        } else {
+          setIndexResult({ ok: false, msg: data.message || 'Błąd API' })
+        }
       }
     } catch (e) {
       setIndexResult({ ok: false, msg: 'Błąd połączenia z indexerem' })
     } finally {
       setIndexing(false)
-      setTimeout(() => setIndexResult(null), 5000)
+      setTimeout(() => setIndexResult(null), 6000)
     }
   }
 
@@ -179,6 +232,13 @@ export default function History() {
         (p.my_domain || '').toLowerCase().includes(q)
       )
     : posts
+
+  const eligibleByDate = filteredPosts.filter(p => {
+    if (!p.wp_post_url) return false
+    if (dateFrom) return (p.created_at || '').slice(0, 10) === dateFrom
+    return true
+  })
+  const allEligibleSelected = eligibleByDate.length > 0 && eligibleByDate.every(p => selectedIds.has(p.id))
 
   return (
     <div className="p-8">
@@ -309,19 +369,62 @@ export default function History() {
             <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Eksportowanie...</>
           ) : 'Eksport CSV'}
         </button>
+      </div>
+
+      {/* Indexer panel */}
+      <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-orange-50 border border-orange-200 rounded-xl">
+        <span className="text-sm font-semibold text-orange-800">Indexer:</span>
+        <select
+          value={indexerType}
+          onChange={e => setIndexerType(e.target.value)}
+          className="border border-orange-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 bg-white"
+        >
+          <option value="rocket">RocketIndexer</option>
+          <option value="telegram">Telegram_Indexer</option>
+        </select>
+        {indexerType === 'telegram' && (
+          <select
+            value={telegramSeType}
+            onChange={e => setTelegramSeType(e.target.value)}
+            className="border border-orange-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 bg-white"
+            title="Tryb indeksowania"
+          >
+            <option value="normal">Normal</option>
+            <option value="hard">Hard</option>
+          </select>
+        )}
+        <button
+          onClick={selectAllByDate}
+          disabled={eligibleByDate.length === 0}
+          className="px-4 py-1.5 bg-orange-100 text-orange-800 border border-orange-300 rounded-lg text-sm hover:bg-orange-200 disabled:opacity-40"
+        >
+          {allEligibleSelected
+            ? 'Odznacz wszystkie'
+            : dateFrom
+              ? `Zaznacz wszystkie z ${dateFrom} (${eligibleByDate.length})`
+              : `Zaznacz wszystkie (${eligibleByDate.length})`}
+        </button>
         <button
           onClick={submitToIndexer}
-          disabled={indexing || posts.filter(p => p.wp_post_url).length === 0}
-          className="px-4 py-2 bg-orange-500 text-white rounded-lg text-sm hover:bg-orange-600 disabled:opacity-40 flex items-center gap-2"
+          disabled={indexing || selectedIds.size === 0}
+          className="px-4 py-1.5 bg-orange-500 text-white rounded-lg text-sm hover:bg-orange-600 disabled:opacity-40 flex items-center gap-2"
         >
           {indexing ? (
             <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />Wysyłanie...</>
           ) : (
-            `Prześlij do indexera (${posts.filter(p => p.wp_post_url).length})`
+            `Prześlij do indexera (${selectedIds.size})`
           )}
         </button>
+        {selectedIds.size > 0 && (
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-800 border border-gray-200 rounded-lg bg-white"
+          >
+            Wyczyść zaznaczenie
+          </button>
+        )}
         {indexResult && (
-          <span className={`px-3 py-2 rounded-lg text-sm font-medium ${indexResult.ok ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+          <span className={`px-3 py-1.5 rounded-lg text-sm font-medium ${indexResult.ok ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
             {indexResult.msg}
           </span>
         )}
@@ -342,6 +445,16 @@ export default function History() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="px-3 py-3 w-8">
+                    <input
+                      type="checkbox"
+                      checked={allEligibleSelected}
+                      onChange={selectAllByDate}
+                      disabled={eligibleByDate.length === 0}
+                      className="rounded"
+                      title={dateFrom ? `Zaznacz wszystkie z ${dateFrom}` : 'Zaznacz wszystkie'}
+                    />
+                  </th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Data</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Klient</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600">Domena klienta</th>
@@ -355,7 +468,20 @@ export default function History() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {filteredPosts.map((p) => (
-                  <tr key={p.id} className="hover:bg-gray-50">
+                  <tr
+                    key={p.id}
+                    className={`hover:bg-gray-50 ${selectedIds.has(p.id) ? 'bg-orange-50' : ''}`}
+                  >
+                    <td className="px-3 py-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(p.id)}
+                        onChange={() => toggleSelect(p.id)}
+                        disabled={!p.wp_post_url}
+                        className="rounded disabled:opacity-30"
+                        title={p.wp_post_url ? 'Zaznacz do indexera' : 'Brak URL'}
+                      />
+                    </td>
                     <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatDate(p.created_at)}</td>
                     <td className="px-4 py-3 font-medium text-gray-800">{p.client_name || '—'}</td>
                     <td className="px-4 py-3 text-gray-600 max-w-[120px] truncate">{p.client_domain}</td>
