@@ -48,9 +48,12 @@ logger = logging.getLogger(__name__)
 # Default GPT model — can be overridden via GPT_MODEL env var or DB settings
 GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
 
-# In-memory cache for GPT model (avoids DB query on every GPT call)
+# In-memory cache for GPT model + custom LLM config (avoids DB query on every GPT call)
 _gpt_model_cache: dict = {"model": None, "ts": 0}
 _GPT_MODEL_CACHE_TTL = 120  # seconds
+
+# Cache for custom LLM settings
+_custom_llm_cache: dict = {"data": None, "ts": 0}
 
 
 async def get_gpt_model() -> str:
@@ -71,6 +74,46 @@ async def get_gpt_model() -> str:
     except Exception as e:
         logger.debug(f"[GPT] Model cache read failed: {e}")
     return GPT_MODEL
+
+
+async def get_custom_llm_config() -> dict:
+    """Return custom LLM config from DB. Keys: enabled, base_url, model, api_key. Cached 2min."""
+    now = time.time()
+    if _custom_llm_cache["data"] is not None and (now - _custom_llm_cache["ts"]) < _GPT_MODEL_CACHE_TTL:
+        return _custom_llm_cache["data"]
+    default = {"enabled": False, "base_url": "", "model": "", "api_key": ""}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT key, value FROM settings WHERE key IN ('custom_llm_enabled','custom_llm_base_url','custom_llm_model','custom_llm_api_key')"
+            ) as cur:
+                rows = dict(await cur.fetchall())
+        result = {
+            "enabled": rows.get("custom_llm_enabled", "0") == "1",
+            "base_url": rows.get("custom_llm_base_url", ""),
+            "model": rows.get("custom_llm_model", ""),
+            "api_key": rows.get("custom_llm_api_key", ""),
+        }
+        _custom_llm_cache["data"] = result
+        _custom_llm_cache["ts"] = now
+        return result
+    except Exception as e:
+        logger.debug(f"[GPT] Custom LLM cache read failed: {e}")
+    return default
+
+
+async def get_openai_client() -> tuple["AsyncOpenAI", str]:
+    """Return (client, model) — uses custom LLM if enabled, otherwise standard OpenAI."""
+    cfg = await get_custom_llm_config()
+    if cfg["enabled"] and cfg["base_url"] and cfg["model"]:
+        custom_client = AsyncOpenAI(
+            api_key=cfg["api_key"] or "not-needed",
+            base_url=cfg["base_url"].rstrip("/") + "/v1" if not cfg["base_url"].rstrip("/").endswith("/v1") else cfg["base_url"],
+        )
+        return custom_client, cfg["model"]
+    # Standard OpenAI
+    model = await get_gpt_model()
+    return client, model
 
 
 # Functions _is_blog_url, _count_words, _keyword_density, _extract_lsi,
@@ -162,11 +205,12 @@ async def _fetch_serp_content(
 
 
 async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = None) -> str:
+    _client, _model = await get_openai_client()
     if model is None:
-        model = await get_gpt_model()
+        model = _model
     for attempt in range(3):
         try:
-            response = await client.chat.completions.create(
+            response = await _client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system},

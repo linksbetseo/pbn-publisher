@@ -148,4 +148,7 @@ export const notifications = {
   saveGptModel: (model) => api.post('/api/notifications/gpt-model', { model }),
   saveImageSource: (image_source) => api.post('/api/notifications/default-image-source', { image_source }),
   saveNotifyPrefs: (prefs) => api.post('/api/notifications/notify-prefs', prefs),
+  getCustomLlm: () => api.get('/api/notifications/custom-llm'),
+  saveCustomLlm: (data) => api.post('/api/notifications/custom-llm', data),
+  testCustomLlm: () => api.post('/api/notifications/custom-llm/test'),
 }

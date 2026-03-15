@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from config import DB_PATH
 
@@ -214,7 +214,7 @@ async def get_results():
 
 
 @router.get("/results/all")
-async def get_all_results(limit: int = 100):
+async def get_all_results(limit: int = Query(100, ge=1, le=10000)):
     """Get all deindex check records (flat list, newest first)."""
     await ensure_table()
     async with aiosqlite.connect(DB_PATH) as db:

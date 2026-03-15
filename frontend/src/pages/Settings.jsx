@@ -34,6 +34,11 @@ export default function Settings() {
   const [savingModel, setSavingModel] = useState(false)
   const [savingImage, setSavingImage] = useState(false)
   const [testing, setTesting] = useState(false)
+  // Custom LLM
+  const [customLlm, setCustomLlm] = useState({ enabled: false, base_url: '', model: '', api_key: '', api_key_masked: '', api_key_set: false })
+  const [savingCustomLlm, setSavingCustomLlm] = useState(false)
+  const [testingCustomLlm, setTestingCustomLlm] = useState(false)
+  const [customLlmTestResult, setCustomLlmTestResult] = useState(null)
   const [notifyPrefs, setNotifyPrefs] = useState({
     notify_autopilot_done: true,
     notify_bulk_publish_done: true,
@@ -46,20 +51,29 @@ export default function Settings() {
   const addToast = useToast()
 
   useEffect(() => {
-    notifications.getSettings()
-      .then(res => {
-        const s = res.data || {}
-        if (s.telegram_bot_token_masked) setBotToken(s.telegram_bot_token_masked)
-        if (s.telegram_chat_id) setChatId(s.telegram_chat_id)
-        setConfigured(!!s.telegram_configured)
-        if (s.gpt_model) setGptModel(s.gpt_model)
-        if (s.default_image_source) setImageSource(s.default_image_source)
-        setEncryptionKeySet(!!s.encryption_key_set)
-        if (s.api_keys_status) setApiKeysStatus(s.api_keys_status)
-        if (s.notify_prefs) setNotifyPrefs(prev => ({ ...prev, ...s.notify_prefs }))
+    Promise.all([
+      notifications.getSettings(),
+      notifications.getCustomLlm(),
+    ]).then(([settingsRes, llmRes]) => {
+      const s = settingsRes.data || {}
+      if (s.telegram_bot_token_masked) setBotToken(s.telegram_bot_token_masked)
+      if (s.telegram_chat_id) setChatId(s.telegram_chat_id)
+      setConfigured(!!s.telegram_configured)
+      if (s.gpt_model) setGptModel(s.gpt_model)
+      if (s.default_image_source) setImageSource(s.default_image_source)
+      setEncryptionKeySet(!!s.encryption_key_set)
+      if (s.api_keys_status) setApiKeysStatus(s.api_keys_status)
+      if (s.notify_prefs) setNotifyPrefs(prev => ({ ...prev, ...s.notify_prefs }))
+      const l = llmRes.data || {}
+      setCustomLlm({
+        enabled: !!l.enabled,
+        base_url: l.base_url || '',
+        model: l.model || '',
+        api_key: l.api_key_masked || '',
+        api_key_masked: l.api_key_masked || '',
+        api_key_set: !!l.api_key_set,
       })
-      .catch(() => {})
-      .finally(() => setLoading(false))
+    }).catch(() => {}).finally(() => setLoading(false))
   }, [])
 
   const handleSaveTelegram = async () => {
@@ -93,6 +107,37 @@ export default function Settings() {
       addToast(e.response?.data?.detail || 'Blad wysylania wiadomosci testowej', 'error')
     } finally {
       setTesting(false)
+    }
+  }
+
+  const handleSaveCustomLlm = async () => {
+    setSavingCustomLlm(true)
+    try {
+      const payload = {
+        enabled: customLlm.enabled,
+        base_url: customLlm.base_url.trim(),
+        model: customLlm.model.trim(),
+        api_key: customLlm.api_key,
+      }
+      await notifications.saveCustomLlm(payload)
+      addToast(customLlm.enabled ? 'Własny LLM aktywny — artykuły będą generowane przez Twój endpoint' : 'Własny LLM wyłączony — używam standardowego OpenAI', 'success')
+    } catch (e) {
+      addToast(e.response?.data?.detail || 'Błąd zapisu', 'error')
+    } finally {
+      setSavingCustomLlm(false)
+    }
+  }
+
+  const handleTestCustomLlm = async () => {
+    setTestingCustomLlm(true)
+    setCustomLlmTestResult(null)
+    try {
+      const res = await notifications.testCustomLlm()
+      setCustomLlmTestResult(res.data)
+    } catch (e) {
+      setCustomLlmTestResult({ ok: false, error: e.response?.data?.detail || 'Błąd połączenia' })
+    } finally {
+      setTestingCustomLlm(false)
     }
   }
 
@@ -211,6 +256,7 @@ export default function Settings() {
             { key: 'freepik', label: 'Freepik', desc: 'FREEPIK_API_KEY — obrazki AI (Z-Image, Flux, Stock)' },
             { key: 'dataforseo', label: 'DataForSEO', desc: 'DATAFORSEO_LOGIN + PASSWORD — dane SERP' },
             { key: 'rocket_indexer', label: 'Rocket Indexer', desc: 'ROCKET_INDEXER_TOKEN — indeksowanie Google' },
+            { key: 'telegram_indexer', label: 'Telegram Indexer', desc: 'TELEGRAM_INDEXER_TOKEN — link-indexing-bot.com' },
           ].map(item => (
             <div key={item.key} className="flex items-center justify-between p-3 rounded-lg border border-gray-200 dark:border-gray-600">
               <div>
@@ -273,6 +319,104 @@ export default function Settings() {
         >
           {savingModel ? 'Zapisywanie...' : 'Zapisz model'}
         </button>
+      </div>
+
+      {/* Custom LLM */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm p-6">
+        <div className="flex items-center justify-between mb-5">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200">Własny LLM (OpenAI-compatible)</h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+              LM Studio, Groq, Ollama, llama.cpp lub dowolny serwer zgodny z OpenAI API
+            </p>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <div
+              onClick={() => setCustomLlm(prev => ({ ...prev, enabled: !prev.enabled }))}
+              className={`relative w-11 h-6 rounded-full transition-colors cursor-pointer ${customLlm.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${customLlm.enabled ? 'translate-x-5' : ''}`} />
+            </div>
+            <span className={`text-xs font-semibold ${customLlm.enabled ? 'text-blue-600' : 'text-gray-400'}`}>
+              {customLlm.enabled ? 'Aktywny' : 'Wyłączony'}
+            </span>
+          </label>
+        </div>
+
+        {customLlm.enabled && (
+          <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg text-xs text-blue-700 dark:text-blue-300">
+            Wszystkie artykuły będą generowane przez Twój endpoint zamiast OpenAI. Upewnij się, że serwer jest dostępny.
+          </div>
+        )}
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Server URL <span className="text-gray-400 font-normal">(bez /v1)</span>
+            </label>
+            <input
+              type="text"
+              value={customLlm.base_url}
+              onChange={e => setCustomLlm(prev => ({ ...prev, base_url: e.target.value }))}
+              placeholder="http://localhost:1234  lub  https://api.groq.com/openai"
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            />
+            <p className="text-xs text-gray-400 mt-1">LM Studio: <code>http://localhost:1234</code> · Groq: <code>https://api.groq.com/openai</code> · Ollama: <code>http://localhost:11434/v1</code></p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Nazwa modelu</label>
+            <input
+              type="text"
+              value={customLlm.model}
+              onChange={e => setCustomLlm(prev => ({ ...prev, model: e.target.value }))}
+              placeholder="llama-3.1-8b-instruct  lub  llama3-70b-8192  lub  mistral"
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              API Key <span className="text-gray-400 font-normal">(opcjonalny — LM Studio nie wymaga)</span>
+            </label>
+            <input
+              type="password"
+              value={customLlm.api_key}
+              onChange={e => setCustomLlm(prev => ({ ...prev, api_key: e.target.value }))}
+              placeholder={customLlm.api_key_set ? '••••••••••••••••' : 'Zostaw puste jeśli niepotrzebny'}
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            />
+            {customLlm.api_key_set && (
+              <p className="text-xs text-gray-400 mt-1">Klucz zapisany. Wpisz nowy żeby zmienić.</p>
+            )}
+          </div>
+        </div>
+
+        {customLlmTestResult && (
+          <div className={`mt-4 p-3 rounded-lg text-sm ${customLlmTestResult.ok ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 text-green-700 dark:text-green-300' : 'bg-red-50 dark:bg-red-900/20 border border-red-200 text-red-700 dark:text-red-300'}`}>
+            {customLlmTestResult.ok
+              ? <>✓ Połączenie OK · Model: <strong>{customLlmTestResult.model}</strong> · Odpowiedź: <em>{customLlmTestResult.response}</em></>
+              : <>✗ Błąd: {customLlmTestResult.error}</>
+            }
+          </div>
+        )}
+
+        <div className="flex gap-3 mt-5">
+          <button
+            onClick={handleSaveCustomLlm}
+            disabled={savingCustomLlm}
+            className="px-6 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          >
+            {savingCustomLlm ? 'Zapisywanie...' : 'Zapisz konfigurację'}
+          </button>
+          <button
+            onClick={handleTestCustomLlm}
+            disabled={testingCustomLlm || !customLlm.base_url || !customLlm.model}
+            className="px-6 py-2.5 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+          >
+            {testingCustomLlm ? 'Testowanie...' : 'Testuj połączenie'}
+          </button>
+        </div>
       </div>
 
       {/* Default Image Source */}

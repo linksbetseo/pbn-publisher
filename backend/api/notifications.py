@@ -82,6 +82,7 @@ async def get_settings():
         "openai": bool(os.getenv("OPENAI_API_KEY", "")),
         "dataforseo": bool(os.getenv("DATAFORSEO_LOGIN", "")) and bool(os.getenv("DATAFORSEO_PASSWORD", "")),
         "rocket_indexer": bool(os.getenv("ROCKET_INDEXER_TOKEN", "")),
+        "telegram_indexer": bool(os.getenv("TELEGRAM_INDEXER_TOKEN", "")),
         "freepik": bool(os.getenv("FREEPIK_API_KEY", "")),
     }
 
@@ -201,6 +202,81 @@ async def save_notify_prefs(body: dict):
                 )
         await db.commit()
     return {"ok": True}
+
+
+class CustomLlmRequest(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+
+
+@router.get("/custom-llm")
+async def get_custom_llm():
+    """Return current custom LLM config (api_key masked)."""
+    await _ensure_settings_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT key, value FROM settings WHERE key IN ('custom_llm_enabled','custom_llm_base_url','custom_llm_model','custom_llm_api_key')"
+        ) as cur:
+            rows = dict(await cur.fetchall())
+    api_key_raw = rows.get("custom_llm_api_key", "")
+    masked = (api_key_raw[:6] + "..." + api_key_raw[-4:]) if len(api_key_raw) > 10 else ("***" if api_key_raw else "")
+    return {
+        "enabled": rows.get("custom_llm_enabled", "0") == "1",
+        "base_url": rows.get("custom_llm_base_url", ""),
+        "model": rows.get("custom_llm_model", ""),
+        "api_key_masked": masked,
+        "api_key_set": bool(api_key_raw),
+    }
+
+
+@router.post("/custom-llm")
+async def save_custom_llm(body: CustomLlmRequest):
+    """Save custom LLM config. Clears cache after save."""
+    await _ensure_settings_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_enabled',?)", ("1" if body.enabled else "0",))
+        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_base_url',?)", (body.base_url.strip(),))
+        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_model',?)", (body.model.strip(),))
+        # Only overwrite api_key if user sent a non-masked value
+        if body.api_key and "..." not in body.api_key:
+            await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_api_key',?)", (body.api_key,))
+        await db.commit()
+    # Invalidate in-memory cache
+    try:
+        from services.openai_service import _custom_llm_cache
+        _custom_llm_cache["data"] = None
+        _custom_llm_cache["ts"] = 0
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@router.post("/custom-llm/test")
+async def test_custom_llm():
+    """Send a test completion to the configured custom LLM endpoint."""
+    from services.openai_service import get_custom_llm_config
+    cfg = await get_custom_llm_config()
+    if not cfg["base_url"] or not cfg["model"]:
+        from fastapi import HTTPException
+        raise HTTPException(400, "Brak base_url lub model — najpierw skonfiguruj i zapisz")
+    try:
+        from openai import AsyncOpenAI
+        base = cfg["base_url"].rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        test_client = AsyncOpenAI(api_key=cfg["api_key"] or "not-needed", base_url=base)
+        resp = await test_client.chat.completions.create(
+            model=cfg["model"],
+            messages=[{"role": "user", "content": "Reply with: OK"}],
+            max_tokens=10,
+            temperature=0,
+        )
+        answer = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+        return {"ok": True, "response": answer, "model": cfg["model"], "base_url": cfg["base_url"]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 async def should_notify(pref_key: str) -> bool:

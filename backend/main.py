@@ -330,6 +330,8 @@ async def lifespan(app: FastAPI):
                     ON posts(my_domain_id);
                 CREATE INDEX IF NOT EXISTS idx_posts_domain_status
                     ON posts(my_domain_id, status);
+                CREATE INDEX IF NOT EXISTS idx_posts_date
+                    ON posts(date(created_at));
             """)
             await db.commit()
         except Exception:
@@ -444,7 +446,6 @@ app.add_middleware(
 
 
 # Simple rate limiter — per IP, configurable per minute for API endpoints
-import time as _time
 _rate_limit_store: dict[str, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60  # seconds
 _RATE_LIMIT_MAX = 300  # requests per window (UI makes many API calls per click)
