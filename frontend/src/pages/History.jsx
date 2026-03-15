@@ -28,6 +28,9 @@ export default function History() {
   const [indexing, setIndexing] = useState(false)
   const [indexResult, setIndexResult] = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set())
+  // Map of id -> wp_post_url for ALL selected posts (may span multiple pages)
+  const [selectedUrlMap, setSelectedUrlMap] = useState({})
+  const [selectingAll, setSelectingAll] = useState(false)
   const [indexerType, setIndexerType] = useState('rocket') // 'rocket' | 'telegram'
   const [telegramSeType, setTelegramSeType] = useState('normal')
   const LIMIT = 50
@@ -35,6 +38,7 @@ export default function History() {
   const load = useCallback(async (newOffset = 0) => {
     setLoading(true)
     setSelectedIds(new Set())
+    setSelectedUrlMap({})
     const params = { limit: LIMIT, offset: newOffset }
     if (clientFilter) params.client_id = clientFilter
     if (statusFilter) params.status = statusFilter
@@ -146,42 +150,65 @@ export default function History() {
 
   // ── Checkbox helpers ─────────────────────────────────────────────────────────
 
-  const toggleSelect = (id) => {
+  const toggleSelect = (id, url) => {
     setSelectedIds(prev => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+    setSelectedUrlMap(prev => {
+      const next = { ...prev }
+      if (next[id]) {
+        delete next[id]
+      } else if (url) {
+        next[id] = url
+      }
       return next
     })
   }
 
-  // Select all posts whose DATE(created_at) matches dateFrom (if set), else all on current page with a URL
-  const selectAllByDate = () => {
-    const targetDate = dateFrom // e.g. "2026-03-14"
-    const eligible = filteredPosts.filter(p => {
-      if (!p.wp_post_url) return false
-      if (targetDate) {
-        const d = p.created_at ? p.created_at.slice(0, 10) : ''
-        return d === targetDate
-      }
-      return true
-    })
-    const ids = new Set(eligible.map(p => p.id))
-    // If all already selected — deselect all; else select all
-    const allSelected = ids.size > 0 && [...ids].every(id => selectedIds.has(id))
-    if (allSelected) {
+  // Select ALL posts matching current filters across all pages (not just the visible 50)
+  const selectAllByDate = async () => {
+    // If already have all selected — deselect everything
+    if (allEligibleSelected) {
       setSelectedIds(new Set())
-    } else {
+      setSelectedUrlMap({})
+      return
+    }
+    setSelectingAll(true)
+    try {
+      const params = { limit: 5000, offset: 0 }
+      if (clientFilter) params.client_id = clientFilter
+      if (statusFilter) params.status = statusFilter
+      if (batchFilter) params.batch_tag = batchFilter
+      if (dateFrom) params.date_from = dateFrom
+      if (dateTo) params.date_to = dateTo
+      const res = await historyApi.list(params)
+      const all = (res.data.posts || []).filter(p => p.wp_post_url)
+      const ids = new Set(all.map(p => p.id))
+      const urlMap = {}
+      all.forEach(p => { urlMap[p.id] = p.wp_post_url })
       setSelectedIds(ids)
+      setSelectedUrlMap(urlMap)
+      addToast(`Zaznaczono ${ids.size} postów`, 'success')
+    } catch {
+      addToast('Błąd pobierania wszystkich postów', 'error')
+    } finally {
+      setSelectingAll(false)
     }
   }
 
   // ── Indexer submit ──────────────────────────────────────────────────────────
 
   const submitToIndexer = async () => {
-    const urls = filteredPosts
-      .filter(p => selectedIds.has(p.id) && p.wp_post_url)
-      .map(p => p.wp_post_url)
+    // Use selectedUrlMap (covers all pages) — fall back to visible posts for ids added via row checkbox
+    const urls = [...selectedIds]
+      .map(id => selectedUrlMap[id] || (posts.find(p => p.id === id)?.wp_post_url))
+      .filter(Boolean)
     if (urls.length === 0) {
       addToast('Zaznacz co najmniej jeden post z URL-em', 'error')
       return
@@ -233,12 +260,11 @@ export default function History() {
       )
     : posts
 
-  const eligibleByDate = filteredPosts.filter(p => {
-    if (!p.wp_post_url) return false
-    if (dateFrom) return (p.created_at || '').slice(0, 10) === dateFrom
-    return true
-  })
-  const allEligibleSelected = eligibleByDate.length > 0 && eligibleByDate.every(p => selectedIds.has(p.id))
+  // For the toggle label we use total (all pages); for "all selected" we compare selectedIds count to total
+  const eligibleOnPage = filteredPosts.filter(p => p.wp_post_url)
+  // "All selected" means selectedIds covers the full filtered result set (total posts with URL)
+  // We approximate: if selectedIds.size >= total it's safe to say all are selected
+  const allEligibleSelected = selectedIds.size > 0 && selectedIds.size >= total
 
   return (
     <div className="p-8">
@@ -395,14 +421,15 @@ export default function History() {
         )}
         <button
           onClick={selectAllByDate}
-          disabled={eligibleByDate.length === 0}
-          className="px-4 py-1.5 bg-orange-100 text-orange-800 border border-orange-300 rounded-lg text-sm hover:bg-orange-200 disabled:opacity-40"
+          disabled={selectingAll || total === 0}
+          className="px-4 py-1.5 bg-orange-100 text-orange-800 border border-orange-300 rounded-lg text-sm hover:bg-orange-200 disabled:opacity-40 flex items-center gap-2"
         >
+          {selectingAll && <span className="animate-spin inline-block w-3 h-3 border-2 border-orange-600 border-t-transparent rounded-full" />}
           {allEligibleSelected
-            ? 'Odznacz wszystkie'
+            ? `Odznacz wszystkie (${selectedIds.size})`
             : dateFrom
-              ? `Zaznacz wszystkie z ${dateFrom} (${eligibleByDate.length})`
-              : `Zaznacz wszystkie (${eligibleByDate.length})`}
+              ? `Zaznacz wszystkie z ${dateFrom} (${total})`
+              : `Zaznacz wszystkie (${total})`}
         </button>
         <button
           onClick={submitToIndexer}
@@ -450,7 +477,7 @@ export default function History() {
                       type="checkbox"
                       checked={allEligibleSelected}
                       onChange={selectAllByDate}
-                      disabled={eligibleByDate.length === 0}
+                      disabled={selectingAll || total === 0}
                       className="rounded"
                       title={dateFrom ? `Zaznacz wszystkie z ${dateFrom}` : 'Zaznacz wszystkie'}
                     />
@@ -476,7 +503,7 @@ export default function History() {
                       <input
                         type="checkbox"
                         checked={selectedIds.has(p.id)}
-                        onChange={() => toggleSelect(p.id)}
+                        onChange={() => toggleSelect(p.id, p.wp_post_url)}
                         disabled={!p.wp_post_url}
                         className="rounded disabled:opacity-30"
                         title={p.wp_post_url ? 'Zaznacz do indexera' : 'Brak URL'}
