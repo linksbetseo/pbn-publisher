@@ -1,6 +1,6 @@
 import aiosqlite
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from config import DB_PATH
 from services.crypto_service import encrypt_password
@@ -54,6 +54,13 @@ class BatchImportRequest(BaseModel):
     batch_tag: str
     project_id: Optional[int] = None
     server: str = ""
+
+    @field_validator("lines")
+    @classmethod
+    def lines_max_size(cls, v):
+        if len(v) > 500_000:  # ~10k domen po ~50 znaków każda
+            raise ValueError("lines max 500 000 znaków (ok. 10 000 domen)")
+        return v
 
 
 @router.get("/batches")

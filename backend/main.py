@@ -1,9 +1,14 @@
+import asyncio
+import base64
 import csv
 import logging
 import os
+import random
 import secrets
-from datetime import datetime, timezone
+import time as _time
+from datetime import datetime, timedelta, timezone
 import aiosqlite
+import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -104,8 +109,6 @@ async def import_csv_domains(db: aiosqlite.Connection):
 
 async def _weekly_cron():
     """Run weekly domain health snapshot every Monday at 03:00 UTC."""
-    import asyncio as _asyncio
-    from datetime import timedelta
     while True:
         now = datetime.now(timezone.utc)
         # Next Monday (weekday=0) at 03:00 UTC
@@ -115,7 +118,7 @@ async def _weekly_cron():
         if next_run <= now:
             next_run += timedelta(days=7)
         wait_sec = max(0, (next_run - now).total_seconds())
-        await _asyncio.sleep(wait_sec)
+        await asyncio.sleep(wait_sec)
         try:
             from api.health import run_weekly_snapshot
             count = await run_weekly_snapshot()
@@ -130,25 +133,22 @@ async def _daily_autopilot_cron():
     Anti-footprint: each day picks a random base hour (6-10) and adds 0-45 min jitter
     so that the cron never fires at the exact same time.
     """
-    import asyncio as _asyncio
-    import random as _random
-    from datetime import timedelta
     from api.autopilot import run_daily_all
     while True:
         now = datetime.now(timezone.utc)
         # Pick random window (morning/midday/evening) + random jitter — anti-footprint
         _windows = [(6, 10), (11, 14), (19, 22)]
-        _win = _random.choice(_windows)
-        rand_hour = _random.randint(*_win)
-        rand_minute = _random.randint(0, 59)
+        _win = random.choice(_windows)
+        rand_hour = random.randint(*_win)
+        rand_minute = random.randint(0, 59)
         next_run = now.replace(hour=rand_hour, minute=rand_minute, second=0, microsecond=0)
         if next_run <= now:
             next_run += timedelta(days=1)
-            _win = _random.choice(_windows)
-            next_run = next_run.replace(hour=_random.randint(*_win), minute=_random.randint(0, 59))
+            _win = random.choice(_windows)
+            next_run = next_run.replace(hour=random.randint(*_win), minute=random.randint(0, 59))
         wait_sec = (next_run - now).total_seconds()
         logger.info(f"[DailyCron] Next autopilot run scheduled at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
-        await _asyncio.sleep(wait_sec)
+        await asyncio.sleep(wait_sec)
         try:
             await run_daily_all()
             logger.info(f"[DailyCron] Autopilot triggered at {datetime.now(timezone.utc).isoformat()}")
@@ -158,23 +158,17 @@ async def _daily_autopilot_cron():
 
 async def _date_modified_refresh_cron():
     """Refresh dateModified on published WP posts every ~6 months (180 days)."""
-    import asyncio as _asyncio
-    from datetime import timedelta
-    import aiosqlite as _aiosqlite
-    import httpx as _httpx
-    import base64 as _b64
-
     # Run every Sunday at 04:00 UTC
     while True:
         now = datetime.now(timezone.utc)
         days_ahead = (6 - now.weekday()) % 7 or 7  # next Sunday
         next_run = (now + timedelta(days=days_ahead)).replace(hour=4, minute=0, second=0, microsecond=0)
         wait_sec = max(0, (next_run - now).total_seconds())
-        await _asyncio.sleep(wait_sec)
+        await asyncio.sleep(wait_sec)
         try:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
-            async with _aiosqlite.connect(DB_PATH) as db:
-                db.row_factory = _aiosqlite.Row
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
                 async with db.execute(
                     """SELECT dk.id, dk.wp_post_url, md.domain, md.wp_login, md.wp_pass
                        FROM domain_keywords dk
@@ -198,14 +192,14 @@ async def _date_modified_refresh_cron():
                     posts_manual = [dict(r) for r in await cur.fetchall()]
             all_posts = posts + posts_manual
 
-            async def _refresh_wp_post(hc: _httpx.AsyncClient, post: dict, table: str) -> bool:
+            async def _refresh_wp_post(hc: httpx.AsyncClient, post: dict, table: str) -> bool:
                 try:
                     url = post["wp_post_url"]
                     domain = post["domain"].rstrip("/")
                     if not domain.startswith("http"):
                         domain = "https://" + domain
                     plain_pass = get_plain_password(post['wp_pass'])
-                    creds = _b64.b64encode(f"{post['wp_login']}:{plain_pass}".encode()).decode()
+                    creds = base64.b64encode(f"{post['wp_login']}:{plain_pass}".encode()).decode()
                     headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
                     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
                     slug = url.rstrip("/").split("/")[-1]
@@ -225,25 +219,37 @@ async def _date_modified_refresh_cron():
                             )
                             if patch_resp.status_code in (200, 201):
                                 update_col = "published_at" if table == "domain_keywords" else "created_at"
-                                async with _aiosqlite.connect(DB_PATH) as db:
-                                    await db.execute(
-                                        f"UPDATE {table} SET {update_col}=? WHERE id=?",
-                                        (datetime.now(timezone.utc).isoformat(), post["id"])
-                                    )
-                                    await db.commit()
-                                return True
+                                # Reuse single connection — collect updates and flush after loop
+                                return (table, update_col, post["id"])
                 except Exception as e:
                     logger.warning(f"[DateModifiedCron] Failed to refresh {post.get('wp_post_url', '?')}: {e}")
-                return False
+                return None
 
             refreshed = 0
-            async with _httpx.AsyncClient(timeout=15, verify=False) as hc:
+            pending_updates: list[tuple] = []
+            async with httpx.AsyncClient(timeout=15, verify=False) as hc:
                 for post in posts:
-                    if await _refresh_wp_post(hc, post, "domain_keywords"):
+                    result = await _refresh_wp_post(hc, post, "domain_keywords")
+                    if result:
+                        pending_updates.append(result)
                         refreshed += 1
                 for post in posts_manual:
-                    if await _refresh_wp_post(hc, post, "posts"):
+                    result = await _refresh_wp_post(hc, post, "posts")
+                    if result:
+                        pending_updates.append(result)
                         refreshed += 1
+
+            # Batch DB update — single connection for all refreshed posts
+            if pending_updates:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    for table, update_col, post_id in pending_updates:
+                        await db.execute(
+                            f"UPDATE {table} SET {update_col}=? WHERE id=?",
+                            (now_iso, post_id)
+                        )
+                    await db.commit()
+
             logger.info(f"[DateModifiedCron] Refreshed {refreshed}/{len(all_posts)} posts")
         except Exception as e:
             logger.error(f"[DateModifiedCron] Error: {e}", exc_info=True)
@@ -251,8 +257,6 @@ async def _date_modified_refresh_cron():
 
 async def _weekly_deindex_cron():
     """Run deindex scan every Wednesday at 05:00 UTC."""
-    import asyncio as _asyncio
-    from datetime import timedelta
     while True:
         now = datetime.now(timezone.utc)
         # Next Wednesday (weekday 2) at 05:00 UTC
@@ -262,7 +266,7 @@ async def _weekly_deindex_cron():
             next_run += timedelta(days=7)
         wait_sec = max(0, (next_run - now).total_seconds())
         logger.info(f"[DeindexCron] Next scan at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
-        await _asyncio.sleep(wait_sec)
+        await asyncio.sleep(wait_sec)
         try:
             from api.deindex import run_deindex_scan
             result = await run_deindex_scan()
@@ -375,7 +379,6 @@ async def lifespan(app: FastAPI):
         await db.commit()
         # Clean up expired SERP cache entries on startup
         try:
-            import time as _time
             await db.execute("DELETE FROM serp_cache WHERE expires_at < ?", (_time.time(),))
             await db.commit()
         except Exception:
@@ -389,9 +392,8 @@ async def lifespan(app: FastAPI):
     # Start news autopilot cron
     async def _news_autopilot_cron():
         """Run news autopilot every 15 minutes for auto-publish portals."""
-        import asyncio as __asyncio
         while True:
-            await __asyncio.sleep(900)  # 15 min between cycles
+            await asyncio.sleep(900)  # 15 min between cycles
             try:
                 from api.news_portals import run_news_autopilot
                 result = await run_news_autopilot()
@@ -400,9 +402,7 @@ async def lifespan(app: FastAPI):
                 logger.error(f"[NewsAutopilot] Cron error: {e}", exc_info=True)
 
     # Start background crons with exception logging
-    import asyncio as _asyncio
-
-    def _cron_done_callback(task: _asyncio.Task):
+    def _cron_done_callback(task: asyncio.Task):
         """Log unhandled exceptions from background cron tasks."""
         if task.cancelled():
             return
@@ -418,7 +418,7 @@ async def lifespan(app: FastAPI):
         (_weekly_deindex_cron(), "weekly-deindex"),
         (_news_autopilot_cron(), "news-autopilot"),
     ]:
-        t = _asyncio.create_task(_coro, name=_name)
+        t = asyncio.create_task(_coro, name=_name)
         t.add_done_callback(_cron_done_callback)
         _bg_tasks.append(t)
     yield

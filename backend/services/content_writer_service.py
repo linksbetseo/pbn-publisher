@@ -138,6 +138,9 @@ async def generate_seo_article(
         url = url.strip()
         if not url.startswith("http://") and not url.startswith("https://"):
             url = "https://" + url
+        # Block non-http(s) schemes (javascript:, data:, etc.)
+        if not url.startswith(("http://", "https://")):
+            return ""
         return url
 
     _step = on_step or (lambda *a: None)

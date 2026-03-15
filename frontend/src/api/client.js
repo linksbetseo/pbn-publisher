@@ -4,24 +4,35 @@ const BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.DEV ? 'http://localhost:8001' : ''
 )
 
-const api = axios.create({
-  baseURL: BASE_URL,
-  timeout: 600000, // 10 min — article generation takes time
-})
-
-// Inject saved Basic Auth token on every request
-api.interceptors.request.use(config => {
+const _authInterceptor = config => {
   const token = localStorage.getItem('pbn_auth_token')
   if (token) {
     config.headers = config.headers || {}
     config.headers['Authorization'] = `Basic ${token}`
   }
   return config
+}
+
+const api = axios.create({
+  baseURL: BASE_URL,
+  timeout: 30000, // 30s default for normal requests
 })
 
-// On 401 — only logout if explicitly marked as an auth-check request that failed
-// Never auto-logout from normal API calls (would cause login loops)
+// Long-running axios instance for article generation / bulk publish (up to 10 min)
+export const apiLong = axios.create({
+  baseURL: BASE_URL,
+  timeout: 600000,
+})
+
+// Inject saved Basic Auth token on every request
+api.interceptors.request.use(_authInterceptor)
+apiLong.interceptors.request.use(_authInterceptor)
+
 api.interceptors.response.use(
+  res => res,
+  err => Promise.reject(err)
+)
+apiLong.interceptors.response.use(
   res => res,
   err => Promise.reject(err)
 )
@@ -84,7 +95,9 @@ export const bulkPublish = {
 }
 
 export const publish = {
-  generate: (data) => api.post('/api/publish/generate', data),
+  generate: (data) => apiLong.post('/api/publish/generate', data),
+  post: (data) => apiLong.post('/api/publish/post', data),
+  postAsync: (data) => apiLong.post('/api/publish/post-async', data),
   checkDuplicate: (topic, domainId) => api.get('/api/publish/check-duplicate', { params: { topic, domain_id: domainId } }),
   pingSitemap: (data) => api.post('/api/publish/ping-sitemap', data),
   domainPosts: (domainId, limit = 20) => api.get(`/api/publish/domain-posts/${domainId}`, { params: { limit } }),
@@ -108,11 +121,11 @@ export const dashboard = {
 }
 
 export const topicalMap = {
-  generate: (data) => api.post('/api/topical-map', data),
+  generate: (data) => apiLong.post('/api/topical-map', data),
 }
 
 export const contentWriter = {
-  generate: (data) => api.post('/api/content-writer/generate', data),
+  generate: (data) => apiLong.post('/api/content-writer/generate', data),
   serpCacheInfo: (keyword) => api.get('/api/content-writer/serp-cache-info', { params: { keyword } }),
   sendToAutopilot: (data) => api.post('/api/content-writer/send-to-autopilot', data),
 }
@@ -124,7 +137,7 @@ export const analytics = {
 }
 
 export const deindex = {
-  scan: () => api.post('/api/deindex/scan'),
+  scan: () => apiLong.post('/api/deindex/scan'),
   results: () => api.get('/api/deindex/results'),
 }
 

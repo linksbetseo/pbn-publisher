@@ -68,8 +68,8 @@ async def get_gpt_model() -> str:
                     _gpt_model_cache["model"] = row[0]
                     _gpt_model_cache["ts"] = now
                     return row[0]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"[GPT] Model cache read failed: {e}")
     return GPT_MODEL
 
 
@@ -122,7 +122,7 @@ async def _fetch_serp_content(
             parts = []
             word_counts = []
             densities = []
-            all_text = ""
+            text_parts = []
             contents = await asyncio.gather(*[dfs.page_content(url, _client=_dfs_client) for url in blog_urls], return_exceptions=True)
 
         for url, content in zip(blog_urls, contents):
@@ -132,9 +132,10 @@ async def _fetch_serp_content(
             dens = _keyword_density(content, topic)
             word_counts.append(wc)
             densities.append(dens)
-            all_text += " " + content
+            text_parts.append(content)
             parts.append(f"--- {url} ({wc} słów, gęstość KW: {dens}%) ---\n{content[:3000]}")
 
+        all_text = " ".join(text_parts)
         avg_words = int(sum(word_counts) / len(word_counts)) if word_counts else 0
         avg_density = round(sum(densities) / len(densities), 2) if densities else 0.0
         lsi_terms = _extract_lsi(all_text, topic, top_n=20)
@@ -178,7 +179,7 @@ async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int
             if not response.choices:
                 logger.warning("[GPT] Empty choices returned — possible content filter")
                 return ""
-            return response.choices[0].message.content.strip()
+            return (response.choices[0].message.content or "").strip()
         except Exception as e:
             if attempt == 2:
                 raise
@@ -186,7 +187,6 @@ async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int
             wait = 2 ** attempt + random.uniform(0, 1.5)
             logger.warning(f"[GPT] attempt {attempt+1} failed: {e} — retrying in {wait:.1f}s")
             await asyncio.sleep(wait)
-    return ""  # unreachable
 
 
 
@@ -262,6 +262,42 @@ def _fix_heading_hierarchy(html: str) -> str:
 
 
 
+_LINK_CONTEXTS_PL = [
+    lambda lnk: f" Więcej na ten temat znajdziesz na stronie {lnk}.",
+    lambda lnk: f" Szczegółowe informacje dostępne są pod adresem {lnk}.",
+    lambda lnk: f" Warto odwiedzić serwis {lnk}, gdzie znajdziesz więcej materiałów.",
+    lambda lnk: f" Dodatkowe zasoby: {lnk}.",
+    lambda lnk: f" Polecamy również stronę {lnk}.",
+    lambda lnk: f" Temat szczegółowo omawia {lnk}.",
+    lambda lnk: f" Jak podaje {lnk}, jest to kluczowy aspekt zagadnienia.",
+    lambda lnk: f" Przeczytaj pełny przewodnik: {lnk}.",
+    lambda lnk: f" Na stronie {lnk} można znaleźć uzupełniające informacje.",
+    lambda lnk: f" Zgodnie z materiałami opublikowanymi na {lnk}, warto zwrócić uwagę na kilka kwestii.",
+    lambda lnk: f" Więcej danych na ten temat publikuje {lnk}.",
+    lambda lnk: f" Obszerną analizę tego zagadnienia przedstawia {lnk}.",
+    lambda lnk: f" Praktyczne wskazówki znajdziesz również na {lnk}.",
+    lambda lnk: f" Powiązane materiały zebrano na stronie {lnk}.",
+    lambda lnk: f" {lnk} prezentuje dodatkowe dane, które mogą okazać się przydatne.",
+]
+_LINK_CONTEXTS_EN = [
+    lambda lnk: f" Find more information at {lnk}.",
+    lambda lnk: f" Detailed resources are available at {lnk}.",
+    lambda lnk: f" We recommend visiting {lnk} for additional materials.",
+    lambda lnk: f" Additional resources: {lnk}.",
+    lambda lnk: f" Also check out {lnk}.",
+    lambda lnk: f" This topic is covered in depth at {lnk}.",
+    lambda lnk: f" As reported by {lnk}, this is a key consideration.",
+    lambda lnk: f" Read the full guide: {lnk}.",
+    lambda lnk: f" You can find additional insights at {lnk}.",
+    lambda lnk: f" According to {lnk}, there are several factors worth noting.",
+    lambda lnk: f" For a broader perspective, see {lnk}.",
+    lambda lnk: f" A comprehensive breakdown is available at {lnk}.",
+    lambda lnk: f" {lnk} offers a useful overview of related data.",
+    lambda lnk: f" Practical tips on this subject can be found at {lnk}.",
+    lambda lnk: f" Further reading on this topic: {lnk}.",
+]
+
+
 def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
     """
     Inject client links into article paragraphs contextually.
@@ -277,43 +313,7 @@ def _inject_anchors(html: str, anchors_info: str, language: str = "pl") -> str:
     paragraphs = re.findall(r'<p>.*?</p>', html, re.DOTALL)
     para_count = len(paragraphs)
 
-    # Vary the surrounding context — anti-footprint, language-aware
-    if language == "pl":
-        _LINK_CONTEXTS = [
-            lambda lnk: f" Więcej na ten temat znajdziesz na stronie {lnk}.",
-            lambda lnk: f" Szczegółowe informacje dostępne są pod adresem {lnk}.",
-            lambda lnk: f" Warto odwiedzić serwis {lnk}, gdzie znajdziesz więcej materiałów.",
-            lambda lnk: f" Dodatkowe zasoby: {lnk}.",
-            lambda lnk: f" Polecamy również stronę {lnk}.",
-            lambda lnk: f" Temat szczegółowo omawia {lnk}.",
-            lambda lnk: f" Jak podaje {lnk}, jest to kluczowy aspekt zagadnienia.",
-            lambda lnk: f" Przeczytaj pełny przewodnik: {lnk}.",
-            lambda lnk: f" Na stronie {lnk} można znaleźć uzupełniające informacje.",
-            lambda lnk: f" Zgodnie z materiałami opublikowanymi na {lnk}, warto zwrócić uwagę na kilka kwestii.",
-            lambda lnk: f" Więcej danych na ten temat publikuje {lnk}.",
-            lambda lnk: f" Obszerną analizę tego zagadnienia przedstawia {lnk}.",
-            lambda lnk: f" Praktyczne wskazówki znajdziesz również na {lnk}.",
-            lambda lnk: f" Powiązane materiały zebrano na stronie {lnk}.",
-            lambda lnk: f" {lnk} prezentuje dodatkowe dane, które mogą okazać się przydatne.",
-        ]
-    else:
-        _LINK_CONTEXTS = [
-            lambda lnk: f" Find more information at {lnk}.",
-            lambda lnk: f" Detailed resources are available at {lnk}.",
-            lambda lnk: f" We recommend visiting {lnk} for additional materials.",
-            lambda lnk: f" Additional resources: {lnk}.",
-            lambda lnk: f" Also check out {lnk}.",
-            lambda lnk: f" This topic is covered in depth at {lnk}.",
-            lambda lnk: f" As reported by {lnk}, this is a key consideration.",
-            lambda lnk: f" Read the full guide: {lnk}.",
-            lambda lnk: f" You can find additional insights at {lnk}.",
-            lambda lnk: f" According to {lnk}, there are several factors worth noting.",
-            lambda lnk: f" For a broader perspective, see {lnk}.",
-            lambda lnk: f" A comprehensive breakdown is available at {lnk}.",
-            lambda lnk: f" {lnk} offers a useful overview of related data.",
-            lambda lnk: f" Practical tips on this subject can be found at {lnk}.",
-            lambda lnk: f" Further reading on this topic: {lnk}.",
-        ]
+    _LINK_CONTEXTS = _LINK_CONTEXTS_PL if language == "pl" else _LINK_CONTEXTS_EN
     for i, link in enumerate(links):
         href_match = re.search(r'href=["\']([^"\']+)["\']', link)
         if not href_match:
@@ -613,6 +613,9 @@ async def generate_article(
         url = url.strip()
         if not url.startswith("http://") and not url.startswith("https://"):
             url = "https://" + url
+        # Block non-http(s) schemes (javascript:, data:, etc.)
+        if not url.startswith(("http://", "https://")):
+            return ""
         return url
 
     # Build anchor links — always rotate anchors, randomize dofollow/nofollow (never sponsored)
@@ -859,7 +862,7 @@ async def generate_article(
         intro_html = _markdown_to_html(intro_html)
     intro_html = _strip_markdown_remnants(intro_html)
     # SEO #65: enforce <strong> on first keyword mention in intro
-    if topic.lower() in intro_html.lower() and f'<strong>{topic}' not in intro_html.lower():
+    if re.search(r'\b' + re.escape(topic) + r'\b', intro_html, re.IGNORECASE) and f'<strong>{topic}' not in intro_html.lower():
         _kw_pattern = re.compile(re.escape(topic), re.IGNORECASE)
         _replaced = False
         def _strong_first(m):
@@ -1419,7 +1422,7 @@ async def generate_article(
     if word_count < 600:
         logger.warning(f"[Article] Short article ({word_count} words) for '{topic}' — may indicate GPT truncation")
     elif word_count < target_words * 0.6:
-        logger.warning(f"[Article] Article under 60%% target ({word_count}/{target_words} words) for '{topic}'")
+        logger.warning(f"[Article] Article under 60% target ({word_count}/{target_words} words) for '{topic}'")
 
     # FIX #11: compute keyword density of final article for quality monitoring
     final_density = _keyword_density(content, topic)
@@ -1455,22 +1458,30 @@ async def generate_article(
 
 
 async def describe_image_and_generate(image_b64: str, topic: str) -> str:
-    _model = await get_gpt_model()
-    vision_response = await client.chat.completions.create(
-        model=_model,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": f"Opisz krótko co widać na tym screenshocie (max 2 zdania). Kontekst: '{topic}'."},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-        ]}],
-        max_tokens=200,
-    )
-    description = vision_response.choices[0].message.content
-    return await generate_image(f"Professional illustration: {description}. Clean, modern design.")
+    try:
+        _model = await get_gpt_model()
+        vision_response = await client.chat.completions.create(
+            model=_model,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": f"Opisz krótko co widać na tym screenshocie (max 2 zdania). Kontekst: '{topic}'."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+            ]}],
+            max_tokens=200,
+        )
+        description = (vision_response.choices[0].message.content or "").strip()
+        return await generate_image(f"Professional illustration: {description}. Clean, modern design.")
+    except Exception as e:
+        logger.error(f"[Image] describe_image_and_generate failed: {e}")
+        return ""
 
 
-async def generate_image(prompt: str) -> str:
-    response = await client.images.generate(
-        model="dall-e-3", prompt=prompt, n=1,
-        size="1792x1024", response_format="b64_json",
-    )
-    return response.data[0].b64_json
+async def generate_image(prompt: str) -> Optional[str]:
+    try:
+        response = await client.images.generate(
+            model="dall-e-3", prompt=prompt, n=1,
+            size="1792x1024", response_format="b64_json",
+        )
+        return response.data[0].b64_json
+    except Exception as e:
+        logger.error(f"[Image] generate_image failed: {e}")
+        return None

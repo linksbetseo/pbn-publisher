@@ -16,6 +16,7 @@ from services.gemini_image_service import generate_image_gemini
 from services.freepik_service import generate_image_freepik
 from services.freepik_generate_service import generate_image_zimage, generate_image_flux
 from services.wordpress_service import publish_post
+from api.autopilot_helpers import fetch_image as _fetch_image_helper
 
 # In-memory job store for SSE progress (max 200 entries — auto-evict oldest finished)
 _publish_jobs: dict = {}
@@ -120,8 +121,7 @@ class GenerateRequest(BaseModel):
     def topic_length(cls, v):
         if len(v) > 200:
             raise ValueError("Topic max 200 characters")
-        # FIX #58: strip leading/trailing whitespace AND collapse internal multi-spaces
-        import re as _re
+        import re as _re  # local import — re not imported at module level in publish.py
         return _re.sub(r'\s+', ' ', v.strip())
 
     @field_validator("custom_prompt")
@@ -129,6 +129,16 @@ class GenerateRequest(BaseModel):
     def custom_prompt_length(cls, v):
         if len(v) > 2000:
             raise ValueError("Custom prompt max 2000 characters")
+        return v
+
+    @field_validator("anchor_url2", "anchor_url3")
+    @classmethod
+    def anchor_url_safe(cls, v):
+        if not v:
+            return v
+        v = v.strip()
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("anchor URL musi zaczynać się od http:// lub https://")
         return v
 
 
@@ -157,6 +167,24 @@ class PublishRequest(BaseModel):
     batch_tag: str = ""
     image_source: str = "none"  # none | gemini | freepik_stock | freepik_zimage | freepik_flux | dalle
     drip_delay: bool = True  # anti-footprint: random delays between domains
+
+    @field_validator("image_source")
+    @classmethod
+    def image_source_valid(cls, v):
+        allowed = {"none", "gemini", "freepik_stock", "freepik_zimage", "freepik_flux", "dalle"}
+        if v not in allowed:
+            raise ValueError(f"image_source must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("anchor_url2", "anchor_url3")
+    @classmethod
+    def anchor_url_safe(cls, v):
+        if not v:
+            return v
+        v = v.strip()
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("anchor URL musi zaczynać się od http:// lub https://")
+        return v
 
 
 def _drip_delay_range(domain_count: int) -> tuple[int, int]:
@@ -277,44 +305,10 @@ def _build_image_prompt(topic: str, title: str = "", provider: str = "") -> str:
 
 
 async def _fetch_image(topic: str, image_source: str, title: str = "") -> Optional[str]:
-    """Fetch image based on image_source setting. Tries primary provider, then fallbacks."""
-    if image_source == "none":
-        return None
+    """Fetch image — delegates to shared autopilot_helpers.fetch_image to avoid duplication."""
     img_prompt = _build_image_prompt(topic, title, provider=image_source)
-
-    _chains = {
-        "freepik_flux": [
-            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
-            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
-            ("gemini", lambda: generate_image_gemini(img_prompt)),
-        ],
-        "freepik_zimage": [
-            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
-            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
-            ("gemini", lambda: generate_image_gemini(img_prompt)),
-        ],
-        "freepik_stock": [
-            ("freepik_stock", lambda: generate_image_freepik(topic)),
-        ],
-        "dalle": [
-            ("dalle", lambda: generate_image(img_prompt)),
-            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
-            ("gemini", lambda: generate_image_gemini(img_prompt)),
-        ],
-        "gemini": [
-            ("gemini", lambda: generate_image_gemini(img_prompt)),
-            ("freepik_flux", lambda: generate_image_flux(img_prompt)),
-            ("freepik_zimage", lambda: generate_image_zimage(img_prompt)),
-        ],
-    }
-    chain = _chains.get(image_source, _chains.get("freepik_flux", []))
-
-    for provider_name, provider_fn in chain:
-        try:
-            return await provider_fn()
-        except Exception as e:
-            logger.warning(f"[Image] {provider_name} failed for '{topic}': {e}")
-    return None
+    img, _ = await _fetch_image_helper(image_source, topic, title, img_prompt)
+    return img
 
 
 @router.post("/post")
@@ -752,6 +746,7 @@ async def ping_sitemap(body: dict):
 @router.get("/domain-posts/{domain_id}")
 async def get_domain_posts(domain_id: int, limit: int = 20):
     """Return published posts on a domain for interlinking suggestions."""
+    limit = min(max(1, limit), 200)  # clamp 1–200
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
