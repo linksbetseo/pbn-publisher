@@ -3,7 +3,7 @@ import { internalLinks, domains } from '../api/client'
 import { useToast } from '../components/Toast'
 
 export default function InternalLinks() {
-  const { showToast } = useToast()
+  const addToast = useToast()
   const [domainList, setDomainList] = useState([])
   const [selectedDomain, setSelectedDomain] = useState('')
   const [lang, setLang] = useState('pl')
@@ -43,7 +43,7 @@ export default function InternalLinks() {
           setAnalyzing(false)
           // Reload suggestions
           loadSuggestions(activeJob.id, statusFilter)
-          showToast(r.data.status === 'done'
+          addToast(r.data.status === 'done'
             ? `Analiza zakończona — ${r.data.suggestions_total} propozycji`
             : `Błąd analizy: ${r.data.error || 'nieznany'}`,
             r.data.status === 'done' ? 'success' : 'error'
@@ -89,7 +89,7 @@ export default function InternalLinks() {
   }
 
   async function handleAnalyze() {
-    if (!selectedDomain) return showToast('Wybierz domenę', 'error')
+    if (!selectedDomain) return addToast('Wybierz domenę', 'error')
     setAnalyzing(true)
     setSuggestions([])
     setSelected(new Set())
@@ -97,10 +97,12 @@ export default function InternalLinks() {
       const r = await internalLinks.analyze({ my_domain_id: parseInt(selectedDomain), lang })
       setActiveJob(r.data)
       setJobs(prev => [r.data, ...prev])
-      showToast('Analiza uruchomiona...', 'info')
+      addToast('Analiza uruchomiona...', 'success')
     } catch (e) {
+      console.error('[InternalLinks] analyze error:', e.response?.data || e.message)
       setAnalyzing(false)
-      showToast(e.response?.data?.detail || 'Błąd uruchamiania analizy', 'error')
+      const msg = e.response?.data?.detail || e.response?.data?.message || e.message || 'Błąd uruchamiania analizy'
+      addToast(msg, 'error')
     }
   }
 
@@ -108,10 +110,10 @@ export default function InternalLinks() {
     if (!selected.size) return
     try {
       await internalLinks.approve([...selected])
-      showToast(`Zatwierdzono ${selected.size} propozycji`, 'success')
+      addToast(`Zatwierdzono ${selected.size} propozycji`, 'success')
       loadSuggestions(activeJob.id, statusFilter)
     } catch {
-      showToast('Błąd zatwierdzania', 'error')
+      addToast('Błąd zatwierdzania', 'error')
     }
   }
 
@@ -119,10 +121,10 @@ export default function InternalLinks() {
     if (!selected.size) return
     try {
       await internalLinks.reject([...selected])
-      showToast(`Odrzucono ${selected.size} propozycji`, 'success')
+      addToast(`Odrzucono ${selected.size} propozycji`, 'success')
       loadSuggestions(activeJob.id, statusFilter)
     } catch {
-      showToast('Błąd odrzucania', 'error')
+      addToast('Błąd odrzucania', 'error')
     }
   }
 
@@ -131,17 +133,17 @@ export default function InternalLinks() {
     try {
       const r = await internalLinks.getJob(activeJob.id, 'approved')
       const approvedIds = (r.data.suggestions || []).map(s => s.id)
-      if (!approvedIds.length) return showToast('Brak zatwierdzonych propozycji', 'error')
+      if (!approvedIds.length) return addToast('Brak zatwierdzonych propozycji', 'error')
       setApplying(true)
       const res = await internalLinks.apply(approvedIds)
       const d = res.data
-      showToast(`Wstawiono ${d.applied} linków${d.failed > 0 ? `, ${d.failed} błędów` : ''}`, d.failed > 0 ? 'warning' : 'success')
+      addToast(`Wstawiono ${d.applied} linków${d.failed > 0 ? `, ${d.failed} błędów` : ''}`, d.failed > 0 ? 'warning' : 'success')
       loadSuggestions(activeJob.id, statusFilter)
       // Refresh job
       const jr = await internalLinks.getJobStatus(activeJob.id)
       setActiveJob(prev => ({ ...prev, ...jr.data }))
     } catch (e) {
-      showToast(e.response?.data?.detail || 'Błąd wstawiania linków', 'error')
+      addToast(e.response?.data?.detail || 'Błąd wstawiania linków', 'error')
     } finally {
       setApplying(false)
     }

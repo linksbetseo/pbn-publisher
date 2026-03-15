@@ -89,18 +89,19 @@ async def _get_domain_creds(my_domain_id: int) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT domain, wp_login, wp_pass, http_user, http_pass FROM my_domains WHERE id = ?",
+            "SELECT * FROM my_domains WHERE id = ?",
             (my_domain_id,)
         ) as cur:
             row = await cur.fetchone()
             if not row:
                 return None
+            keys = row.keys()
             return {
                 "domain": row["domain"],
                 "wp_login": row["wp_login"],
                 "wp_pass": get_plain_password(row["wp_pass"]),
-                "http_user": row.get("http_user", "") or "",
-                "http_pass": row.get("http_pass", "") or "",
+                "http_user": (row["http_user"] if "http_user" in keys else "") or "",
+                "http_pass": (row["http_pass"] if "http_pass" in keys else "") or "",
             }
 
 

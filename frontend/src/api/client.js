@@ -142,7 +142,7 @@ export const deindex = {
 }
 
 export const internalLinks = {
-  analyze: (data) => apiLong.post('/api/internal-links/analyze', data),
+  analyze: (data) => api.post('/api/internal-links/analyze', data),
   listJobs: (my_domain_id) => api.get('/api/internal-links/jobs', { params: { my_domain_id } }),
   getJob: (job_id, status_filter = 'pending') => api.get(`/api/internal-links/jobs/${job_id}`, { params: { status_filter } }),
   getJobStatus: (job_id) => api.get(`/api/internal-links/jobs/${job_id}/status`),
