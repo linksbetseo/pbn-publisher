@@ -160,5 +160,5 @@ export const notifications = {
   saveNotifyPrefs: (prefs) => api.post('/api/notifications/notify-prefs', prefs),
   getCustomLlm: () => api.get('/api/notifications/custom-llm'),
   saveCustomLlm: (data) => api.post('/api/notifications/custom-llm', data),
-  testCustomLlm: () => api.post('/api/notifications/custom-llm/test'),
+  testCustomLlm: () => apiLong.post('/api/notifications/custom-llm/test'),
 }

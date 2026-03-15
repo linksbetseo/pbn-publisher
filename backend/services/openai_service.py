@@ -106,9 +106,14 @@ async def get_openai_client() -> tuple["AsyncOpenAI", str]:
     """Return (client, model) — uses custom LLM if enabled, otherwise standard OpenAI."""
     cfg = await get_custom_llm_config()
     if cfg["enabled"] and cfg["base_url"] and cfg["model"]:
+        base = cfg["base_url"].rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
         custom_client = AsyncOpenAI(
             api_key=cfg["api_key"] or "not-needed",
-            base_url=cfg["base_url"].rstrip("/") + "/v1" if not cfg["base_url"].rstrip("/").endswith("/v1") else cfg["base_url"],
+            base_url=base,
+            timeout=1200.0,  # 20 min — local/tunneled LLMs can be slow
+            max_retries=1,
         )
         return custom_client, cfg["model"]
     # Standard OpenAI

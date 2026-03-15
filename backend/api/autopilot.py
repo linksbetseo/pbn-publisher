@@ -1372,7 +1372,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     if _same_cluster_published:
                         _prev_url = _same_cluster_published[-1].get("url", "")
 
-                async with asyncio.timeout(360):  # 6 min per artykuł
+                async with asyncio.timeout(1200):  # 20 min per artykuł (custom LLM może być wolny)
                     article = await _with_retry(lambda: generate_article(
                         topic=keyword,
                         client_domain=sched["client_domain"] or "",
@@ -1495,11 +1495,11 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
 
             except asyncio.TimeoutError:
                 _failed += 1
-                logger.error(f"[Autopilot] Timeout for '{keyword}' after 6 min")
+                logger.error(f"[Autopilot] Timeout for '{keyword}' after 20 min")
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
                     await db.commit()
-                _results.append({"status": "failed", "keyword": keyword, "error": "Timeout (6 min)"})
+                _results.append({"status": "failed", "keyword": keyword, "error": "Timeout (20 min)"})
                 await _job_update(job_id, published=_published, failed=_failed, results=_results)
                 continue
 
@@ -1962,7 +1962,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                     location_code = 2616 if sched["language"] == "pl" else 2840
                     _pillar_url = pillar_url
                     _pillar_anchor = pillar_keyword or kw_row.get("pillar_label", "")
-                    async with asyncio.timeout(360):
+                    async with asyncio.timeout(1200):  # 20 min — custom LLM
                         article = await _with_retry(lambda: generate_article(
                             topic=keyword,
                             client_domain=sched["client_domain"] or "",
@@ -2040,7 +2040,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                             await db.commit()
                 except asyncio.TimeoutError:
                     failed += 1
-                    logger.error(f"[Daily] Timeout for '{keyword}' after 6 min on {sched['domain']}")
+                    logger.error(f"[Daily] Timeout for '{keyword}' after 20 min on {sched['domain']}")
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
                         await db.commit()

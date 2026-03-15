@@ -266,7 +266,12 @@ async def test_custom_llm():
         base = cfg["base_url"].rstrip("/")
         if not base.endswith("/v1"):
             base += "/v1"
-        test_client = AsyncOpenAI(api_key=cfg["api_key"] or "not-needed", base_url=base)
+        test_client = AsyncOpenAI(
+            api_key=cfg["api_key"] or "not-needed",
+            base_url=base,
+            timeout=120.0,
+            max_retries=0,
+        )
         resp = await test_client.chat.completions.create(
             model=cfg["model"],
             messages=[{"role": "user", "content": "Reply with: OK"}],
