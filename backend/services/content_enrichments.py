@@ -25,6 +25,7 @@ Pula 20 elementów — na długi artykuł losowane 3-4:
 21. methodology_box    — box "Nasza metodologia" (contentEffort signal)
 22. data_insight       — box z unikatową analizą danych (Information Gain)
 """
+import html as _html_mod
 import json
 import random
 import re
@@ -32,6 +33,11 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+
+def _esc(text: str) -> str:
+    """HTML-escape text to prevent XSS/broken markup from GPT output."""
+    return _html_mod.escape(str(text)) if text else ""
 
 from services.article_helpers import slugify_heading as _slugify_heading
 
@@ -66,7 +72,7 @@ _GENERIC_SOURCES_EN = [
 # ── Anti-footprint CSS variation ──────────────────────────────────────────────
 def _vary(base: int, delta: int = 3) -> int:
     """Add small random variation to px values for anti-footprint."""
-    return base + random.randint(-delta, delta)
+    return max(0, base + random.randint(-delta, delta))
 
 
 def _vary_hex(hex_color: str, delta: int = 12) -> str:
@@ -171,18 +177,18 @@ def _build_key_takeaways(points: list[str], lang_pl: bool) -> str:
 
 def _build_expert_quote(quote: str, source: str, _role: str = "") -> str:
     # SEO #30: blockquote with cite attribute for E-E-A-T signal
-    _cite_attr = f' cite="{source}"' if source and source.startswith("http") else ""
+    _cite_attr = f' cite="{_esc(source)}"' if source and source.startswith("http") else ""
     return (
         f'<blockquote{_cite_attr} {_s("blockquote")}>\n'
-        f'<p style="margin:0 0 10px;">{quote}</p>\n'
+        f'<p style="margin:0 0 10px;">{_esc(quote)}</p>\n'
         f'<footer style="font-size:0.9em;font-style:normal;color:#555;">'
-        f'— <strong>{source}</strong></footer>\n'
+        f'— <strong>{_esc(source)}</strong></footer>\n'
         f'</blockquote>\n'
     )
 
 
 def _build_pro_tip(tip: str, lang_pl: bool) -> str:
-    return f'<div {_s("pro_tip")}>\n<strong>💡 Pro Tip:</strong> {tip}\n</div>\n'
+    return f'<div {_s("pro_tip")}>\n<strong>💡 Pro Tip:</strong> {_esc(tip)}\n</div>\n'
 
 
 def _build_stats_block(stats: list[tuple[str, str]], lang_pl: bool) -> str:
@@ -191,8 +197,8 @@ def _build_stats_block(stats: list[tuple[str, str]], lang_pl: bool) -> str:
     for stat, desc in stats:
         rows += (
             f'<div style="display:flex;align-items:baseline;gap:12px;margin:8px 0;">'
-            f'<span style="font-size:1.6em;font-weight:bold;color:#1a73e8;">{stat}</span>'
-            f'<span style="color:#555;">{desc}</span>'
+            f'<span style="font-size:1.6em;font-weight:bold;color:#1a73e8;">{_esc(stat)}</span>'
+            f'<span style="color:#555;">{_esc(desc)}</span>'
             f'</div>\n'
         )
     return f'<div {_s("stats")}>\n<strong style="display:block;margin-bottom:12px;">{heading}</strong>\n{rows}</div>\n'
@@ -211,10 +217,11 @@ def _build_comparison_table(rows: list[dict], lang_pl: bool) -> str:
     body = ""
     for i, row in enumerate(rows):
         alt   = f' {_s("tr_alt")}' if i % 2 == 1 else ""
-        stars = "★" * row.get("rating", 4) + "☆" * (5 - row.get("rating", 4))
+        rating = max(1, min(5, row.get("rating", 4)))
+        stars = "★" * rating + "☆" * (5 - rating)
         body += (
-            f'<tr{alt}><td {_s("td")}><strong>{row["name"]}</strong></td>'
-            f'<td {_s("td")}>{row["pros"]}</td><td {_s("td")}>{row["cons"]}</td>'
+            f'<tr{alt}><td {_s("td")}><strong>{_esc(row["name"])}</strong></td>'
+            f'<td {_s("td")}>{_esc(row["pros"])}</td><td {_s("td")}>{_esc(row["cons"])}</td>'
             f'<td {_s("td")}>{stars}</td></tr>\n'
         )
     return (
@@ -271,7 +278,7 @@ def _build_source_citations(urls: list[str], lang_pl: bool) -> str:
 
 def _build_warning_box(text: str, lang_pl: bool) -> str:
     label = "⚠️ Częsty błąd" if lang_pl else "⚠️ Common Mistake"
-    return f'<div {_s("warning")}>\n<strong>{label}:</strong> {text}\n</div>\n'
+    return f'<div {_s("warning")}>\n<strong>{label}:</strong> {_esc(text)}\n</div>\n'
 
 
 def _build_step_by_step(steps: list[str], title: str, lang_pl: bool = True) -> str:
@@ -295,7 +302,7 @@ def _build_quick_answer(answer: str, lang_pl: bool) -> str:
     return (
         f'<div {_s("quick_ans")}>\n'
         f'<strong style="display:block;margin-bottom:8px;">{label}</strong>\n'
-        f'<p style="margin:0;">{answer}</p>\n'
+        f'<p style="margin:0;">{_esc(answer)}</p>\n'
         f'</div>\n'
     )
 
@@ -310,9 +317,9 @@ def _build_cost_table(rows: list[dict], lang_pl: bool) -> str:
     for i, row in enumerate(rows):
         alt = f' {_s("tr_alt")}' if i % 2 == 1 else ""
         body += (
-            f'<tr{alt}><td {_s("td")}><strong>{row.get("item","")}</strong></td>'
-            f'<td {_s("td")}>{row.get("cost","")}</td>'
-            f'<td {_s("td")}>{row.get("note","")}</td></tr>\n'
+            f'<tr{alt}><td {_s("td")}><strong>{_esc(row.get("item",""))}</strong></td>'
+            f'<td {_s("td")}>{_esc(row.get("cost",""))}</td>'
+            f'<td {_s("td")}>{_esc(row.get("note",""))}</td></tr>\n'
         )
     return (
         f'<h3>{heading}</h3>\n'
@@ -330,8 +337,8 @@ def _build_faq_mini(pairs: list[dict], lang_pl: bool) -> str:
         a = pair.get("a", "")
         items += (
             f'<div style="margin:12px 0;">'
-            f'<strong style="color:#1a73e8;">Q: {q}</strong>'
-            f'<p style="margin:4px 0 0 0;color:#555;">A: {a}</p>'
+            f'<strong style="color:#1a73e8;">Q: {_esc(q)}</strong>'
+            f'<p style="margin:4px 0 0 0;color:#555;">A: {_esc(a)}</p>'
             f'</div>\n'
         )
     return (
@@ -344,7 +351,7 @@ def _build_faq_mini(pairs: list[dict], lang_pl: bool) -> str:
 
 def _build_did_you_know(fact: str, lang_pl: bool) -> str:
     label = "🧠 Czy wiesz, że..." if lang_pl else "🧠 Did You Know?"
-    return f'<div {_s("did_know")}>\n<strong>{label}</strong><p style="margin:8px 0 0;">{fact}</p>\n</div>\n'
+    return f'<div {_s("did_know")}>\n<strong>{label}</strong><p style="margin:8px 0 0;">{_esc(fact)}</p>\n</div>\n'
 
 
 def _build_tools_list(tools: list[dict], lang_pl: bool) -> str:
@@ -353,7 +360,7 @@ def _build_tools_list(tools: list[dict], lang_pl: bool) -> str:
     for tool in tools[:5]:
         name = tool.get("name", "")
         desc = tool.get("desc", "")
-        items += f'<li style="margin:6px 0;"><strong>{name}</strong> — {desc}</li>\n'
+        items += f'<li style="margin:6px 0;"><strong>{_esc(name)}</strong> — {_esc(desc)}</li>\n'
     return (
         f'<div {_s("stats")}>\n'
         f'<strong style="display:block;margin-bottom:10px;">{heading}</strong>\n'
@@ -377,9 +384,9 @@ def _build_case_study(title: str, body: str, result: str, lang_pl: bool) -> str:
     r_label = "Wynik" if lang_pl else "Result"
     return (
         f'<div {_s("case")}>\n'
-        f'<strong style="display:block;font-size:1.05em;margin-bottom:8px;">📌 Case Study: {title}</strong>\n'
-        f'<p style="margin:0 0 8px;">{body}</p>\n'
-        f'<p style="margin:0;"><strong>{r_label}:</strong> {result}</p>\n'
+        f'<strong style="display:block;font-size:1.05em;margin-bottom:8px;">📌 Case Study: {_esc(title)}</strong>\n'
+        f'<p style="margin:0 0 8px;">{_esc(body)}</p>\n'
+        f'<p style="margin:0;"><strong>{r_label}:</strong> {_esc(result)}</p>\n'
         f'</div>\n'
     )
 
@@ -392,7 +399,7 @@ def _build_summary_table(rows: list[dict], lang_pl: bool) -> str:
     body = ""
     for i, row in enumerate(rows):
         alt = f' {_s("tr_alt")}' if i % 2 == 1 else ""
-        body += f'<tr{alt}><td {_s("td")}><strong>{row.get("when","")}</strong></td><td {_s("td")}>{row.get("why","")}</td></tr>\n'
+        body += f'<tr{alt}><td {_s("td")}><strong>{_esc(row.get("when",""))}</strong></td><td {_s("td")}>{_esc(row.get("why",""))}</td></tr>\n'
     return (
         f'<h3>{heading}</h3>\n'
         f'<div style="overflow-x:auto;">'
@@ -418,7 +425,7 @@ def _build_methodology_box(methodology: str, lang_pl: bool) -> str:
     return (
         f'<div {_s("methodology")}>\n'
         f'<strong style="display:block;margin-bottom:8px;">{label}</strong>\n'
-        f'<p style="margin:0;font-size:0.95em;">{methodology}</p>\n'
+        f'<p style="margin:0;font-size:0.95em;">{_esc(methodology)}</p>\n'
         f'</div>\n'
     )
 
@@ -429,9 +436,9 @@ def _build_data_insight(title: str, insight: str, source: str, lang_pl: bool) ->
     src_label = "Źródło" if lang_pl else "Source"
     return (
         f'<div {_s("insight")}>\n'
-        f'<strong style="display:block;margin-bottom:8px;">{label}: {title}</strong>\n'
-        f'<p style="margin:0 0 8px;">{insight}</p>\n'
-        f'<p style="margin:0;font-size:0.85em;color:#555;"><em>{src_label}: {source}</em></p>\n'
+        f'<strong style="display:block;margin-bottom:8px;">{label}: {_esc(title)}</strong>\n'
+        f'<p style="margin:0 0 8px;">{_esc(insight)}</p>\n'
+        f'<p style="margin:0;font-size:0.85em;color:#555;"><em>{src_label}: {_esc(source)}</em></p>\n'
         f'</div>\n'
     )
 

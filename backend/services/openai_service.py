@@ -81,11 +81,13 @@ async def get_custom_llm_config() -> dict:
     now = time.time()
     if _custom_llm_cache["data"] is not None and (now - _custom_llm_cache["ts"]) < _GPT_MODEL_CACHE_TTL:
         return _custom_llm_cache["data"]
-    default = {"enabled": False, "base_url": "", "model": "", "api_key": ""}
+    default = {"enabled": False, "base_url": "", "model": "", "api_key": "", "max_tokens": 0, "serp_chars": 0}
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                "SELECT key, value FROM settings WHERE key IN ('custom_llm_enabled','custom_llm_base_url','custom_llm_model','custom_llm_api_key')"
+                "SELECT key, value FROM settings WHERE key IN "
+                "('custom_llm_enabled','custom_llm_base_url','custom_llm_model','custom_llm_api_key',"
+                "'custom_llm_max_tokens','custom_llm_serp_chars')"
             ) as cur:
                 rows = dict(await cur.fetchall())
         result = {
@@ -93,6 +95,8 @@ async def get_custom_llm_config() -> dict:
             "base_url": rows.get("custom_llm_base_url", ""),
             "model": rows.get("custom_llm_model", ""),
             "api_key": rows.get("custom_llm_api_key", ""),
+            "max_tokens": int(rows.get("custom_llm_max_tokens", "0") or "0"),
+            "serp_chars": int(rows.get("custom_llm_serp_chars", "0") or "0"),
         }
         _custom_llm_cache["data"] = result
         _custom_llm_cache["ts"] = now
@@ -725,8 +729,12 @@ async def generate_article(
     # FIX #4: tighter density range — 0.8-1.8% sweet spot (enrichment blocks add ~0.2-0.5%)
     target_density = round(max(0.8, min(1.8, avg_density)), 1)
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
-    # Custom LLM: trim SERP text to avoid context overflow on small models (Llama 8B etc.)
-    _serp_limit = 1200 if (await get_custom_llm_config())["enabled"] else len(serp_text)
+    # Custom LLM: trim SERP to configured limit (0 = auto: 1200 for small models, full for OpenAI)
+    _cfg = await get_custom_llm_config()
+    if _cfg["enabled"]:
+        _serp_limit = _cfg["serp_chars"] if _cfg["serp_chars"] > 0 else 1200
+    else:
+        _serp_limit = len(serp_text)
     serp_block = f"\n\n[SEO Scraped Info — top 3 konkurentów]\n{serp_text[:_serp_limit]}" if serp_text else ""
 
     logger.info(f"[Article] Target: {target_words} słów, density: {target_density}%, LSI: {len(lsi_terms)}")

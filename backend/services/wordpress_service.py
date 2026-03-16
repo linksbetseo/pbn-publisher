@@ -1,11 +1,20 @@
 import asyncio
 import base64
 import logging
+import random
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 import httpx
+
+try:
+    from PIL import Image as PILImage
+    HAS_PILLOW = True
+except ImportError:
+    PILImage = None  # type: ignore[assignment,misc]
+    HAS_PILLOW = False
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +91,14 @@ async def get_or_create_category(
                 )
                 if resp.status_code in (200, 201):
                     return resp.json().get("id")
+                # BUG-4 FIX: handle race condition — another request created the category first
+                if resp.status_code == 400:
+                    try:
+                        body = resp.json()
+                        if body.get("code") == "term_exists" and body.get("data", {}).get("term_id"):
+                            return body["data"]["term_id"]
+                    except Exception:
+                        pass
             except Exception:
                 continue
     return None
@@ -137,9 +154,10 @@ async def _upload_image(
     # SEO #35: convert to WebP if Pillow available (30% smaller → better CWV)
     _content_type = "image/jpeg"
     try:
-        from PIL import Image
+        if not HAS_PILLOW:
+            raise ImportError("Pillow required for WebP conversion")
         import io as _io
-        _img = Image.open(_io.BytesIO(image_data))
+        _img = PILImage.open(_io.BytesIO(image_data))
         _webp_buf = _io.BytesIO()
         _img.save(_webp_buf, format="WEBP", quality=82, method=4)
         image_data = _webp_buf.getvalue()
@@ -170,9 +188,10 @@ async def _upload_image(
                 # SEO #90: set image dimensions for CLS prevention
                 _img_meta = {"alt_text": descriptive_alt, "title": alt_text[:60], "caption": ""}
                 try:
-                    from PIL import Image as _PILImg
+                    if not HAS_PILLOW:
+                        raise ImportError("Pillow required for image dimensions")
                     import io as _imgIO
-                    _pil = _PILImg.open(_imgIO.BytesIO(image_data))
+                    _pil = PILImage.open(_imgIO.BytesIO(image_data))
                     _img_meta["width"] = _pil.width
                     _img_meta["height"] = _pil.height
                 except Exception:
@@ -335,30 +354,31 @@ async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "", extra_url
                         f"[IndexNow] Key file missing or invalid at {key_file_url} — "
                         f"create a file '{indexnow_key}.txt' containing '{indexnow_key}' in WP root"
                     )
-                # SEO #110: batch all URLs in one IndexNow submission (up to 10k per spec)
-                indexnow_payload = {
-                    "host": clean_domain,
-                    "key": indexnow_key,
-                    "urlList": _url_list[:100],
-                }
-                for endpoint in [
-                    "https://api.indexnow.org/indexnow",
-                    "https://www.bing.com/indexnow",
-                ]:
-                    try:
-                        resp = await ping_client.post(
-                            endpoint,
-                            json=indexnow_payload,
-                            headers={"Content-Type": "application/json"},
-                        )
-                        if resp.status_code in (200, 202):
-                            logger.info(f"[IndexNow] Submitted {post_url} to {endpoint}")
-                    except Exception:
-                        pass
+                # BUG-5 FIX: Only submit to IndexNow if key file validation passed
+                if key_file_ok:
+                    # SEO #110: batch all URLs in one IndexNow submission (up to 10k per spec)
+                    indexnow_payload = {
+                        "host": clean_domain,
+                        "key": indexnow_key,
+                        "urlList": _url_list[:100],
+                    }
+                    for endpoint in [
+                        "https://api.indexnow.org/indexnow",
+                        "https://www.bing.com/indexnow",
+                    ]:
+                        try:
+                            resp = await ping_client.post(
+                                endpoint,
+                                json=indexnow_payload,
+                                headers={"Content-Type": "application/json"},
+                            )
+                            if resp.status_code in (200, 202):
+                                logger.info(f"[IndexNow] Submitted {post_url} to {endpoint}")
+                        except Exception:
+                            pass
             # Note: Google sitemap ping deprecated 2023 — only Bing remains
             # SEO #18: cache-bust sitemap URL with timestamp
-            import time as _time
-            sitemap_url = f"{base_url}/sitemap.xml?t={int(_time.time())}"
+            sitemap_url = f"{base_url}/sitemap.xml?t={int(time.time())}"
             try:
                 await ping_client.get(f"https://www.bing.com/ping?sitemap={sitemap_url}")
             except Exception:
@@ -409,18 +429,12 @@ async def publish_post(
     # SEO #20: vary alt text — not identical to title (Google image search)
     _alt_variations_pl = ["ilustracja", "grafika", "zdjęcie", "obraz"]
     _alt_variations_en = ["illustration", "image", "photo", "graphic"]
-    import random as _rnd
-    _alt_suffix = _rnd.choice(_alt_variations_pl) if (keyword and any(c in keyword for c in "ąćęłńóśźż")) else _rnd.choice(_alt_variations_en)
+    _alt_suffix = random.choice(_alt_variations_pl) if (keyword and any(c in keyword for c in "ąćęłńóśźż")) else random.choice(_alt_variations_en)
     # SEO #56: alt text includes year for freshness signal in image search
     _year = datetime.now(timezone.utc).year
     alt_text = f"{keyword or title} — {_alt_suffix} {_year}"
     # SEO #35: prefer WebP format for smaller files and better Core Web Vitals
-    _use_webp = True
-    try:
-        from PIL import Image
-        import io as _io
-    except ImportError:
-        _use_webp = False
+    _use_webp = HAS_PILLOW
     image_filename = f"{slug[:50]}.webp" if _use_webp else f"{slug[:50]}.jpg"
 
     # Excerpt fallback — strip HTML from content intro if excerpt is empty/bad
@@ -546,9 +560,10 @@ async def publish_post(
                 if meta:
                     post_data["meta"] = meta
 
-                # Retry up to 2 times on timeout
+                # Retry up to 3 times on transient failures (timeout, connect error, 502/503/504)
                 resp = None
-                for _attempt in range(2):
+                _max_retries = 3
+                for _attempt in range(_max_retries):
                     try:
                         resp = await client.post(
                             f"{base_url}/wp-json/wp/v2/posts",
@@ -556,11 +571,35 @@ async def publish_post(
                             headers=headers,
                             timeout=30,
                         )
+                        # BUG-2 FIX: retry on 502/503/504 gateway errors
+                        if resp.status_code in (502, 503, 504) and _attempt < _max_retries - 1:
+                            logger.warning(f"[WP] Transient HTTP {resp.status_code} on attempt {_attempt + 1}, retrying...")
+                            await asyncio.sleep(3 * (_attempt + 1))
+                            resp = None
+                            continue
                         break
-                    except httpx.ReadTimeout:
-                        if _attempt == 0:
-                            # FIX #44: use module-level asyncio import (was importing inside function body)
-                            await asyncio.sleep(3)
+                    except (httpx.TimeoutException, httpx.ConnectError) as _te:
+                        if _attempt < _max_retries - 1:
+                            logger.warning(f"[WP] {type(_te).__name__} on attempt {_attempt + 1}, checking for duplicate before retry...")
+                            # BUG-1 FIX: check if post was created despite timeout before retrying
+                            try:
+                                check_resp = await client.get(
+                                    f"{base_url}/wp-json/wp/v2/posts",
+                                    params={"slug": slug, "status": "publish,draft,pending", "per_page": 1},
+                                    headers=headers,
+                                    timeout=10,
+                                )
+                                if check_resp.status_code == 200 and check_resp.json():
+                                    existing = check_resp.json()[0]
+                                    logger.info(f"[WP] Post already exists (id={existing['id']}), skipping retry")
+                                    return {
+                                        "success": True,
+                                        "url": existing.get("link", ""),
+                                        "post_id": existing["id"],
+                                    }
+                            except Exception:
+                                pass  # If duplicate check fails, proceed with retry
+                            await asyncio.sleep(3 * (_attempt + 1))
                             continue
                         raise
                 if resp is None:
@@ -653,6 +692,14 @@ async def _get_or_create_tags(
             )
             if resp2.status_code in (200, 201):
                 ids.append(resp2.json().get("id"))
+            # BUG-3 FIX: handle race condition — another request created the tag first
+            elif resp2.status_code == 400:
+                try:
+                    body = resp2.json()
+                    if body.get("code") == "term_exists" and body.get("data", {}).get("term_id"):
+                        ids.append(body["data"]["term_id"])
+                except Exception:
+                    pass
         except Exception:
             pass
     return [i for i in ids if i]

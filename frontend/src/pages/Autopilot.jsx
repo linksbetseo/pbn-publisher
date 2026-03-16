@@ -55,13 +55,18 @@ function BulkTab() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    const [domRes, schRes] = await Promise.all([
-      api.get('/api/domains', { params: { active: 1 } }),
-      api.get('/api/autopilot/schedules'),
-    ])
-    setAllDomains(domRes.data)
-    setSchedules(schRes.data)
-    setLoading(false)
+    try {
+      const [domRes, schRes] = await Promise.all([
+        api.get('/api/domains', { params: { active: 1 } }),
+        api.get('/api/autopilot/schedules'),
+      ])
+      setAllDomains(domRes.data)
+      setSchedules(schRes.data)
+    } catch (e) {
+      console.error('BulkTab load failed:', e)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -712,30 +717,45 @@ export default function Autopilot() {
   const [addError, setAddError] = useState('')
   const [adding, setAdding] = useState(false)
   const logRefs = useRef({})
+  const abortRef = useRef(null)
+  const toneIntervalRef = useRef(null)
 
   const load = async () => {
     setLoading(true)
-    const [schRes, domRes, stRes] = await Promise.all([
-      api.get('/api/autopilot/schedules'),
-      api.get('/api/domains'),
-      api.get('/api/autopilot/stats'),
-    ])
-    setSchedules(schRes.data)
-    setDomains(domRes.data.filter(d => d.active && d.wp_ok !== 0))
-    setStats(stRes.data)
-    setLoading(false)
-    // Auto-load site metrics for schedules with map (recalculate coherence first)
-    schRes.data.filter(s => s.map_generated).forEach(s => {
-      api.post(`/api/autopilot/schedules/${s.id}/recalculate-coherence`).catch(() => {}).then(() =>
-        api.get(`/api/autopilot/schedules/${s.id}/site-metrics`).then(r => {
-          if (r.data.site_metrics && Object.keys(r.data.site_metrics).length)
-            setSiteMetrics(m => ({ ...m, [s.id]: r.data.site_metrics }))
-        }).catch(() => {})
-      )
-    })
+    try {
+      const [schRes, domRes, stRes] = await Promise.all([
+        api.get('/api/autopilot/schedules'),
+        api.get('/api/domains'),
+        api.get('/api/autopilot/stats'),
+      ])
+      setSchedules(schRes.data)
+      setDomains(domRes.data.filter(d => d.active && d.wp_ok !== 0))
+      setStats(stRes.data)
+      // Auto-load site metrics for schedules with map (recalculate coherence first)
+      schRes.data.filter(s => s.map_generated).forEach(s => {
+        api.post(`/api/autopilot/schedules/${s.id}/recalculate-coherence`).catch(() => {}).then(() =>
+          api.get(`/api/autopilot/schedules/${s.id}/site-metrics`).then(r => {
+            if (r.data.site_metrics && Object.keys(r.data.site_metrics).length)
+              setSiteMetrics(m => ({ ...m, [s.id]: r.data.site_metrics }))
+          }).catch(() => {})
+        )
+      })
+    } catch (e) {
+      console.error('Load failed:', e)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => { load() }, [])
+
+  // Cleanup: abort polling and clear tone interval on unmount
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) abortRef.current.abort()
+      if (toneIntervalRef.current) clearInterval(toneIntervalRef.current)
+    }
+  }, [])
 
   const addSchedule = async () => {
     if (!newForm.my_domain_id || !newForm.seed_keyword.trim()) {
@@ -858,10 +878,14 @@ export default function Autopilot() {
   }
 
   const _pollJob = async (id, job_id) => {
+    const controller = new AbortController()
+    abortRef.current = controller
     let lastCount = 0
     while (true) {
+      if (controller.signal.aborted) break
       await new Promise(r => setTimeout(r, 3000))
-      const statusRes = await api.get(`/api/autopilot/schedules/${id}/run-status/${job_id}`)
+      if (controller.signal.aborted) break
+      const statusRes = await api.get(`/api/autopilot/schedules/${id}/run-status/${job_id}`, { signal: controller.signal })
       const data = statusRes.data
       const entries = data.results || []
       if (entries.length > lastCount) {
@@ -876,7 +900,7 @@ export default function Autopilot() {
         if (data.error) {
           setRunLog(l => ({ ...l, [id]: [...(data.results || []), { status: 'failed', keyword: '—', error: data.error }] }))
         } else {
-          const finalEntries = data.results || []
+          const finalEntries = [...(data.results || [])]
           if (finalEntries.length === 0 && data.message) {
             finalEntries.push({ status: 'info', keyword: '—', error: data.message })
           }
@@ -969,8 +993,12 @@ export default function Autopilot() {
   }
 
   const toggleActive = async (sched) => {
-    await api.patch(`/api/autopilot/schedules/${sched.id}`, { active: sched.active ? 0 : 1 })
-    await load()
+    try {
+      await api.patch(`/api/autopilot/schedules/${sched.id}`, { active: sched.active ? 0 : 1 })
+      await load()
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const retryKeyword = async (kwId, schedId) => {
@@ -1018,8 +1046,12 @@ export default function Autopilot() {
 
   const deleteSchedule = async (id) => {
     if (!confirm('Usunąć harmonogram i wszystkie frazy?')) return
-    await api.delete(`/api/autopilot/schedules/${id}`)
-    await load()
+    try {
+      await api.delete(`/api/autopilot/schedules/${id}`)
+      await load()
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const exportCsv = (id) => {
@@ -1035,32 +1067,52 @@ export default function Autopilot() {
       a.href = url
       a.download = `keywords_${id}.csv`
       a.click()
-      URL.revokeObjectURL(url)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
     }).catch(e => addToast('Błąd eksportu CSV: ' + e.message, 'error'))
   }
 
   const updatePpd = async (id, val) => {
-    await api.patch(`/api/autopilot/schedules/${id}`, { posts_per_day: Number(val) })
-    await load()
+    try {
+      await api.patch(`/api/autopilot/schedules/${id}`, { posts_per_day: Number(val) })
+      await load()
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const updateImageSource = async (id, val) => {
-    await api.patch(`/api/autopilot/schedules/${id}`, { image_source: val })
-    await load()
+    try {
+      await api.patch(`/api/autopilot/schedules/${id}`, { image_source: val })
+      await load()
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const updateCustomPrompt = async (id, val) => {
-    await api.patch(`/api/autopilot/schedules/${id}`, { custom_prompt: val })
+    try {
+      await api.patch(`/api/autopilot/schedules/${id}`, { custom_prompt: val })
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const updateMinCoherence = async (id, val) => {
-    await api.patch(`/api/autopilot/schedules/${id}`, { min_coherence: Number(val) })
-    await load()
+    try {
+      await api.patch(`/api/autopilot/schedules/${id}`, { min_coherence: Number(val) })
+      await load()
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const updateTone = async (id, val) => {
-    await api.patch(`/api/autopilot/schedules/${id}`, { tone_of_voice: val })
-    await load()
+    try {
+      await api.patch(`/api/autopilot/schedules/${id}`, { tone_of_voice: val })
+      await load()
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const generateTone = async (id) => {
@@ -1069,6 +1121,8 @@ export default function Autopilot() {
       await api.post(`/api/autopilot/schedules/${id}/generate-tone`)
       addToast('Generowanie Tone of Voice rozpoczęte...', 'info')
       // Poll for completion (tone changes from preset to long text)
+      // Clear any previous tone polling interval
+      if (toneIntervalRef.current) clearInterval(toneIntervalRef.current)
       let attempts = 0
       const poll = setInterval(async () => {
         attempts++
@@ -1076,6 +1130,7 @@ export default function Autopilot() {
           const res = await api.get(`/api/autopilot/schedules/${id}/tone`)
           if (res.data.is_generated || attempts > 60) {
             clearInterval(poll)
+            toneIntervalRef.current = null
             setToneGenerating(g => ({ ...g, [id]: false }))
             if (res.data.is_generated) {
               addToast('Tone of Voice wygenerowany!', 'success')
@@ -1084,6 +1139,7 @@ export default function Autopilot() {
           }
         } catch { /* ignore poll errors */ }
       }, 5000)
+      toneIntervalRef.current = poll
     } catch (e) {
       addToast('Błąd generowania tone: ' + (e.response?.data?.detail || e.message), 'error')
       setToneGenerating(g => ({ ...g, [id]: false }))
@@ -1102,10 +1158,14 @@ export default function Autopilot() {
 
   const saveToneEdit = async () => {
     if (!toneModal) return
-    await api.patch(`/api/autopilot/schedules/${toneModal.scheduleId}`, { tone_of_voice: toneEditing })
-    addToast('Tone of Voice zapisany', 'success')
-    setToneModal(null)
-    await load()
+    try {
+      await api.patch(`/api/autopilot/schedules/${toneModal.scheduleId}`, { tone_of_voice: toneEditing })
+      addToast('Tone of Voice zapisany', 'success')
+      setToneModal(null)
+      await load()
+    } catch (e) {
+      addToast(e.response?.data?.detail || e.message, 'error')
+    }
   }
 
   const set = (f, v) => setNewForm(n => ({ ...n, [f]: v }))
@@ -1145,10 +1205,12 @@ export default function Autopilot() {
             fetch(`${BASE}/api/autopilot/export-csv`, {
               headers: token ? { Authorization: `Basic ${token}` } : {},
             }).then(r => r.blob()).then(blob => {
+              const url = URL.createObjectURL(blob)
               const a = document.createElement('a')
-              a.href = URL.createObjectURL(blob)
+              a.href = url
               a.download = 'autopilot_all_keywords.csv'
               a.click()
+              setTimeout(() => URL.revokeObjectURL(url), 1000)
             }).catch(e => addToast('Błąd: ' + e.message, 'error'))
           }}
           className="ml-2 px-3 py-2 text-xs text-gray-600 hover:text-blue-600 hover:bg-white rounded-md transition-colors"

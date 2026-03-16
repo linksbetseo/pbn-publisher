@@ -209,6 +209,8 @@ class CustomLlmRequest(BaseModel):
     base_url: str = ""
     model: str = ""
     api_key: str = ""
+    max_tokens: int = 0       # 0 = auto (6000 for content writer, per-call defaults otherwise)
+    serp_chars: int = 0       # 0 = auto (full SERP context for large models, 1200 for small)
 
 
 @router.get("/custom-llm")
@@ -217,7 +219,9 @@ async def get_custom_llm():
     await _ensure_settings_table()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT key, value FROM settings WHERE key IN ('custom_llm_enabled','custom_llm_base_url','custom_llm_model','custom_llm_api_key')"
+            "SELECT key, value FROM settings WHERE key IN "
+            "('custom_llm_enabled','custom_llm_base_url','custom_llm_model','custom_llm_api_key',"
+            "'custom_llm_max_tokens','custom_llm_serp_chars')"
         ) as cur:
             rows = dict(await cur.fetchall())
     api_key_raw = rows.get("custom_llm_api_key", "")
@@ -228,6 +232,8 @@ async def get_custom_llm():
         "model": rows.get("custom_llm_model", ""),
         "api_key_masked": masked,
         "api_key_set": bool(api_key_raw),
+        "max_tokens": int(rows.get("custom_llm_max_tokens", "0") or "0"),
+        "serp_chars": int(rows.get("custom_llm_serp_chars", "0") or "0"),
     }
 
 
@@ -239,6 +245,8 @@ async def save_custom_llm(body: CustomLlmRequest):
         await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_enabled',?)", ("1" if body.enabled else "0",))
         await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_base_url',?)", (body.base_url.strip(),))
         await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_model',?)", (body.model.strip(),))
+        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_max_tokens',?)", (str(max(0, body.max_tokens)),))
+        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_serp_chars',?)", (str(max(0, body.serp_chars)),))
         # Only overwrite api_key if user sent a non-masked value
         if body.api_key and "..." not in body.api_key:
             await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('custom_llm_api_key',?)", (body.api_key,))

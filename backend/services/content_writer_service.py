@@ -284,14 +284,17 @@ JSON only, no markdown."""
     _step(2, "gpt", "Generowanie artykulu (GPT)...")
     _cw_client, _active_model, _is_custom = await get_openai_client()
 
-    # Custom/local LLMs (Llama, Mistral etc.) have smaller context windows —
-    # trim SERP context and reduce max_tokens to avoid 400 context-exceeded errors
-    if _is_custom and serp_section:
-        # Keep only first 1500 chars of SERP section instead of full ~6000
-        _serp_trimmed = serp_section[:1500]
-        user_prompt = user_prompt.replace(serp_section, _serp_trimmed)
-        serp_section = _serp_trimmed
-    _max_tokens = 2500 if _is_custom else 6000
+    # Custom/local LLMs: apply user-configured context limits (or safe auto-defaults)
+    if _is_custom:
+        from services.openai_service import get_custom_llm_config as _get_cfg
+        _llm_cfg = await _get_cfg()
+        _serp_limit = _llm_cfg["serp_chars"] if _llm_cfg["serp_chars"] > 0 else 1500
+        _max_tokens = _llm_cfg["max_tokens"] if _llm_cfg["max_tokens"] > 0 else 2500
+        if serp_section:
+            _serp_trimmed = serp_section[:_serp_limit]
+            user_prompt = user_prompt.replace(serp_section, _serp_trimmed)
+    else:
+        _max_tokens = 6000
 
     for attempt in range(3):
         try:

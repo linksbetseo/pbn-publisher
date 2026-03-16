@@ -76,8 +76,8 @@ async def _map_cache_get(key: str):
                 except zlib.error:
                     raw = raw.decode("utf-8")
             return _json.loads(raw)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"[TopicalMap] Cache read failed: {e}")
     return None
 
 
@@ -250,7 +250,7 @@ def _cluster_focus_score(kw_list: list[dict], anchor: str) -> float:
     """
     if not kw_list:
         return 0.0
-    anchor_toks = set(anchor.split()) if " " in anchor else set(_tokenize(anchor))
+    anchor_toks = set(_tokenize(anchor))
     scores = []
     for kw in kw_list:
         kw_toks = set(_tokenize(kw["keyword"]))
@@ -610,7 +610,8 @@ async def _gpt_relevance_filter(
                     temperature=0.0,
                     max_tokens=len(batch) * 3 + 20,
                 )
-                text = resp.choices[0].message.content.strip()
+                text = resp.choices[0].message.content or ""
+                text = text.strip()
                 logger.info(f"[TopicalMap] GPT response batch {batch_num}: {text[:200]}")
 
                 # Parse JSON array from response
@@ -618,8 +619,12 @@ async def _gpt_relevance_filter(
                 if match:
                     verdicts = _json.loads(match.group())
                 else:
-                    # Fallback: try to parse individual numbers
-                    verdicts = [int(c) for c in text if c in '01']
+                    # Only use char-level fallback if text is mostly 0s and 1s
+                    digit_ratio = sum(1 for c in text if c in '01') / max(len(text), 1)
+                    if digit_ratio > 0.3:
+                        verdicts = [int(c) for c in text if c in '01']
+                    else:
+                        raise ValueError(f"GPT response not parseable as verdicts: {text[:100]}")
 
                 if len(verdicts) >= len(batch):
                     verdicts = verdicts[:len(batch)]
@@ -681,9 +686,10 @@ async def generate_topical_map(
     """
     # Include domain context + filter version in cache key
     # v2: GPT relevance filter always runs (invalidates all pre-filter caches)
-    _desc_hash = hashlib.md5(site_description.encode()).hexdigest()[:8] if site_description else ""
+    _desc_hash = hashlib.md5(site_description.encode(), usedforsecurity=False).hexdigest()[:8] if site_description else ""
     cache_key = hashlib.md5(
-        f"v2:{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}:{competitor_domain}:{domain_url}:{_desc_hash}".encode()
+        f"v2:{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}:{competitor_domain}:{domain_url}:{_desc_hash}".encode(),
+        usedforsecurity=False,
     ).hexdigest()
     if not force_refresh:
         cached = await _map_cache_get(cache_key)

@@ -35,7 +35,7 @@ export default function Settings() {
   const [savingImage, setSavingImage] = useState(false)
   const [testing, setTesting] = useState(false)
   // Custom LLM
-  const [customLlm, setCustomLlm] = useState({ enabled: false, base_url: '', model: '', api_key: '', api_key_masked: '', api_key_set: false })
+  const [customLlm, setCustomLlm] = useState({ enabled: false, base_url: '', model: '', api_key: '', api_key_masked: '', api_key_set: false, max_tokens: 0, serp_chars: 0 })
   const [savingCustomLlm, setSavingCustomLlm] = useState(false)
   const [testingCustomLlm, setTestingCustomLlm] = useState(false)
   const [customLlmTestResult, setCustomLlmTestResult] = useState(null)
@@ -72,6 +72,8 @@ export default function Settings() {
         api_key: l.api_key_masked || '',
         api_key_masked: l.api_key_masked || '',
         api_key_set: !!l.api_key_set,
+        max_tokens: l.max_tokens || 0,
+        serp_chars: l.serp_chars || 0,
       })
     }).catch(() => {}).finally(() => setLoading(false))
   }, [])
@@ -118,6 +120,8 @@ export default function Settings() {
         base_url: customLlm.base_url.trim(),
         model: customLlm.model.trim(),
         api_key: customLlm.api_key,
+        max_tokens: parseInt(customLlm.max_tokens) || 0,
+        serp_chars: parseInt(customLlm.serp_chars) || 0,
       }
       await notifications.saveCustomLlm(payload)
       addToast(customLlm.enabled ? 'Własny LLM aktywny — artykuły będą generowane przez Twój endpoint' : 'Własny LLM wyłączony — używam standardowego OpenAI', 'success')
@@ -389,6 +393,35 @@ export default function Settings() {
             {customLlm.api_key_set && (
               <p className="text-xs text-gray-400 mt-1">Klucz zapisany. Wpisz nowy żeby zmienić.</p>
             )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Max tokens odpowiedzi <span className="text-gray-400 font-normal">(0 = auto)</span>
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={customLlm.max_tokens}
+              onChange={e => setCustomLlm(prev => ({ ...prev, max_tokens: parseInt(e.target.value) || 0 }))}
+              placeholder="0 = auto (2500 małe / 6000 duże modele)"
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Kontekst SERP (znaki) <span className="text-gray-400 font-normal">(0 = auto)</span>
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={customLlm.serp_chars}
+              onChange={e => setCustomLlm(prev => ({ ...prev, serp_chars: parseInt(e.target.value) || 0 }))}
+              placeholder="0 = auto (1200 małe / pełny duże)"
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
           </div>
         </div>
 
