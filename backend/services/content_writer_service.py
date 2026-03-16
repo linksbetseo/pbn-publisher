@@ -298,7 +298,7 @@ JSON only, no markdown."""
 
     for attempt in range(3):
         try:
-            response = await _cw_client.chat.completions.create(
+            _create_kwargs = dict(
                 model=_active_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -306,8 +306,10 @@ JSON only, no markdown."""
                 ],
                 temperature=0.7,
                 max_tokens=_max_tokens,
-                response_format={"type": "json_object"},
             )
+            if not _is_custom:
+                _create_kwargs["response_format"] = {"type": "json_object"}
+            response = await _cw_client.chat.completions.create(**_create_kwargs)
             break
         except Exception as e:
             if attempt == 2:
