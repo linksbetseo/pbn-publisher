@@ -731,10 +731,28 @@ async def generate_article(
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
     # Custom LLM: trim SERP to configured limit (0 = auto: 1200 for small models, full for OpenAI)
     _cfg = await get_custom_llm_config()
-    if _cfg["enabled"]:
+    _is_custom_llm = _cfg["enabled"] and bool(_cfg.get("base_url")) and bool(_cfg.get("model"))
+    if _is_custom_llm:
         _serp_limit = _cfg["serp_chars"] if _cfg["serp_chars"] > 0 else 1200
+        # Scale max_tokens for each call: small models need much less per call
+        _mt_intent   = _cfg["max_tokens"] if _cfg["max_tokens"] > 0 else 200
+        _mt_outline  = _cfg["max_tokens"] if _cfg["max_tokens"] > 0 else 250
+        _mt_title    = 80
+        _mt_intro    = _cfg["max_tokens"] if _cfg["max_tokens"] > 0 else 400
+        _mt_section  = _cfg["max_tokens"] if _cfg["max_tokens"] > 0 else 600
+        _mt_conc     = _cfg["max_tokens"] if _cfg["max_tokens"] > 0 else 300
+        _mt_faq      = _cfg["max_tokens"] if _cfg["max_tokens"] > 0 else 300
+        _mt_excerpt  = 100
     else:
-        _serp_limit = len(serp_text)
+        _serp_limit  = len(serp_text)
+        _mt_intent   = 400
+        _mt_outline  = 500
+        _mt_title    = 100
+        _mt_intro    = 700
+        _mt_section  = 1100
+        _mt_conc     = 600
+        _mt_faq      = 800
+        _mt_excerpt  = 150
     serp_block = f"\n\n[SEO Scraped Info — top 3 konkurentów]\n{serp_text[:_serp_limit]}" if serp_text else ""
 
     logger.info(f"[Article] Target: {target_words} słów, density: {target_density}%, LSI: {len(lsi_terms)}")
@@ -760,7 +778,7 @@ async def generate_article(
         )
     intent_analysis = await _gpt(
         "Jesteś ekspertem SEO." if lang_pl else "You are an SEO expert.",
-        intent_user, temperature=0.3, max_tokens=400, model=_resolved_model
+        intent_user, temperature=0.3, max_tokens=_mt_intent, model=_resolved_model
     )
     logger.info(f"[Article] Intent: {intent_analysis[:80]}")
 
@@ -808,7 +826,7 @@ async def generate_article(
     outline_raw = await _gpt(
         "Jesteś ekspertem SEO tworzącym struktury artykułów. Nagłówki H2 oddzielone '<<<<'." if lang_pl
         else "You are an SEO expert. H2 headings separated by '<<<<'.",
-        outline_user, temperature=0.5, max_tokens=500, model=_resolved_model
+        outline_user, temperature=0.5, max_tokens=_mt_outline, model=_resolved_model
     )
     sections = [s.strip() for s in outline_raw.split("<<<<") if s.strip()]
     # FIX: GPT often returns "H2: Title" or "## Title" — strip these prefixes
@@ -863,7 +881,7 @@ async def generate_article(
         )
     title = await _gpt(
         "Jesteś copywriterem SEO." if lang_pl else "You are an SEO copywriter.",
-        title_user, temperature=0.8, max_tokens=100, model=_resolved_model
+        title_user, temperature=0.8, max_tokens=_mt_title, model=_resolved_model
     )
     title = title.strip('"\'').strip()
     # FIX #7: strip markdown artifacts from title (GPT sometimes adds # or *)
@@ -921,7 +939,7 @@ async def generate_article(
             f"Use '{topic}' {intro_kw_count}x naturally.{lsi_block}\n"
             f"Only HTML <p> and <strong>, no headings. OK to use <ul>/<li> if appropriate.{custom_block}"
         )
-    intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=700, model=_resolved_model)
+    intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=_mt_intro, model=_resolved_model)
     if not intro_html.strip().startswith("<"):
         intro_html = _markdown_to_html(intro_html)
     intro_html = _strip_markdown_remnants(intro_html)
@@ -1033,7 +1051,7 @@ async def generate_article(
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
                     f"Write expertly: specific facts, numbers, examples. Avoid vague generalities.{custom_block}"
                 )
-            sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=1100, model=_resolved_model)
+            sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=_mt_section, model=_resolved_model)
             if not sec_html.strip().startswith("<"):
                 sec_html = _markdown_to_html(sec_html)
             sec_html = _strip_markdown_remnants(sec_html)
@@ -1046,7 +1064,7 @@ async def generate_article(
             if _leakage:
                 logger.warning(f"[Article] Prompt leakage detected in section '{heading[:40]}', retrying...")
                 _retry_suffix = "\nWAŻNE: Pisz TREŚĆ artykułu, NIE instrukcje ani zadania. NIE pisz 'Krok 1', 'Zadanie'. Pisz gotowy tekst dla czytelnika." if lang_pl else "\nIMPORTANT: Write article CONTENT, NOT instructions or tasks. Do NOT write 'Step 1', 'Task'. Write ready text for the reader."
-                sec_html = await _gpt(section_system, section_user + _retry_suffix, temperature=0.8, max_tokens=1100, model=_resolved_model)
+                sec_html = await _gpt(section_system, section_user + _retry_suffix, temperature=0.8, max_tokens=_mt_section, model=_resolved_model)
                 if not sec_html.strip().startswith("<"):
                     sec_html = _markdown_to_html(sec_html)
                 sec_html = _strip_markdown_remnants(sec_html)
@@ -1175,11 +1193,11 @@ async def generate_article(
 
     # Launch all 3 in parallel
     conclusion_raw, faq_raw, excerpt_raw = await asyncio.gather(
-        _gpt(_concl_system, conclusion_user, temperature=0.7, max_tokens=600, model=_resolved_model),
-        _gpt(_faq_system, faq_user, temperature=0.6, max_tokens=1400, model=_resolved_model),
+        _gpt(_concl_system, conclusion_user, temperature=0.7, max_tokens=_mt_conc, model=_resolved_model),
+        _gpt(_faq_system, faq_user, temperature=0.6, max_tokens=_mt_faq, model=_resolved_model),
         _gpt(
             "Jesteś SEO copywriterem." if lang_pl else "You are an SEO copywriter.",
-            excerpt_user, temperature=0.5, max_tokens=80, model=_resolved_model
+            excerpt_user, temperature=0.5, max_tokens=_mt_excerpt, model=_resolved_model
         ),
     )
 
