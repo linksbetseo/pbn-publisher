@@ -1872,6 +1872,7 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
             lang_pl=lang_pl,
             openai_client=_enrich_client,
             serp_urls=None,
+            is_custom_llm=_is_custom,
         )
     except Exception as _e:
         logger.warning(f"[NewsGen] Enrichment failed: {_e}")

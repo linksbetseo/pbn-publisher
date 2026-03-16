@@ -473,7 +473,7 @@ JSON only, no markdown."""
     # ── Enrichments (TOC + update_box + 2 random elements) ─────────────────
     lang_pl = language == "pl"
     try:
-        _enrich_client, _, _ = await get_openai_client()
+        _enrich_client, _, _enrich_is_custom = await get_openai_client()
         content = await enrich_article(
             content=content,
             topic=keyword,
@@ -481,6 +481,7 @@ JSON only, no markdown."""
             lang_pl=lang_pl,
             openai_client=_enrich_client,
             serp_urls=serp_urls or None,
+            is_custom_llm=_enrich_is_custom,
         )
     except Exception as e:
         logger.warning(f"[ContentWriter] Enrichment failed: {e}")

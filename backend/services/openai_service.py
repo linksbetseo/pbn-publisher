@@ -1311,7 +1311,8 @@ async def generate_article(
     content = _strip_markdown_remnants(content)
 
     # Enrich with random unique elements (3-4 per article)
-    content = await enrich_article(content, topic, sections, lang_pl=(language == "pl"), openai_client=client, serp_urls=serp_urls)
+    _enrich_client, _, _enrich_is_custom = await get_openai_client()
+    content = await enrich_article(content, topic, sections, lang_pl=(language == "pl"), openai_client=_enrich_client, is_custom_llm=_enrich_is_custom, serp_urls=serp_urls)
 
     # Final strip again after enrichment (GPT content in enrichments may also have ##)
     content = _strip_markdown_remnants(content)

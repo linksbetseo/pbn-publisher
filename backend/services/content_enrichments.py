@@ -445,10 +445,13 @@ def _build_data_insight(title: str, insight: str, source: str, lang_pl: bool) ->
 
 # ── GPT-generowane dane ────────────────────────────────────────────────────────
 
-async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> dict:
+async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool, is_custom_llm: bool = False) -> dict:
     # Use dynamic model from settings (same as article generation)
-    from services.openai_service import get_gpt_model
+    from services.openai_service import get_gpt_model, get_custom_llm_config
     _enrich_model = await get_gpt_model()
+    if is_custom_llm:
+        _cfg = await get_custom_llm_config()
+        _enrich_model = _cfg["model"] or _enrich_model
     try:
         if element == "expert_quote":
             source = random.choice(_GENERIC_SOURCES_PL if lang_pl else _GENERIC_SOURCES_EN)
@@ -503,7 +506,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Include source in parentheses for each. If unsure — use ranges marked 'estimated'. "
                 f"JSON format: {{\"stats\": [[\"value\", \"description (source)\"], ...]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.1, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.1, max_tokens=250, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             stats = []
             for s in raw.get("stats", [])[:4]:
@@ -519,7 +522,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Create comparison table of 3 options/methods for '{topic}'. JSON: list of {{\"name\": str, \"pros\": str, \"cons\": str, \"rating\": int(1-5)}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             rows = raw if isinstance(raw, list) else raw.get("rows", raw.get("options", raw.get("comparison", [])))
             return {"rows": rows[:3]}
@@ -530,7 +533,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Create practical checklist for '{topic}' (6-8 items). JSON: {{\"title\": str, \"items\": [str, ...]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title", "Checklist"), "items": raw.get("items", [])[:8]}
 
@@ -549,7 +552,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 5-6 steps to accomplish the task related to '{topic}'. JSON: {{\"title\": str, \"steps\": [str, ...]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title", "Jak to zrobić krok po kroku"), "steps": raw.get("steps", [])[:6]}
 
@@ -568,7 +571,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give cost table for '{topic}' (3-4 items). JSON: {{\"rows\": [{{\"item\": str, \"cost\": str, \"note\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=250, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"rows": raw.get("rows", [])[:4]}
 
@@ -578,7 +581,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 3 most common questions with short answers about '{topic}'. JSON: {{\"pairs\": [{{\"q\": str, \"a\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=300, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"pairs": raw.get("pairs", [])[:3]}
 
@@ -597,7 +600,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 4-5 specific tools or resources useful for '{topic}'. JSON: {{\"tools\": [{{\"name\": str, \"desc\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"tools": raw.get("tools", [])[:5]}
 
@@ -607,7 +610,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"For topic '{topic}' give estimated time and difficulty level. JSON: {{\"time\": str, \"difficulty\": str}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=80, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.4, max_tokens=80, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"time": raw.get("time",""), "difficulty": raw.get("difficulty","")}
 
@@ -617,7 +620,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Write a short case study related to '{topic}'. JSON: {{\"title\": str, \"body\": str (2 sentences), \"result\": str (1 sentence)}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=200, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.7, max_tokens=200, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title",""), "body": raw.get("body",""), "result": raw.get("result","")}
 
@@ -627,7 +630,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Create 'when to choose what' table for '{topic}' (3-4 rows). JSON: {{\"rows\": [{{\"when\": str, \"why\": str}}]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=250, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"rows": raw.get("rows", [])[:4]}
 
@@ -637,7 +640,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 if lang_pl else
                 f"Give 4-5 concrete 'next steps' after reading about '{topic}'. JSON: {{\"steps\": [str]}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=200, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.5, max_tokens=200, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"steps": raw.get("steps", [])[:5]}
 
@@ -664,7 +667,7 @@ async def _gpt_enrichment(client, topic: str, element: str, lang_pl: bool) -> di
                 f"Cross-reference data from multiple sources, show a trend or correlation others missed. "
                 f"JSON: {{\"title\": str (max 8 words), \"insight\": str (3-4 sentences), \"source\": str}}. JSON only."
             )
-            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.6, max_tokens=250, response_format={"type":"json_object"})
+            resp = await client.chat.completions.create(model=_enrich_model, messages=[{"role":"user","content":prompt}], temperature=0.6, max_tokens=250, **({} if is_custom_llm else {"response_format": {"type": "json_object"}}))
             raw = json.loads(resp.choices[0].message.content)
             return {"title": raw.get("title",""), "insight": raw.get("insight",""), "source": raw.get("source","")}
 
@@ -717,6 +720,7 @@ async def enrich_article(
     n_elements: int = None,
     serp_urls: list = None,
     skip_toc: bool = False,
+    is_custom_llm: bool = False,
 ) -> str:
     """
     FIX #42: corrected docstring — wstrzykuje 5-7 elementów do artykułu:
@@ -748,11 +752,11 @@ async def enrich_article(
     gpt_elements = [e for e in chosen if e not in no_gpt]
 
     async def _gpt_with_retry(element: str) -> dict:
-        result = await _gpt_enrichment(openai_client, topic, element, lang_pl)
+        result = await _gpt_enrichment(openai_client, topic, element, lang_pl, is_custom_llm=is_custom_llm)
         if not result:
             # FIX #77: add jitter to enrichment retry delay (prevents parallel retries from colliding)
             await asyncio.sleep(1 + random.uniform(0, 1))
-            result = await _gpt_enrichment(openai_client, topic, element, lang_pl)
+            result = await _gpt_enrichment(openai_client, topic, element, lang_pl, is_custom_llm=is_custom_llm)
         return result
 
     gpt_results = {}
