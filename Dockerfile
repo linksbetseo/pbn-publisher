@@ -12,8 +12,9 @@ WORKDIR /app
 COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm ci
 
-# ARG to bust Docker layer cache on every deploy
+# Cache bust — value changes every build via Railway's GIT_COMMIT env
 ARG CACHEBUST=1
+RUN echo "bust=$CACHEBUST"
 COPY frontend/ ./frontend/
 RUN mkdir -p backend/frontend_dist && \
     cd frontend && npm run build && cp -r dist/* ../backend/frontend_dist/
