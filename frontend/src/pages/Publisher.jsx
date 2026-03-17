@@ -171,42 +171,38 @@ export default function Publisher() {
     }
 
     try {
-      const apiBase = import.meta.env.DEV ? 'http://localhost:8001' : ''
-      const authToken = localStorage.getItem('pbn_auth_token')
-      const fetchHeaders = { 'Content-Type': 'application/json' }
-      if (authToken) fetchHeaders['Authorization'] = `Basic ${authToken}`
-      const response = await fetch(`${apiBase}/api/publish/post`, {
-        method: 'POST',
-        headers: fetchHeaders,
-        body: JSON.stringify(body),
-      })
+      // Use async job + SSE to avoid browser timeout on large domain sets
+      const startResp = await publishApi.postAsync(body)
+      const { job_id, total } = startResp.data
+      if (!job_id) throw new Error('Brak job_id z serwera')
 
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
+      const BASE = import.meta.env.DEV ? 'http://localhost:8001' : ''
+      const token = localStorage.getItem('pbn_auth_token')
+      const sseUrl = `${BASE}/api/publish/post-progress/${job_id}` + (token ? `?_auth=${encodeURIComponent(token)}` : '')
+      const evtSource = new EventSource(sseUrl)
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop()
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              if (data.done) {
-                setPublishDone(true)
-              } else {
-                setPublishResults(prev => [...prev, data])
-              }
-            } catch {}
-          }
+      await new Promise((resolve) => {
+        evtSource.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data)
+            if (data.latest) {
+              setPublishResults(prev => [...prev, data.latest])
+            }
+            if (data.finished) {
+              setPublishDone(true)
+              evtSource.close()
+              resolve()
+            }
+          } catch {}
         }
-      }
-      setPublishDone(true)
+        evtSource.onerror = () => {
+          evtSource.close()
+          setPublishDone(true)
+          resolve()
+        }
+      })
     } catch (e) {
-      setError(e.message || 'Błąd publikacji')
+      setError(e.response?.data?.detail || e.message || 'Błąd publikacji')
     } finally {
       setPublishing(false)
     }
