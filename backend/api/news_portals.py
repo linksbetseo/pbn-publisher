@@ -1398,6 +1398,16 @@ async def _news_gpt(
     _client, _default_model, _is_custom = await get_openai_client()
     if model is None:
         model = _default_model
+    # Custom LLMs: cap max_tokens and trim user prompt to avoid context overflow
+    if _is_custom:
+        from services.openai_service import get_custom_llm_config as _gcfg
+        _ccfg = await _gcfg()
+        _cap = _ccfg["max_tokens"] if _ccfg["max_tokens"] > 0 else 400
+        max_tokens = min(max_tokens, _cap)
+        # Trim user prompt to 1500 chars max for small models
+        _user_limit = _ccfg["serp_chars"] if _ccfg["serp_chars"] > 0 else 1500
+        if len(user) > _user_limit:
+            user = user[:_user_limit]
     for attempt in range(3):
         try:
             response = await _client.chat.completions.create(
@@ -1471,6 +1481,10 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
     _resolved_model = await get_gpt_model()
 
     # ── Build source context ──
+    # For custom LLMs (small context window) trim each source to 400 chars
+    _cfg_news = await __import__('services.openai_service', fromlist=['get_custom_llm_config']).get_custom_llm_config()
+    _news_is_custom = _cfg_news["enabled"] and bool(_cfg_news.get("base_url")) and bool(_cfg_news.get("model"))
+    _src_limit = 400 if _news_is_custom else 1200
     sources_parts = []
     source_urls = []
     source_titles = []
@@ -1478,7 +1492,7 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
         part = f"Źródło {i}: {item['title']}"
         source_titles.append(item['title'])
         if item.get("content"):
-            part += f"\n{item['content'][:1200]}"
+            part += f"\n{item['content'][:_src_limit]}"
         if item.get("url"):
             part += f"\nURL: {item['url']}"
             source_urls.append(item["url"])
@@ -1498,7 +1512,8 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
     if portal_editorial:
         editorial_ctx = f"\nWytyczne redakcji: {portal_editorial}" if lang_pl else f"\nEditorial guidelines: {portal_editorial}"
     if portal_tone:
-        editorial_ctx += f"\n\nTONE OF VOICE (stosuj ten ton w całym artykule):\n{portal_tone[:1500]}" if lang_pl else f"\n\nTONE OF VOICE (apply this tone throughout the article):\n{portal_tone[:1500]}"
+        _tone_limit = 400 if _news_is_custom else 1500
+        editorial_ctx += f"\n\nTONE OF VOICE (stosuj ten ton w całym artykule):\n{portal_tone[:_tone_limit]}" if lang_pl else f"\n\nTONE OF VOICE (apply this tone throughout the article):\n{portal_tone[:_tone_limit]}"
     if portal_site_desc:
         editorial_ctx += f"\n\nOpis strony: {portal_site_desc}" if lang_pl else f"\n\nSite description: {portal_site_desc}"
     niche_ctx = ""
@@ -1538,6 +1553,8 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
         temperature=0.3, max_tokens=600, model=_resolved_model,
     )
     logger.info(f"[NewsGen] Analysis done: {analysis[:80]}...")
+    # For custom LLMs trim analysis passed to downstream prompts to avoid context overflow
+    _analysis_in_prompts = analysis[:600] if _news_is_custom else analysis
 
     # ── STEP 2: Generate headline + outline (JSON structured) ──
     if lang_pl:
@@ -1625,7 +1642,7 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
         intro_user = (
             f"Napisz wstęp (lead) do artykułu '{title}'.\n"
             f"Lead do rozwinięcia: {lead}\n"
-            f"Kluczowe fakty:\n{analysis}\n"
+            f"Kluczowe fakty:\n{_analysis_in_prompts}\n"
             f"Źródła: {', '.join(source_titles[:3])}\n"
             f"Tylko HTML <p> i <strong>. Bez nagłówków."
         )
@@ -1642,7 +1659,7 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
         intro_user = (
             f"Write the lead/intro for article '{title}'.\n"
             f"Lead to expand: {lead}\n"
-            f"Key facts:\n{analysis}\n"
+            f"Key facts:\n{_analysis_in_prompts}\n"
             f"Sources: {', '.join(source_titles[:3])}\n"
             f"Only HTML <p> and <strong>. No headings."
         )
@@ -1671,7 +1688,7 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
                 sec_user = (
                     f"Napisz sekcję artykułu '{title}'.\n"
                     f"H2: '{heading}'\n"
-                    f"Fakty i kontekst:\n{analysis}\n"
+                    f"Fakty i kontekst:\n{_analysis_in_prompts}\n"
                     f"Struktura: <h2>{heading}</h2> → akapity <p> z faktami\n"
                     f"Źródła: {', '.join(source_titles[:3])}"
                 )
@@ -1694,7 +1711,7 @@ async def _generate_draft_inner(portal_id: int, body: GenerateRequest):
                 sec_user = (
                     f"Write a section of article '{title}'.\n"
                     f"H2: '{heading}'\n"
-                    f"Facts and context:\n{analysis}\n"
+                    f"Facts and context:\n{_analysis_in_prompts}\n"
                     f"Structure: <h2>{heading}</h2> → <p> paragraphs with facts\n"
                     f"Sources: {', '.join(source_titles[:3])}"
                 )
