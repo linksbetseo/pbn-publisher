@@ -218,10 +218,21 @@ async def _fetch_serp_content(
 # Functions _markdown_to_html, _strip_markdown_remnants now imported from services.article_helpers
 
 
+def _sanitize_for_json(s: str) -> str:
+    """Remove null bytes and other control chars that break JSON serialization."""
+    if not s:
+        return s
+    # Remove null bytes (\x00) and other ASCII control chars except \t \n \r
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', s)
+
+
 async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int = 2000, model: str = None) -> str:
     _client, _model, _is_custom = await get_openai_client()
     if model is None:
         model = _model
+    # Strip null bytes / control chars that cause OpenAI 400 "could not parse JSON body"
+    system = _sanitize_for_json(system or "")
+    user = _sanitize_for_json(user or "")
     for attempt in range(3):
         try:
             response = await _client.chat.completions.create(
