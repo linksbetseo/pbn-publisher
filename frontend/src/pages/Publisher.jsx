@@ -178,31 +178,29 @@ export default function Publisher() {
       const { job_id, total } = startResp.data
       if (!job_id) throw new Error('Brak job_id z serwera')
 
-      const BASE = import.meta.env.DEV ? 'http://localhost:8001' : ''
-      const token = localStorage.getItem('pbn_auth_token')
-      const sseUrl = `${BASE}/api/publish/post-progress/${job_id}` + (token ? `?_auth=${encodeURIComponent(token)}` : '')
-      const evtSource = new EventSource(sseUrl)
-
+      // HTTP polling — proxy-safe, works on Railway without SSE buffering issues
+      let seenCount = 0
       await new Promise((resolve) => {
-        evtSource.onmessage = (e) => {
+        const poll = async () => {
           try {
-            const data = JSON.parse(e.data)
+            const statusResp = await publishApi.jobStatus(job_id)
+            const data = statusResp.data
             if (data.done !== undefined) setPublishDoneCount(data.done)
-            if (data.latest) {
-              setPublishResults(prev => [...prev, data.latest])
+            // Append only new results since last poll
+            if (data.results && data.results.length > seenCount) {
+              const newItems = data.results.slice(seenCount)
+              seenCount = data.results.length
+              setPublishResults(prev => [...prev, ...newItems])
             }
-            if (data.finished) {
+            if (data.finished || data.error) {
               setPublishDone(true)
-              evtSource.close()
               resolve()
+              return
             }
           } catch {}
+          setTimeout(poll, 2000)
         }
-        evtSource.onerror = () => {
-          evtSource.close()
-          setPublishDone(true)
-          resolve()
-        }
+        poll()
       })
     } catch (e) {
       setError(e.response?.data?.detail || e.message || 'Błąd publikacji')

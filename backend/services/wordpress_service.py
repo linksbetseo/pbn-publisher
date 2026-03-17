@@ -321,61 +321,9 @@ async def _detect_seo_plugin(
     return plugin
 
 async def _ping_sitemaps(base_url: str, site_auth, post_url: str = "", extra_urls: list[str] = None) -> None:
-    """Notify search engines about new/updated content via IndexNow + Bing sitemap ping.
-    SEO #110: supports batch URL submission via extra_urls parameter.
-    """
+    """Ping Bing sitemap and Pingomatic after publishing."""
     try:
         async with httpx.AsyncClient(timeout=8, follow_redirects=True) as ping_client:
-            # IndexNow — instant indexing for Bing, Yandex, Seznam, Naver
-            # SEO #110: batch URL list (post_url + any extra_urls)
-            _url_list = []
-            if post_url:
-                _url_list.append(post_url)
-            if extra_urls:
-                _url_list.extend([u for u in extra_urls if u and u not in _url_list])
-            if _url_list:
-                clean_domain = base_url.replace("https://", "").replace("http://", "").rstrip("/")
-                indexnow_key = clean_domain.replace(".", "")[:32]
-                # Validate key file exists on domain (required by IndexNow protocol)
-                key_file_url = f"{base_url}/{indexnow_key}.txt"
-                # SEO #55: use cache for key file check
-                if key_file_url in _indexnow_key_cache:
-                    key_file_ok = _indexnow_key_cache[key_file_url]
-                else:
-                    key_file_ok = False
-                    try:
-                        kf_resp = await ping_client.get(key_file_url)
-                        key_file_ok = kf_resp.status_code == 200 and indexnow_key in (kf_resp.text or "")
-                    except Exception:
-                        pass
-                    _cache_put(_indexnow_key_cache, key_file_url, key_file_ok)
-                if not key_file_ok:
-                    logger.warning(
-                        f"[IndexNow] Key file missing or invalid at {key_file_url} — "
-                        f"create a file '{indexnow_key}.txt' containing '{indexnow_key}' in WP root"
-                    )
-                # BUG-5 FIX: Only submit to IndexNow if key file validation passed
-                if key_file_ok:
-                    # SEO #110: batch all URLs in one IndexNow submission (up to 10k per spec)
-                    indexnow_payload = {
-                        "host": clean_domain,
-                        "key": indexnow_key,
-                        "urlList": _url_list[:100],
-                    }
-                    for endpoint in [
-                        "https://api.indexnow.org/indexnow",
-                        "https://www.bing.com/indexnow",
-                    ]:
-                        try:
-                            resp = await ping_client.post(
-                                endpoint,
-                                json=indexnow_payload,
-                                headers={"Content-Type": "application/json"},
-                            )
-                            if resp.status_code in (200, 202):
-                                logger.info(f"[IndexNow] Submitted {post_url} to {endpoint}")
-                        except Exception:
-                            pass
             # Note: Google sitemap ping deprecated 2023 — only Bing remains
             # SEO #18: cache-bust sitemap URL with timestamp
             sitemap_url = f"{base_url}/sitemap.xml?t={int(time.time())}"

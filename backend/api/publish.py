@@ -567,7 +567,7 @@ async def _process_one_domain(
 
 
 async def _run_publish_job(job_id: str, body: "PublishRequest", domains: list):
-    """Background task: publish to all domains sequentially with drip delays (anti-footprint)."""
+    """Background task: publish to all domains in parallel (max 3 concurrent via semaphore)."""
     variation_pool = VARIATION_HINTS_PL if body.language == "pl" else VARIATION_HINTS_EN
     # Pre-assign unique variations to each domain
     variations = []
@@ -581,28 +581,16 @@ async def _run_publish_job(job_id: str, body: "PublishRequest", domains: list):
         used.append(v)
         variations.append(v)
 
-    use_drip = body.drip_delay and len(domains) > 2
-    drip_min, drip_max = _drip_delay_range(len(domains))
     db_rows = []
 
-    for idx, (d, variation) in enumerate(zip(domains, variations)):
+    async def _run_one(d, variation):
         if job_id not in _publish_jobs:
-            break
-
+            return
         item, db_row = await _process_one_domain(d, body, variation, job_id)
         _job_append(job_id, item, item["status"])
         db_rows.append(db_row)
 
-        # Drip delay between domains (anti-footprint)
-        if use_drip and idx < len(domains) - 1:
-            delay = random.randint(drip_min, drip_max)
-            logger.info(f"[DRIP] job={job_id[:8]} waiting {delay}s before domain {idx + 2}/{len(domains)}")
-            # Store drip info so SSE can report it
-            if job_id in _publish_jobs:
-                _publish_jobs[job_id]["drip_wait"] = delay
-            await asyncio.sleep(delay)
-            if job_id in _publish_jobs:
-                _publish_jobs[job_id].pop("drip_wait", None)
+    await asyncio.gather(*[_run_one(d, v) for d, v in zip(domains, variations)])
 
     if db_rows:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -656,6 +644,23 @@ async def publish_posts_async(body: "PublishRequest", background_tasks: Backgrou
     _job_init(job_id, len(domains))
     background_tasks.add_task(_run_publish_job, job_id, body, domains)
     return {"job_id": job_id, "total": len(domains)}
+
+
+@router.get("/job-status/{job_id}")
+async def publish_job_status(job_id: str):
+    """Simple HTTP poll endpoint — returns current job state. Proxy-safe alternative to SSE."""
+    job = _publish_jobs.get(job_id)
+    if job is None:
+        return {"error": "Job not found", "finished": True, "done": 0, "total": 0, "results": []}
+    return {
+        "done": job["done"],
+        "total": job["total"],
+        "published": job["published"],
+        "failed": job["failed"],
+        "finished": job["finished"],
+        "results": job["results"],
+        "new_results_since": 0,  # client tracks its own offset
+    }
 
 
 @router.get("/post-progress/{job_id}")
