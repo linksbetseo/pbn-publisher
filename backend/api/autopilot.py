@@ -464,6 +464,11 @@ async def ensure_tables():
                 await db.execute(f"ALTER TABLE domain_schedules ADD COLUMN {col} {typedef}")
             except Exception:
                 pass
+        # Migracja domain_keywords — error_detail
+        try:
+            await db.execute("ALTER TABLE domain_keywords ADD COLUMN error_detail TEXT DEFAULT ''")
+        except Exception:
+            pass
         # Performance indexes for common query patterns
         await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_schedule_status ON domain_keywords(schedule_id, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_domain_status ON domain_keywords(my_domain_id, status)")
@@ -1192,6 +1197,23 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             await _job_update(job_id, done=1, error="Harmonogram nie istnieje")
             return
 
+        # Detect custom LLM to adjust quality gate threshold
+        from services.openai_service import get_openai_client as _get_oa
+        _, _oa_model, _job_is_custom = await _get_oa()
+
+        # Fallback image_source from global Settings when schedule has none set
+        _sched_img_src = sched.get("image_source") or ""
+        if not _sched_img_src or _sched_img_src == "freepik_flux":
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute("SELECT value FROM settings WHERE key='default_image_source'") as _cur:
+                        _row = await _cur.fetchone()
+                        if _row and _row[0]:
+                            sched = dict(sched)
+                            sched["image_source"] = _row[0]
+            except Exception:
+                pass
+
         # Recover keywords stuck in 'publishing' — set back to pending so they are retried
         # (we cannot be sure the WP post was actually created)
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1401,9 +1423,10 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     if _prev_url:
                         content = f'<link rel="prev" href="{_prev_url}" />\n{content}'
 
-                    # SEO #28: quality gate — skip low-quality articles
-                    if _wc < 600:
-                        logger.warning(f"[Autopilot] Quality gate: '{keyword}' too short ({_wc} words) — skipping")
+                    # SEO #28: quality gate — lower threshold for custom/local LLMs
+                    _wc_min = 300 if _job_is_custom else 600
+                    if _wc < _wc_min:
+                        logger.warning(f"[Autopilot] Quality gate: '{keyword}' too short ({_wc} words, min={_wc_min}) — skipping")
                         _results.append({"status": "skipped", "keyword": keyword, "error": f"Too short: {_wc} words"})
                         continue
                     if _kd > 0 and (_kd < 0.5 or _kd > 3.0):
@@ -1486,30 +1509,42 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     _results.append({"status": "published", "keyword": keyword, "url": wp_url, "title": title, "image": image_provider})
                 else:
                     _failed += 1
+                    _err_detail = result.get("error", "WP error")
                     async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                        await db.execute(
+                            "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                            (_err_detail, kw_row["id"])
+                        )
                         await db.commit()
-                    _results.append({"status": "failed", "keyword": keyword, "error": result.get("error", "WP error")})
+                    _results.append({"status": "failed", "keyword": keyword, "error": _err_detail})
 
                 await _job_update(job_id, published=_published, failed=_failed, results=_results)
 
             except asyncio.TimeoutError:
                 _failed += 1
+                _err_detail = "Timeout (20 min)"
                 logger.error(f"[Autopilot] Timeout for '{keyword}' after 20 min")
                 async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                    await db.execute(
+                        "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                        (_err_detail, kw_row["id"])
+                    )
                     await db.commit()
-                _results.append({"status": "failed", "keyword": keyword, "error": "Timeout (20 min)"})
+                _results.append({"status": "failed", "keyword": keyword, "error": _err_detail})
                 await _job_update(job_id, published=_published, failed=_failed, results=_results)
                 continue
 
             except Exception as e:
                 _failed += 1
+                _err_detail = str(e)
                 logger.error(f"Autopilot error for {keyword}: {e}")
                 async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                    await db.execute(
+                        "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                        (_err_detail, kw_row["id"])
+                    )
                     await db.commit()
-                _results.append({"status": "failed", "keyword": keyword, "error": str(e)})
+                _results.append({"status": "failed", "keyword": keyword, "error": _err_detail})
                 await _job_update(job_id, published=_published, failed=_failed, results=_results)
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1878,6 +1913,21 @@ async def _run_schedule_daily(sched: dict) -> dict:
         schedule_id = sched["id"]
         limit = sched["posts_per_day"]
 
+        # Detect custom LLM + fallback image_source from global Settings
+        from services.openai_service import get_openai_client as _get_oa_daily
+        _, _oa_model_d, _daily_is_custom = await _get_oa_daily()
+        _sched_img = sched.get("image_source") or ""
+        if not _sched_img or _sched_img == "freepik_flux":
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute("SELECT value FROM settings WHERE key='default_image_source'") as _cur:
+                        _row = await _cur.fetchone()
+                        if _row and _row[0]:
+                            sched = dict(sched)
+                            sched["image_source"] = _row[0]
+            except Exception:
+                pass
+
         # Recover keywords stuck in 'publishing' — set back to pending so they are retried
         # (we cannot be sure the WP post was actually created)
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2035,18 +2085,31 @@ async def _run_schedule_daily(sched: dict) -> dict:
                             await db.commit()
                     else:
                         failed += 1
+                        _d_err = result.get("error", "WP error")
                         async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                            await db.execute(
+                                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                (_d_err, kw_row["id"])
+                            )
                             await db.commit()
                 except asyncio.TimeoutError:
                     failed += 1
                     logger.error(f"[Daily] Timeout for '{keyword}' after 20 min on {sched['domain']}")
                     async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                        await db.execute(
+                            "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                            ("Timeout (20 min)", kw_row["id"])
+                        )
                         await db.commit()
                 except Exception as e:
                     failed += 1
                     logger.error(f"Daily run error domain={sched['domain']} kw={keyword}: {e}")
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                            (str(e)[:500], kw_row["id"])
+                        )
+                        await db.commit()
             await asyncio.sleep(2)  # avoid bursting OpenAI rate limits between keywords
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2999,6 +3062,7 @@ async def get_autopilot_logs():
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT dk.id, dk.keyword, dk.status, dk.published_at, dk.wp_post_url, dk.title,
+                      COALESCE(dk.error_detail, '') as error_detail,
                       ds.seed_keyword, md.domain
                FROM domain_keywords dk
                JOIN domain_schedules ds ON ds.id = dk.schedule_id
