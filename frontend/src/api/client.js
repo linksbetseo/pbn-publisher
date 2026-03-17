@@ -99,6 +99,7 @@ export const publish = {
   post: (data) => apiLong.post('/api/publish/post', data),
   postAsync: (data) => apiLong.post('/api/publish/post-async', data),
   jobStatus: (jobId) => api.get(`/api/publish/job-status/${jobId}`),
+  crawlUrl: (url) => apiLong.post('/api/publish/crawl-url', { url }),
   checkDuplicate: (topic, domainId) => api.get('/api/publish/check-duplicate', { params: { topic, domain_id: domainId } }),
   pingSitemap: (data) => api.post('/api/publish/ping-sitemap', data),
   domainPosts: (domainId, limit = 20) => api.get(`/api/publish/domain-posts/${domainId}`, { params: { limit } }),

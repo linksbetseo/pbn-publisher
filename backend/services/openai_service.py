@@ -672,6 +672,7 @@ async def generate_article(
     pillar_page_url: str = "",  # PBN inter-link: supporting → pillar
     pillar_page_anchor: str = "",  # anchor text for pillar link
     pbn_domain: str = "",  # FIX: PBN domain for Article JSON-LD publisher (avoids money site footprint)
+    client_context: str = "",  # crawled summary of client's website — used to ground article facts
 ) -> dict:
     _t0 = time.time()
 
@@ -718,6 +719,12 @@ async def generate_article(
     _current_year = datetime.now(timezone.utc).year
     variation = f" Kąt tematyczny: {variation_hint}." if variation_hint else ""
     custom_block = f"\nDodatkowe wymagania: {custom_prompt}" if custom_prompt else ""
+    # Client context block — inject scraped website knowledge into every section prompt
+    _ctx_block = (
+        f"\n\n[WIEDZA O STRONIE KLIENTA — używaj tych faktów, nie wymyślaj]:\n{_sanitize_for_json(client_context)}"
+        if client_context else ""
+    )
+    custom_block = custom_block + _ctx_block
     lang_pl = language == "pl"
 
     # ── Layout variant (30% faq_top, 20% tldr, 25% short_answer, 25% standard) ──

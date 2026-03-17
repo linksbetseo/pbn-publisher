@@ -40,6 +40,10 @@ export default function Publisher() {
   const [error, setError] = useState('')
   const [pingSitemap, setPingSitemap] = useState({})
   const [dripDelay, setDripDelay] = useState(true)
+  const [crawlUrl, setCrawlUrl] = useState('')
+  const [crawling, setCrawling] = useState(false)
+  const [clientContext, setClientContext] = useState('')
+  const [crawlSummary, setCrawlSummary] = useState('')
   const addToast = useToast()
   const fileInputRef = useRef(null)
 
@@ -64,6 +68,27 @@ export default function Publisher() {
 
   const canProceedStep0 = selectedProject && selectedClient && selectedClientDomain && topic.trim() && anchorText.trim()
   const canProceedStep1 = selectedDomainIds.length > 0
+
+  const handleCrawl = async () => {
+    if (!crawlUrl.trim()) return
+    setCrawling(true)
+    setCrawlSummary('')
+    setClientContext('')
+    try {
+      const res = await publishApi.crawlUrl(crawlUrl.trim())
+      if (res.data.ok) {
+        setClientContext(res.data.context)
+        setCrawlSummary(res.data.summary)
+        addToast('Strona klienta pobrana — LLM będzie pisał na podstawie tych danych', 'success')
+      } else {
+        addToast(res.data.error || 'Błąd crawlowania', 'error')
+      }
+    } catch (e) {
+      addToast('Błąd crawlowania strony', 'error')
+    } finally {
+      setCrawling(false)
+    }
+  }
 
   const handleGenerate = async () => {
     setGenerating(true)
@@ -95,6 +120,7 @@ export default function Publisher() {
         custom_prompt: useCustomPrompt ? customPrompt : '',
         tone_of_voice: toneOfVoice,
         use_serp_scrape: useSerpScrape,
+        client_context: clientContext,
       })
       setGenerated(res.data)
       setEditTitle(res.data.title)
@@ -170,6 +196,7 @@ export default function Publisher() {
       language,
       unique_per_domain: true,
       drip_delay: dripDelay,
+      client_context: clientContext,
     }
 
     try {
@@ -220,6 +247,9 @@ export default function Publisher() {
     setPublishDone(false)
     setPublishDoneCount(0)
     setError('')
+    setClientContext('')
+    setCrawlSummary('')
+    setCrawlUrl('')
     setTopic('')
     setAnchorText('')
     setAnchorText2('')
@@ -417,6 +447,41 @@ export default function Publisher() {
                 rows={3}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
+            )}
+          </div>
+
+          {/* Client URL crawl */}
+          <div className="border border-blue-100 bg-blue-50 rounded-lg p-4 space-y-2">
+            <p className="text-sm font-medium text-blue-800">Kontekst strony klienta (opcjonalne)</p>
+            <p className="text-xs text-blue-600">Podaj URL strony klienta — LLM pobierze jej zawartość i będzie pisał na podstawie rzeczywistych produktów/usług zamiast halucynować.</p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="np. https://ragiart.pl lub https://pieslaw.pl"
+                value={crawlUrl}
+                onChange={(e) => setCrawlUrl(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleCrawl()}
+                className="flex-1 border border-blue-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+              <button
+                onClick={handleCrawl}
+                disabled={crawling || !crawlUrl.trim()}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-40 whitespace-nowrap"
+              >
+                {crawling ? 'Crawluję...' : 'Crawl URL'}
+              </button>
+              {clientContext && (
+                <button
+                  onClick={() => { setClientContext(''); setCrawlSummary(''); setCrawlUrl('') }}
+                  className="px-3 py-2 border border-gray-300 text-gray-500 rounded-lg text-sm hover:bg-gray-50"
+                  title="Usuń kontekst"
+                >✕</button>
+              )}
+            </div>
+            {crawlSummary && (
+              <div className="mt-2 p-3 bg-white border border-blue-200 rounded-lg text-xs text-gray-700 max-h-32 overflow-y-auto whitespace-pre-wrap">
+                <span className="font-semibold text-blue-700">Pobrano:</span> {crawlSummary}
+              </div>
             )}
           </div>
 

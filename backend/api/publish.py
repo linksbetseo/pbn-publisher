@@ -115,6 +115,7 @@ class GenerateRequest(BaseModel):
     pillar_page_anchor: str = ""
     tone_of_voice: str = "ekspert"
     use_serp_scrape: bool = True
+    client_context: str = ""  # crawled summary of client's website
 
     @field_validator("topic")
     @classmethod
@@ -167,6 +168,7 @@ class PublishRequest(BaseModel):
     batch_tag: str = ""
     image_source: str = "none"  # none | gemini | freepik_stock | freepik_zimage | freepik_flux | dalle
     drip_delay: bool = True  # anti-footprint: random delays between domains
+    client_context: str = ""  # crawled summary of client's website
 
     @field_validator("image_source")
     @classmethod
@@ -218,6 +220,70 @@ async def check_duplicate(topic: str, domain_id: int):
     return {"duplicate": False, "matches": []}
 
 
+@router.post("/crawl-url")
+async def crawl_client_url(body: dict):
+    """Crawl a client URL and return a structured summary for use as article context."""
+    url = (body.get("url") or "").strip()
+    if not url:
+        from fastapi import HTTPException
+        raise HTTPException(400, "Brak URL")
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    from services.dataforseo_service import DataForSEOClient
+    import httpx
+    dfs = DataForSEOClient(DFS_LOGIN, DFS_PASSWORD)
+    raw_text = ""
+    try:
+        async with httpx.AsyncClient(timeout=30) as _c:
+            raw_text = await dfs.page_content(url, _client=_c)
+    except Exception as e:
+        logger.warning(f"[CrawlURL] DFS failed for {url}: {e}")
+
+    # Fallback: direct httpx fetch if DFS unavailable or returned empty
+    if not raw_text:
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
+                resp = await _c.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                import re as _re
+                text = resp.text
+                # Strip HTML tags
+                text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+                text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+                text = _re.sub(r'<[^>]+>', ' ', text)
+                text = _re.sub(r'\s+', ' ', text).strip()
+                raw_text = text[:8000]
+        except Exception as e:
+            logger.warning(f"[CrawlURL] Direct fetch failed for {url}: {e}")
+
+    if not raw_text:
+        return {"ok": False, "error": "Nie udało się pobrać treści strony", "context": "", "summary": ""}
+
+    # Use GPT to extract structured summary (what the site offers, key products/services, USP)
+    from services.openai_service import _gpt, _sanitize_for_json
+    clean_text = _sanitize_for_json(raw_text[:5000])
+    try:
+        summary = await _gpt(
+            "Jesteś analitykiem treści stron internetowych.",
+            f"Przeanalizuj poniższą treść strony i wypisz KONKRETNIE:\n"
+            f"1. Czym się zajmuje firma / co oferuje\n"
+            f"2. Główne produkty lub usługi (lista, max 15 pozycji)\n"
+            f"3. Unikalne cechy / USP (co wyróżnia)\n"
+            f"4. Dla kogo są te produkty/usługi\n"
+            f"5. Kluczowe frazy i słowa branżowe używane na stronie\n\n"
+            f"Treść strony {url}:\n{clean_text}\n\n"
+            f"Odpowiedz zwięźle, po polsku, w punktach.",
+            temperature=0.2,
+            max_tokens=600,
+        )
+    except Exception as e:
+        summary = raw_text[:1500]
+
+    context = f"[Kontekst strony klienta: {url}]\n{summary}"
+    return {"ok": True, "context": context, "summary": summary, "url": url}
+
+
 @router.post("/generate")
 async def generate_content(body: GenerateRequest):
     # Build custom_prompt incorporating tone_of_voice
@@ -241,6 +307,7 @@ async def generate_content(body: GenerateRequest):
         pillar_page_anchor=body.pillar_page_anchor,
         dfs_login=DFS_LOGIN if body.use_serp_scrape else "",
         dfs_password=DFS_PASSWORD if body.use_serp_scrape else "",
+        client_context=body.client_context,
     )
     image_b64 = None
     image_provider = "none"
@@ -503,6 +570,7 @@ async def _process_one_domain(
                         dfs_password=DFS_PASSWORD,
                         published_posts=_published_posts,
                         pbn_domain=d.get("domain", ""),
+                        client_context=body.client_context,
                     ),
                     timeout=_ARTICLE_TIMEOUT,
                 )
