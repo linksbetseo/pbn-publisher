@@ -663,18 +663,21 @@ async def publish_progress_sse(job_id: str, request: Request):
     """SSE stream: emits progress events until publish job is done."""
     async def event_generator():
         last_done = -1
-        # FIX #61: add SSE timeout guard — auto-close after 30min to prevent zombie connections
+        last_results_len = 0
         _sse_start = time.time()
         _SSE_MAX_DURATION = 1800  # 30 minutes
+        _last_ping = time.time()
+        # Initial padding to force proxy buffer flush (Railway/nginx buffer ~4KB)
+        yield f": {' ' * 2048}\n\n"
+        yield f"retry: 3000\n\n"
         while True:
-            # Detect client disconnect — prevents memory leak from orphaned jobs
+            # Detect client disconnect
             if await request.is_disconnected():
-                # Mark job for cleanup but let background task finish saving to DB
                 if job_id in _publish_jobs:
                     _publish_jobs[job_id]["_client_gone"] = True
                 return
 
-            # FIX #61: timeout guard
+            # Timeout guard
             if time.time() - _sse_start > _SSE_MAX_DURATION:
                 yield f"data: {_json.dumps({'error': 'SSE timeout (30min)'})}\n\n"
                 return
@@ -683,9 +686,14 @@ async def publish_progress_sse(job_id: str, request: Request):
             if job is None:
                 yield f"data: {_json.dumps({'error': 'Job not found'})}\n\n"
                 return
+
             drip_wait = job.get("drip_wait")
-            if job["done"] != last_done or drip_wait:
+            results_len = len(job["results"])
+            # Send event when new result arrives OR done count changes OR drip_wait
+            if job["done"] != last_done or results_len != last_results_len or drip_wait:
                 last_done = job["done"]
+                last_results_len = results_len
+                _last_ping = time.time()
                 latest = job["results"][-1] if job["results"] else None
                 payload = {
                     "done": job["done"],
@@ -698,8 +706,12 @@ async def publish_progress_sse(job_id: str, request: Request):
                 if drip_wait:
                     payload["drip_wait"] = drip_wait
                 yield f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+            elif time.time() - _last_ping >= 15:
+                # Keepalive ping every 15s to prevent proxy from closing idle connection
+                _last_ping = time.time()
+                yield f": ping\n\n"
+
             if job["finished"]:
-                # Clean up after a short delay to allow client to read final event
                 await asyncio.sleep(2)
                 _publish_jobs.pop(job_id, None)
                 return

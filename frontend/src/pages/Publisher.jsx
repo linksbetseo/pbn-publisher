@@ -36,6 +36,7 @@ export default function Publisher() {
   const [publishResults, setPublishResults] = useState([])
   const [publishing, setPublishing] = useState(false)
   const [publishDone, setPublishDone] = useState(false)
+  const [publishDoneCount, setPublishDoneCount] = useState(0)
   const [error, setError] = useState('')
   const [pingSitemap, setPingSitemap] = useState({})
   const [dripDelay, setDripDelay] = useState(true)
@@ -149,6 +150,7 @@ export default function Publisher() {
     setPublishing(true)
     setPublishResults([])
     setPublishDone(false)
+    setPublishDoneCount(0)
     setError('')
 
     const body = {
@@ -185,6 +187,7 @@ export default function Publisher() {
         evtSource.onmessage = (e) => {
           try {
             const data = JSON.parse(e.data)
+            if (data.done !== undefined) setPublishDoneCount(data.done)
             if (data.latest) {
               setPublishResults(prev => [...prev, data.latest])
             }
@@ -217,6 +220,7 @@ export default function Publisher() {
     setStaticImageB64(null)
     setPublishResults([])
     setPublishDone(false)
+    setPublishDoneCount(0)
     setError('')
     setTopic('')
     setAnchorText('')
@@ -654,7 +658,7 @@ export default function Publisher() {
                 <div className="flex items-center gap-2 mb-3">
                   {publishing && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600" />}
                   <span className="text-sm font-medium text-gray-700">
-                    {publishDone ? 'Zakończono!' : `Publikowanie... ${publishResults.length}/${selectedDomainIds.length}`}
+                    {publishDone ? 'Zakończono!' : `Publikowanie... ${publishDoneCount}/${selectedDomainIds.length}`}
                   </span>
                 </div>
                 <div className="space-y-2 max-h-64 overflow-y-auto">
