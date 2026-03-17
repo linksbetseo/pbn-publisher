@@ -1819,10 +1819,14 @@ async def generate_keyword_now(keyword_id: int):
             await db.commit()
         return {"status": "published", "keyword": keyword, "title": title, "url": wp_url, "image": image_provider}
     else:
+        _pub_err = result.get("error", "unknown")
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (keyword_id,))
+            await db.execute(
+                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                (_pub_err, keyword_id)
+            )
             await db.commit()
-        raise HTTPException(500, f"Publikacja nie powiodła się: {result.get('error', 'unknown')}")
+        raise HTTPException(500, f"Publikacja nie powiodła się: {_pub_err}")
 
 
 @router.post("/schedules/{schedule_id}/run-all")
@@ -2914,14 +2918,21 @@ async def _bulk_run_bg(job_id: str, schedule_ids: list[int], limit_override: int
                             await db.commit()
                     else:
                         failed += 1
+                        _bulk_err = result.get("error", "WP error")
                         async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                            await db.execute(
+                                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                (_bulk_err, kw_row["id"])
+                            )
                             await db.commit()
                 except Exception as e:
                     failed += 1
                     logger.error(f"[BulkRun] {sched['domain']} kw={keyword}: {e}")
                     async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("UPDATE domain_keywords SET status='failed' WHERE id=?", (kw_row["id"],))
+                        await db.execute(
+                            "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                            (str(e)[:500], kw_row["id"])
+                        )
                         await db.commit()
 
             async with aiosqlite.connect(DB_PATH) as db:
