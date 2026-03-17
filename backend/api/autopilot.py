@@ -2032,6 +2032,19 @@ async def _run_schedule_daily(sched: dict) -> dict:
                         excerpt = article.get("excerpt", "")
                         lsi_tags = article.get("lsi_tags", [])
 
+                        # Quality gate — lower threshold for custom/local LLMs
+                        _d_wc = article.get("word_count", 0)
+                        _d_wc_min = 300 if _daily_is_custom else 600
+                        if _d_wc < _d_wc_min:
+                            logger.warning(f"[Daily] Quality gate: '{keyword}' too short ({_d_wc} words, min={_d_wc_min}) — skipping")
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                await db.execute(
+                                    "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                    (f"Too short: {_d_wc} words", kw_row["id"])
+                                )
+                                await db.commit()
+                            continue
+
                         img_prompt_daily = (
                             f"A photorealistic scene that visually represents: {article['title']}. "
                             f"Show a concrete moment or setting related to '{keyword}'. "
