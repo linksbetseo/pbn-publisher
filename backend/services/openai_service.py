@@ -688,30 +688,17 @@ async def generate_article(
             return ""
         return url
 
-    # Build anchor links — always rotate anchors, randomize dofollow/nofollow (never sponsored)
+    # Build anchor links — client links are always dofollow (PBN purpose is link equity transfer)
     anchors_info = ""
     if client_domain and client_domain.strip():
-        # Always rotate anchors — natural variation prevents exact-match footprint
         rotated_anchor = _rotate_anchor(anchor_text or topic, client_domain, language)
-        # ~70% dofollow (no rel), ~30% nofollow — natural link profile, NEVER sponsored
-        if random.random() < 0.7:
-            anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
-        else:
-            anchors_info = f'<a href="{clean_url(client_domain)}" rel="nofollow noopener noreferrer">{rotated_anchor}</a>'
+        anchors_info = f'<a href="{clean_url(client_domain)}">{rotated_anchor}</a>'
     if anchor_text2 and anchor_url2:
-        # Always rotate anchor for link 2
         rotated2 = _rotate_anchor(anchor_text2, anchor_url2, language)
-        if random.random() < 0.7:
-            anchors_info += f', <a href="{clean_url(anchor_url2)}">{rotated2}</a>'
-        else:
-            anchors_info += f', <a href="{clean_url(anchor_url2)}" rel="nofollow noopener noreferrer">{rotated2}</a>'
+        anchors_info += f', <a href="{clean_url(anchor_url2)}">{rotated2}</a>'
     if anchor_text3 and anchor_url3:
-        # Always rotate anchor for link 3
         rotated3 = _rotate_anchor(anchor_text3, anchor_url3, language)
-        if random.random() < 0.7:
-            anchors_info += f', <a href="{clean_url(anchor_url3)}">{rotated3}</a>'
-        else:
-            anchors_info += f', <a href="{clean_url(anchor_url3)}" rel="nofollow noopener noreferrer">{rotated3}</a>'
+        anchors_info += f', <a href="{clean_url(anchor_url3)}">{rotated3}</a>'
     # PBN inter-link: supporting page → pillar page (internal silo, always dofollow, no rotation)
     if pillar_page_url and pillar_page_anchor:
         anchors_info += f', <a href="{clean_url(pillar_page_url)}">{pillar_page_anchor}</a>'
