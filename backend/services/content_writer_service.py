@@ -217,8 +217,9 @@ TON GŁOSU: {tone_instruction}
 WYMAGANIA TECHNICZNE SEO:
 1. H1 = BEZPOŚREDNIA ODPOWIEDŹ + definicja '{keyword}' (1-2 zdania, format AI Overview/Featured Snippet)
    Przykład: "<h1><strong>{keyword}</strong> — co to jest i jak działa?</h1>"
-2. Wstęp: pierwszy akapit = definicja z <strong>{keyword}</strong> (AI Overview style)
-3. 6-8 sekcji H2, każda z 1-2 podsekcjami H3
+2. Wstęp PRZED pierwszym H2: napisz 3-5 akapitów <p> (łącznie 4-10 zdań) które bezpośrednio odpowiadają na główne pytania wynikające z frazy. Styl AI Overview — odpowiedz na kto/co/dlaczego/jak od razu. Użyj <strong>{keyword}</strong> w pierwszym zdaniu. NIE umieszczaj żadnego H2 przed tymi akapitami wstępnymi.
+3. Spis treści zostanie dodany automatycznie po wstępie — NIE umieszczaj go ręcznie.
+4. 6-8 sekcji H2, każda z 1-2 podsekcjami H3
 4. Używaj <strong> dla kluczowych terminów, liczb i ważnych faktów
 5. Mix formatów: <p>, <ul>/<li>, <ol>/<li> — nie same akapity
 6. FAQ na końcu: min 8 pytań (użyj pytań PAA powyżej jeśli dostępne + własne), format <h3>Pytanie?</h3><p>Odpowiedź.</p>
@@ -256,8 +257,9 @@ TONE OF VOICE: {tone_instruction}
 
 SEO REQUIREMENTS:
 1. H1 = DIRECT ANSWER + definition of '{keyword}' (1-2 sentences, AI Overview/Featured Snippet format)
-2. Intro: first paragraph = definition with <strong>{keyword}</strong> (AI Overview style)
-3. 6-8 H2 sections, each with 1-2 H3 subsections
+2. Intro BEFORE any H2: write 3-5 <p> paragraphs (4-10 sentences total) that directly answer the main questions implied by the keyword. AI Overview style — cover the who/what/why/how at a glance. Include <strong>{keyword}</strong> in the first sentence. Do NOT place any H2 heading before these intro paragraphs.
+3. Table of contents will be auto-inserted after the intro — do NOT include it manually.
+4. 6-8 H2 sections, each with 1-2 H3 subsections
 4. Use <strong> for key terms, numbers, and important facts
 5. Mix formats: <p>, <ul>/<li>, <ol>/<li> — not just paragraphs
 6. FAQ at the end: min 8 questions (use PAA questions above if available + your own), <h3>Question?</h3><p>Answer.</p>

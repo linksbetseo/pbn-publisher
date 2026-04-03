@@ -777,15 +777,23 @@ async def enrich_article(
         return html[:para_end + 4] + f"\n\n{block}" + html[para_end + 4:]
 
     # ── TOC ────────────────────────────────────────────────────────────────────
+    # TOC goes AFTER the intro paragraphs (4 <p> tags), not immediately after H1.
+    # This mirrors AI Overview style: answer/intro first, then navigation.
     if "toc" in chosen and sections:
         toc_html = _build_toc(sections, lang_pl)
         content = _add_toc_anchors(content, sections)
-        if "</h1>" in content:
-            content = content.replace("</h1>", f"</h1>\n\n{toc_html}", 1)
-        else:
-            first_p = content.find("</p>")
-            if first_p != -1:
-                content = content[:first_p + 4] + f"\n\n{toc_html}" + content[first_p + 4:]
+        # Find position after 4th </p> but before first <h2>
+        p_positions = [m.end() for m in re.finditer(r"</p>", content)]
+        h2_pos = content.find("<h2")
+        # Use 4th </p> if available, else 2nd, else 1st; but never past the first <h2>
+        target_p = None
+        for pos in p_positions[:4]:
+            if h2_pos == -1 or pos < h2_pos:
+                target_p = pos
+        if target_p is not None:
+            content = content[:target_p] + f"\n\n{toc_html}" + content[target_p:]
+        elif h2_pos != -1:
+            content = content[:h2_pos] + toc_html + "\n\n" + content[h2_pos:]
 
     # ── Quick Answer — wstaw przed TOC lub przed H2 ────────────────────────────
     if "quick_answer" in chosen:
