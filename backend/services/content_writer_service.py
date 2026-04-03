@@ -88,16 +88,50 @@ async def _scrape_top10_content(keyword: str, dfs_login: str, dfs_password: str,
     return result
 
 
+def _extract_intro_sentences(text: str, max_sentences: int = 6) -> str:
+    """Extract first N sentences from scraped content (strips HTML tags first)."""
+    import re as _re
+    # Strip HTML tags
+    clean = _re.sub(r"<[^>]+>", " ", text)
+    clean = _re.sub(r"\s+", " ", clean).strip()
+    # Split on sentence boundaries
+    sentences = _re.split(r"(?<=[.!?])\s+", clean)
+    # Take first max_sentences non-trivial sentences (>20 chars)
+    result = []
+    for s in sentences:
+        s = s.strip()
+        if len(s) > 20:
+            result.append(s)
+        if len(result) >= max_sentences:
+            break
+    return " ".join(result)
+
+
 def _build_serp_context(serp_data: list[dict]) -> str:
-    """Build context string from SERP data for prompt."""
-    lines = []
+    """Build context string from SERP data for prompt.
+
+    Returns two sections:
+    - AI OVERVIEW FRAGMENTS: first 4-6 sentences from each page (what Google uses for AI Overview)
+    - FULL CONTEXT: titles + longer snippets for competitive gap analysis
+    """
+    intro_lines = []
+    full_lines = []
+
     for item in serp_data:
-        lines.append(f"[#{item['rank']}] {item['title']}")
-        lines.append(f"URL: {item['url']}")
-        if item.get("content_snippet"):
-            lines.append(f"Treść: {item['content_snippet'][:1200]}")
-        lines.append("")
-    return "\n".join(lines)
+        snippet = item.get("content_snippet", "") or item.get("description", "")
+        intro = _extract_intro_sentences(snippet, max_sentences=5)
+        if intro:
+            intro_lines.append(f"[#{item['rank']}] {intro}")
+
+        full_lines.append(f"[#{item['rank']}] {item['title']}")
+        full_lines.append(f"URL: {item['url']}")
+        if snippet:
+            full_lines.append(f"Treść: {snippet[:800]}")
+        full_lines.append("")
+
+    ai_overview_block = "\n".join(intro_lines)
+    full_block = "\n".join(full_lines)
+    return ai_overview_block, full_block
 
 
 async def generate_seo_article(
@@ -144,6 +178,7 @@ async def generate_seo_article(
     # Fetch SERP data
     _step(1, "serp", "Analiza SERP top10...")
     serp_context = ""
+    serp_ai_overview = ""
     paa_questions = []
     serp_urls = []
     if use_serp_scrape and dfs_login and dfs_password:
@@ -152,7 +187,7 @@ async def generate_seo_article(
             serp_items = serp_result.get("serp_items", [])
             paa_questions = serp_result.get("paa_questions", [])
             serp_urls = serp_result.get("serp_urls", [])
-            serp_context = _build_serp_context(serp_items)
+            serp_ai_overview, serp_context = _build_serp_context(serp_items)
             logger.info(f"SERP scrape OK: {len(serp_items)} results, {len(paa_questions)} PAA for '{keyword}'")
         except Exception as e:
             logger.warning(f"SERP scrape failed: {e}")
@@ -188,18 +223,25 @@ async def generate_seo_article(
         paa_section = f"\nPYTANIA Z GOOGLE (People Also Ask) — użyj ich w FAQ:\n{paa_list}\n"
 
     serp_section = ""
-    if serp_context:
-        # Custom LLM (local/small model) — trim SERP context to avoid context window overflow
-        _serp_content = serp_context
-        serp_section = f"""
-ANALIZA TOP10 SERP DLA FRAZY "{keyword}":
-{_serp_content}
+    if serp_context or serp_ai_overview:
+        ai_block = f"""
+FRAGMENTY AI OVERVIEW (pierwsze zdania z top stron — to jest materiał który Google syntetyzuje w AI Overview):
+{serp_ai_overview}
+
+INSTRUKCJA INTRO: Twój wstęp (3-5 akapitów przed pierwszym H2) musi być SYNTEZĄ powyższych fragmentów — tak jak Google AI Overview łączy odpowiedzi z wielu stron w jeden spójny blok. Nie kopiuj dosłownie — zsyntetyzuj, uzupełnij, napisz lepiej. Odpowiedz na: co to jest, jak działa, dlaczego ważne, dla kogo.
+""" if serp_ai_overview else ""
+
+        full_block = f"""
+ANALIZA TOP10 SERP (pełne snippety do analizy luk):
+{serp_context}
 
 Na podstawie powyższej analizy:
-- Zidentyfikuj wspólne tematy i sekcje, które pokrywają rywale
+- Zidentyfikuj wspólne tematy i sekcje H2, które pokrywają rywale
 - Wypełnij luki informacyjne (napisz o tym, czego brakuje konkurencji)
 - Użyj lepszej struktury i głębszych odpowiedzi
-"""
+""" if serp_context else ""
+
+        serp_section = ai_block + full_block
 
     if language == "pl":
         system_prompt = (
