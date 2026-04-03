@@ -1254,14 +1254,17 @@ async def generate_article(
         ) if tldr_sentence else ""
         content_parts = [tldr_box, intro_html] + sections_html + [conclusion_html, faq_html]
     elif layout_variant == "short_answer":
-        # "Krótka odpowiedź" box — good for featured snippets (25%)
-        sa_label = "Krótka odpowiedź" if lang_pl else "Quick Answer"
-        sa_intro = intro_html[:400] if intro_html else ""
-        sa_text = re.sub(r'<[^>]+>', '', sa_intro).strip()[:250]
+        # Featured snippet box — first full paragraph, no label
+        sa_intro = intro_html if intro_html else ""
+        sa_text = re.sub(r'<[^>]+>', '', sa_intro).strip()
+        # Take first complete sentence(s) up to ~400 chars, never cut mid-word
+        if len(sa_text) > 400:
+            cut = sa_text.rfind('.', 0, 400)
+            sa_text = sa_text[:cut + 1] if cut > 0 else sa_text[:400]
         sa_box = (
             f'<div style="background:#f0fdf4;border:1px solid #86efac;padding:16px 20px;'
             f'margin:16px 0 24px;border-radius:8px;">'
-            f'<strong>{sa_label}:</strong> {sa_text}</div>'
+            f'{sa_text}</div>'
         ) if sa_text else ""
         content_parts = [sa_box, intro_html] + sections_html + [conclusion_html, faq_html]
     else:
