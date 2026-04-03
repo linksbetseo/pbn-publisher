@@ -16,6 +16,10 @@ class DomainAdd(BaseModel):
     domain: str
 
 
+class DomainBulkAdd(BaseModel):
+    lines: str
+
+
 @router.get("")
 async def list_clients(project_id: Optional[int] = Query(None)):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -90,6 +94,38 @@ async def add_domain(client_id: int, body: DomainAdd):
         await db.commit()
         domain_id = cursor.lastrowid
     return {"id": domain_id, "client_id": client_id, "domain": body.domain}
+
+
+@router.post("/{client_id}/domains/bulk", status_code=201)
+async def bulk_add_domains(client_id: int, body: DomainBulkAdd):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM clients WHERE id = ?", (client_id,)
+        ) as cursor:
+            if not await cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Client not found")
+        async with db.execute(
+            "SELECT domain FROM client_domains WHERE client_id = ?", (client_id,)
+        ) as cursor:
+            existing = {r[0] for r in await cursor.fetchall()}
+        inserted = 0
+        skipped = 0
+        errors = []
+        for raw in body.lines.splitlines():
+            domain = raw.strip().lower().rstrip("/")
+            if not domain:
+                continue
+            if domain in existing:
+                skipped += 1
+                continue
+            await db.execute(
+                "INSERT INTO client_domains (client_id, domain) VALUES (?, ?)",
+                (client_id, domain),
+            )
+            existing.add(domain)
+            inserted += 1
+        await db.commit()
+    return {"inserted": inserted, "skipped": skipped, "errors": errors}
 
 
 @router.delete("/{client_id}/domains/{domain_id}", status_code=204)

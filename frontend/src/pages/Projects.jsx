@@ -568,6 +568,9 @@ export default function Projects() {
   const [newProject, setNewProject] = useState('')
   const [newClient, setNewClient] = useState('')
   const [newDomain, setNewDomain] = useState('')
+  const [bulkDomains, setBulkDomains] = useState('')
+  const [showBulk, setShowBulk] = useState(false)
+  const [bulkResult, setBulkResult] = useState(null)
   const [loading, setLoading] = useState(false)
 
   // Domain workspace
@@ -639,6 +642,21 @@ export default function Projects() {
   const handleDeleteDomain = async (clientId, domainId) => {
     await clientsApi.deleteDomain(clientId, domainId)
     await loadClients(selectedProject.id)
+  }
+
+  const handleBulkImport = async () => {
+    if (!bulkDomains.trim() || !selectedClient) return
+    setLoading(true)
+    setBulkResult(null)
+    try {
+      const res = await clientsApi.addDomainsBulk(selectedClient.id, bulkDomains)
+      setBulkResult(res.data)
+      setBulkDomains('')
+      await loadClients(selectedProject.id)
+    } catch (e) {
+      setBulkResult({ error: 'Błąd importu' })
+    }
+    setLoading(false)
   }
 
   const currentClient = clientList.find(c => c.id === selectedClient?.id)
@@ -773,10 +791,20 @@ export default function Projects() {
         {/* Domains panel */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col">
           <div className="p-4 border-b border-gray-100">
-            <h3 className="font-semibold text-gray-700 mb-3">
-              Domeny klienta {currentClient ? `— ${currentClient.name}` : ''}
-            </h3>
-            {currentClient && (
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-gray-700">
+                Domeny klienta {currentClient ? `— ${currentClient.name}` : ''}
+              </h3>
+              {currentClient && (
+                <button
+                  onClick={() => { setShowBulk(!showBulk); setBulkResult(null) }}
+                  className={`text-xs px-2 py-1 rounded-lg border ${showBulk ? 'bg-blue-600 text-white border-blue-600' : 'text-blue-600 border-blue-300 hover:bg-blue-50'}`}
+                >
+                  {showBulk ? '← Pojedynczo' : 'Import bulk'}
+                </button>
+              )}
+            </div>
+            {currentClient && !showBulk && (
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -791,6 +819,35 @@ export default function Projects() {
                   disabled={loading}
                   className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
                 >+</button>
+              </div>
+            )}
+            {currentClient && showBulk && (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs text-gray-400">Jedna domena na linię, np.:<br/>
+                  <span className="font-mono text-gray-500">example.com{"\n"}mojadomena.pl</span>
+                </p>
+                <textarea
+                  rows={5}
+                  placeholder={"example.com\nmojadomena.pl\nnastepna.pl"}
+                  value={bulkDomains}
+                  onChange={(e) => setBulkDomains(e.target.value)}
+                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                />
+                <button
+                  onClick={handleBulkImport}
+                  disabled={loading || !bulkDomains.trim()}
+                  className="px-3 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50"
+                >
+                  {loading ? 'Importuję...' : 'Importuj domeny'}
+                </button>
+                {bulkResult && !bulkResult.error && (
+                  <p className="text-xs text-green-700 bg-green-50 rounded-lg px-3 py-2">
+                    Dodano: <strong>{bulkResult.inserted}</strong> | Pominięto (duplikaty): <strong>{bulkResult.skipped}</strong>
+                  </p>
+                )}
+                {bulkResult?.error && (
+                  <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{bulkResult.error}</p>
+                )}
               </div>
             )}
           </div>

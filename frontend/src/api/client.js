@@ -76,6 +76,8 @@ export const clients = {
     api.post(`/api/clients/${client_id}/domains`, { domain }),
   deleteDomain: (client_id, domain_id) =>
     api.delete(`/api/clients/${client_id}/domains/${domain_id}`),
+  addDomainsBulk: (client_id, lines) =>
+    api.post(`/api/clients/${client_id}/domains/bulk`, { lines }),
 }
 
 export const domains = {
