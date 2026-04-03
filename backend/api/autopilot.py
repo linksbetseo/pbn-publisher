@@ -37,6 +37,7 @@ from api.autopilot_helpers import (
     with_retry as _with_retry,
     get_pillar_url as _get_pillar_url,
     fetch_image as _fetch_image,
+    build_image_prompt as _build_image_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -1454,12 +1455,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     except Exception:
                         pass
 
-                    img_prompt = (
-                        f"A photorealistic scene that visually represents: {title}. "
-                        f"Show a concrete moment or setting related to '{keyword}'. "
-                        f"Editorial photography style, natural lighting, shallow depth of field. "
-                        f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
-                    )
+                    img_prompt = await _build_image_prompt(keyword, title)
                     image_b64, image_provider = await _fetch_image(
                         sched.get("image_source", "freepik_flux"), keyword, title, img_prompt
                     )
@@ -1772,12 +1768,7 @@ async def generate_keyword_now(keyword_id: int):
             pass
 
     # Featured image
-    img_prompt = (
-        f"A photorealistic scene that visually represents: {title}. "
-        f"Show a concrete moment or setting related to '{keyword}'. "
-        f"Editorial photography style, natural lighting, shallow depth of field. "
-        f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
-    )
+    img_prompt = await _build_image_prompt(keyword, title)
     image_b64, image_provider = await _fetch_image(
         sched.get("image_source", "freepik_flux"), keyword, title, img_prompt
     )
@@ -2049,12 +2040,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                                 await db.commit()
                             continue
 
-                        img_prompt_daily = (
-                            f"A photorealistic scene that visually represents: {article['title']}. "
-                            f"Show a concrete moment or setting related to '{keyword}'. "
-                            f"Editorial photography style, natural lighting, shallow depth of field. "
-                            f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
-                        )
+                        img_prompt_daily = await _build_image_prompt(keyword, article["title"])
                         image_b64, _ = await _fetch_image(
                             sched.get("image_source", "freepik_flux"), keyword, article["title"], img_prompt_daily
                         )
@@ -2870,12 +2856,7 @@ async def _bulk_run_bg(job_id: str, schedule_ids: list[int], limit_override: int
                         domain_fingerprints=domain_fingerprints,
                         pbn_domain=sched["domain"],
                     )
-                    img_prompt_bulk = (
-                        f"A photorealistic scene that visually represents: {article['title']}. "
-                        f"Show a concrete moment or setting related to '{keyword}'. "
-                        f"Editorial photography style, natural lighting, shallow depth of field. "
-                        f"NO text, NO letters, NO watermarks, NO logos. 16:9 landscape."
-                    )
+                    img_prompt_bulk = await _build_image_prompt(keyword, article["title"])
                     image_b64, _ = await _fetch_image(
                         sched.get("image_source", "freepik_flux"), keyword, article["title"], img_prompt_bulk
                     )

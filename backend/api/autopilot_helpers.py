@@ -98,6 +98,47 @@ async def get_pillar_url(schedule_id: int, my_domain_id: int, pillar_anchor: str
     return "", ""
 
 
+async def build_image_prompt(keyword: str, title: str) -> str:
+    """Use GPT to translate keyword/title into a precise English visual description for Flux/image models.
+
+    Polish keywords passed raw to Flux produce garbage (e.g. 'działalność rolnicza' → cat).
+    GPT translates the topic into a concrete, photorealistic English scene description.
+    Falls back to a safe generic prompt if GPT fails.
+    """
+    try:
+        from services.openai_service import get_openai_client, get_gpt_model
+        client, _model, _is_custom = await get_openai_client()
+        model = await get_gpt_model()
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Create a short English image generation prompt (1-2 sentences) for an AI image model (Flux/Stable Diffusion). "
+                    f"The image should visually represent this article topic: '{title}' (keyword: '{keyword}'). "
+                    f"Describe a SPECIFIC, CONCRETE real-world scene or object related to this topic. "
+                    f"Use photorealistic style. NO abstract concepts, NO text, NO letters, NO watermarks, NO logos. "
+                    f"Do NOT include animals unless the topic is explicitly about animals. "
+                    f"Reply with ONLY the prompt text, nothing else."
+                )
+            }],
+            max_tokens=120,
+            temperature=0.4,
+        )
+        prompt = resp.choices[0].message.content.strip().strip('"')
+        if prompt:
+            return prompt + " Photorealistic, editorial photography, natural lighting, 16:9 landscape, NO text, NO watermarks."
+    except Exception as e:
+        logger.warning(f"[ImagePrompt] GPT prompt generation failed for '{keyword}': {e}")
+
+    # Fallback: safe generic English prompt based on keyword translation hints
+    safe_keyword = keyword.replace("ą", "a").replace("ę", "e").replace("ó", "o").replace("ś", "s").replace("ź", "z").replace("ż", "z").replace("ć", "c").replace("ń", "n").replace("ł", "l")
+    return (
+        f"Photorealistic editorial photograph representing the topic of '{safe_keyword}'. "
+        f"Professional setting, natural lighting, NO text, NO letters, NO watermarks. 16:9 landscape."
+    )
+
+
 async def fetch_image(image_source: str, keyword: str, title: str, img_prompt: str) -> tuple[str | None, str]:
     """Fetch image based on image_source setting."""
     from services.openai_service import generate_image
