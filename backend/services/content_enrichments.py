@@ -298,10 +298,8 @@ def _build_step_by_step(steps: list[str], title: str, lang_pl: bool = True) -> s
 
 
 def _build_quick_answer(answer: str, lang_pl: bool) -> str:
-    label = "⚡ Szybka odpowiedź" if lang_pl else "⚡ Quick Answer"
     return (
         f'<div {_s("quick_ans")}>\n'
-        f'<strong style="display:block;margin-bottom:8px;">{label}</strong>\n'
         f'<p style="margin:0;">{_esc(answer)}</p>\n'
         f'</div>\n'
     )
