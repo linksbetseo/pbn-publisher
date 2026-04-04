@@ -718,10 +718,11 @@ async def generate_topical_map(
     # FIX #16: related_keywords depth increased to 2
     # FIX #17: optionally fetch keywords_for_site in parallel
     # Multi-seed: build coros for ALL seeds, split limits across seeds
-    per_seed_suggestions = max(200, 500 // len(seeds))
-    per_seed_ideas = max(100, 300 // len(seeds))
-    per_seed_related = max(50, 150 // len(seeds))
-    logger.info(f"[TopicalMap] Per-seed limits: suggestions={per_seed_suggestions}, ideas={per_seed_ideas}, related={per_seed_related}")
+    # Full limits per seed — multi-seed means MORE data, not divided data
+    per_seed_suggestions = 500
+    per_seed_ideas = 300
+    per_seed_related = 150
+    logger.info(f"[TopicalMap] Per-seed limits: suggestions={per_seed_suggestions}, ideas={per_seed_ideas}, related={per_seed_related} x {len(seeds)} seeds = up to {(per_seed_suggestions+per_seed_ideas+per_seed_related)*len(seeds)} raw")
 
     coros = []
     coro_names = []
