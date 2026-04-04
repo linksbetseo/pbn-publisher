@@ -519,7 +519,7 @@ async def _gpt_relevance_filter(
     site_description: str,
     domain_url: str = "",
     language_code: str = "pl",
-    batch_size: int = 40,
+    batch_size: int = 25,
 ) -> list[dict]:
     """
     GPT-based semantic relevance filter.
@@ -629,8 +629,9 @@ async def _gpt_relevance_filter(
                 if len(verdicts) >= len(batch):
                     verdicts = verdicts[:len(batch)]
                 elif len(verdicts) < len(batch):
-                    logger.warning(f"[TopicalMap] GPT returned {len(verdicts)} verdicts for batch of {len(batch)} — padding with REJECT (0)")
-                    verdicts.extend([0] * (len(batch) - len(verdicts)))
+                    # Pad with KEEP (1) — better to let coherence filter decide than to silently drop
+                    logger.warning(f"[TopicalMap] GPT returned {len(verdicts)} verdicts for batch of {len(batch)} — padding with KEEP (1)")
+                    verdicts.extend([1] * (len(batch) - len(verdicts)))
 
                 kept = 0
                 for kw, v in zip(batch, verdicts):
