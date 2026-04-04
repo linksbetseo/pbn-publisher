@@ -1356,6 +1356,8 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
         _published = 0
         _failed = 0
         _results = []
+        # In-run pillar URL cache — same-run supporting pages can link to just-published pillars
+        _run_pillar_urls: dict = {}  # pillar_anchor → (url, keyword)
 
         for kw_row in keywords:
             keyword = kw_row["keyword"]
@@ -1379,11 +1381,16 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
             location_code = 2616 if sched["language"] == "pl" else 2840
 
             # Fetch pillar page URL for internal linking (supporting → pillar)
+            # Check in-run cache first, then DB
             pillar_url, pillar_keyword = "", ""
             if kw_row.get("keyword_type") == "supporting" and kw_row.get("pillar_anchor"):
-                pillar_url, pillar_keyword = await _get_pillar_url(
-                    schedule_id, sched["my_domain_id"], kw_row["pillar_anchor"]
-                )
+                _pa = kw_row["pillar_anchor"]
+                if _pa in _run_pillar_urls:
+                    pillar_url, pillar_keyword = _run_pillar_urls[_pa]
+                else:
+                    pillar_url, pillar_keyword = await _get_pillar_url(
+                        schedule_id, sched["my_domain_id"], _pa
+                    )
 
             try:
                 _pillar_url = pillar_url
@@ -1498,7 +1505,11 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                 if result.get("success"):
                     wp_url = result.get("url", "")
                     _published += 1
-                    published_posts.append({"title": title, "keyword": keyword, "url": wp_url})
+                    _kw_cluster = kw_row.get("pillar_label", "") or ""
+                    published_posts.append({"title": title, "keyword": keyword, "url": wp_url, "cluster": _kw_cluster})
+                    # Cache pillar URL for same-run supporting pages
+                    if kw_row.get("keyword_type") == "pillar" and kw_row.get("pillar_anchor"):
+                        _run_pillar_urls[kw_row["pillar_anchor"]] = (wp_url, keyword)
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
                             """INSERT INTO posts (client_id, client_domain, my_domain_id, title, content,
@@ -1971,12 +1982,20 @@ async def _run_schedule_daily(sched: dict) -> dict:
             ) as cur:
                 keywords = [dict(r) for r in await cur.fetchall()]
             async with db.execute(
-                """SELECT title, keyword, wp_post_url FROM domain_keywords
+                """SELECT title, keyword, wp_post_url, pillar_label, keyword_type FROM domain_keywords
                    WHERE schedule_id=? AND status='published' AND wp_post_url!=''
                    ORDER BY published_at DESC LIMIT 50""",
                 (schedule_id,)
             ) as cur:
-                published_posts = [{"title": r["title"] or r["keyword"], "keyword": r["keyword"], "url": r["wp_post_url"]} for r in await cur.fetchall()]
+                published_posts = [
+                    {"title": r["title"] or r["keyword"], "keyword": r["keyword"],
+                     "url": r["wp_post_url"], "cluster": r["pillar_label"] or ""}
+                    for r in await cur.fetchall()
+                ]
+
+        # In-run pillar URL cache: tracks pillar URLs published in THIS run
+        # so supporting pages can link to pillars published earlier in same run
+        _run_pillar_urls: dict = {}  # pillar_anchor → (url, keyword)
 
         domain_fingerprints: set = set()
 
@@ -2007,11 +2026,18 @@ async def _run_schedule_daily(sched: dict) -> dict:
 
             variation = random.choice(VARIATION_HINTS)
             # Fetch pillar page URL for internal linking (supporting → pillar)
+            # Check in-run cache first (pillar published earlier in THIS run),
+            # then fall back to DB lookup for previously published pillars
             pillar_url, pillar_keyword = "", ""
             if kw_row.get("keyword_type") == "supporting" and kw_row.get("pillar_anchor"):
-                pillar_url, pillar_keyword = await _get_pillar_url(
-                    schedule_id, sched["my_domain_id"], kw_row["pillar_anchor"]
-                )
+                _pa = kw_row["pillar_anchor"]
+                if _pa in _run_pillar_urls:
+                    pillar_url, pillar_keyword = _run_pillar_urls[_pa]
+                    logger.info(f"[Daily] Pillar link from in-run cache: {pillar_url}")
+                else:
+                    pillar_url, pillar_keyword = await _get_pillar_url(
+                        schedule_id, sched["my_domain_id"], _pa
+                    )
             async with _DAILY_SEM:
                 try:
                     location_code = 2616 if sched["language"] == "pl" else 2840
@@ -2084,7 +2110,12 @@ async def _run_schedule_daily(sched: dict) -> dict:
                     if result.get("success"):
                         wp_url = result.get("url", "")
                         published += 1
-                        published_posts.append({"title": article["title"], "keyword": keyword, "url": wp_url})
+                        _kw_cluster = kw_row.get("pillar_label", "") or ""
+                        published_posts.append({"title": article["title"], "keyword": keyword, "url": wp_url, "cluster": _kw_cluster})
+                        # Cache pillar URL for same-run supporting pages
+                        if kw_row.get("keyword_type") == "pillar" and kw_row.get("pillar_anchor"):
+                            _run_pillar_urls[kw_row["pillar_anchor"]] = (wp_url, keyword)
+                            logger.info(f"[Daily] Pillar published, cached for in-run linking: {kw_row['pillar_anchor']} → {wp_url}")
                         async with aiosqlite.connect(DB_PATH) as db:
                             await db.execute(
                                 "INSERT INTO posts (client_id, client_domain, my_domain_id, title, content, wp_post_url, status, keyword) VALUES (?,?,?,?,?,?,?,?)",
