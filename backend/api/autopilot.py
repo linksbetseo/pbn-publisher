@@ -599,6 +599,16 @@ async def list_keywords(schedule_id: int, status: Optional[str] = None):
 class GenerateMapRequest(BaseModel):
     new_seed: str = ""
 
+@router.delete("/map-cache")
+async def clear_map_cache():
+    """Clear all topical map cache entries (force DataForSEO re-fetch on next generation)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM topical_map_cache") as c:
+            count = (await c.fetchone())[0]
+        await db.execute("DELETE FROM topical_map_cache")
+        await db.commit()
+    return {"deleted": count}
+
 @router.post("/schedules/{schedule_id}/generate-map")
 async def generate_map_for_schedule(schedule_id: int, force_refresh: bool = False, body: Optional[GenerateMapRequest] = None):
     """
