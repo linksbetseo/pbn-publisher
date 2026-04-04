@@ -699,15 +699,29 @@ async def generate_topical_map(
 
     client = DataForSEOClient(dfs_login, dfs_password)
 
+    # Support multi-seed: "zdrowie,sport,fitness" → query each seed separately and merge
+    seeds = [s.strip() for s in seed.split(",") if s.strip()]
+    if not seeds:
+        seeds = [seed]
+    primary_seed = seeds[0]  # used for cache key label and pillar scoring
+
     raw = []
     # FIX #16: related_keywords depth increased to 2
     # FIX #17: optionally fetch keywords_for_site in parallel
-    coros = [
-        client.keyword_suggestions(seed, location_code, language_code, 500),
-        client.keyword_ideas(seed, location_code, language_code, 300),
-        client.related_keywords(seed, location_code, language_code, 150),
-    ]
-    coro_names = ["suggestions", "ideas", "related"]
+    # Multi-seed: build coros for ALL seeds, split limits across seeds
+    per_seed_suggestions = max(200, 500 // len(seeds))
+    per_seed_ideas = max(100, 300 // len(seeds))
+    per_seed_related = max(50, 150 // len(seeds))
+
+    coros = []
+    coro_names = []
+    for s in seeds:
+        coros += [
+            client.keyword_suggestions(s, location_code, language_code, per_seed_suggestions),
+            client.keyword_ideas(s, location_code, language_code, per_seed_ideas),
+            client.related_keywords(s, location_code, language_code, per_seed_related),
+        ]
+        coro_names += [f"suggestions:{s}", f"ideas:{s}", f"related:{s}"]
     if competitor_domain:
         coros.append(client.keywords_for_site(competitor_domain, location_code, language_code, 200))
         coro_names.append("keywords_for_site")
@@ -725,7 +739,7 @@ async def generate_topical_map(
             logger.info(f"[TopicalMap] keywords_for_site: {len(kws)} (domain: {competitor_domain})")
         else:
             raw.extend(kws)
-            logger.info(f"[TopicalMap] {name}: {len(kws)}")
+            logger.info(f"[TopicalMap] {name}: {len(kws) if not isinstance(kws, Exception) else 'ERR'}")
 
     if not raw:
         raise ValueError(f"Brak wyników DataForSEO dla frazy: {seed}")
