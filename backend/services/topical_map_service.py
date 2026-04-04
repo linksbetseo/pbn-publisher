@@ -589,7 +589,14 @@ async def _gpt_relevance_filter(
     )
 
     # Pre-compute seed tokens for coherence fallback
-    seed_toks = _seed_tokens(seed)
+    # For multi-seed, compute tokens for each seed separately and take max score
+    _seeds_list = [s.strip() for s in seed.split(",") if s.strip()] or [seed]
+    _seeds_toks_list = [_seed_tokens(s) for s in _seeds_list]
+    seed_toks = _seed_tokens(seed)  # keep for single-seed compat
+
+    def _multi_coherence(keyword: str) -> float:
+        """Return max coherence score across all seeds (for multi-seed support)."""
+        return max(_coherence_score(keyword, toks, s) for toks, s in zip(_seeds_toks_list, _seeds_list))
 
     relevant = []
     for i in range(0, len(keywords), batch_size):
@@ -646,10 +653,10 @@ async def _gpt_relevance_filter(
                 logger.warning(f"[TopicalMap] GPT relevance batch {batch_num} attempt {attempt+1} failed: {e}")
                 if attempt == 4:
                     # GPT completely failed — use coherence-based fallback instead of keeping everything
-                    logger.warning(f"[TopicalMap] GPT filter failed for batch {batch_num}, using coherence fallback (>=0.15)")
+                    logger.warning(f"[TopicalMap] GPT filter failed for batch {batch_num}, using multi-seed coherence fallback (>=0.10)")
                     for kw in batch:
-                        score = _coherence_score(kw["keyword"], seed_toks, seed)
-                        if score >= 0.15:
+                        score = _multi_coherence(kw["keyword"])
+                        if score >= 0.10:
                             relevant.append(kw)
                 else:
                     import random
@@ -764,9 +771,11 @@ async def generate_topical_map(
 
     # Add coherence score to each keyword (computed once, reused everywhere — FIX #30)
     # FIX #17: mark keywords the competitor domain already ranks for
+    # Multi-seed: use max coherence across all seeds
+    _all_seed_toks = [(_seed_tokens(s), s) for s in ([s.strip() for s in seed.split(",") if s.strip()] or [seed])]
     seed_toks = _seed_tokens(seed)
     for k in keywords:
-        k["coherence"] = _coherence_score(k["keyword"], seed_toks, seed)
+        k["coherence"] = max(_coherence_score(k["keyword"], toks, s) for toks, s in _all_seed_toks)
         kw_key = _ascii_fold(_clean(k["keyword"]))
         if kw_key in competitor_kws:
             k["already_ranking"] = True
