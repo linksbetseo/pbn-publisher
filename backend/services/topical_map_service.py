@@ -705,6 +705,7 @@ async def generate_topical_map(
     if not seeds:
         seeds = [seed]
     primary_seed = seeds[0]  # used for cache key label and pillar scoring
+    logger.info(f"[TopicalMap] Seeds parsed: {seeds} (force_refresh={force_refresh})")
 
     raw = []
     # FIX #16: related_keywords depth increased to 2
@@ -713,6 +714,7 @@ async def generate_topical_map(
     per_seed_suggestions = max(200, 500 // len(seeds))
     per_seed_ideas = max(100, 300 // len(seeds))
     per_seed_related = max(50, 150 // len(seeds))
+    logger.info(f"[TopicalMap] Per-seed limits: suggestions={per_seed_suggestions}, ideas={per_seed_ideas}, related={per_seed_related}")
 
     coros = []
     coro_names = []
@@ -742,6 +744,7 @@ async def generate_topical_map(
             raw.extend(kws)
             logger.info(f"[TopicalMap] {name}: {len(kws) if not isinstance(kws, Exception) else 'ERR'}")
 
+    logger.info(f"[TopicalMap] Total raw from DataForSEO: {len(raw)} keywords")
     if not raw:
         raise ValueError(f"Brak wyników DataForSEO dla frazy: {seed}")
 
