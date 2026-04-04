@@ -128,32 +128,81 @@ async def _weekly_cron():
 
 
 async def _daily_autopilot_cron():
-    """Run autopilot for all active schedules daily at a random time between 06:00-11:45 UTC.
+    """Run autopilot for all active schedules once per day.
 
-    Anti-footprint: each day picks a random base hour (6-10) and adds 0-45 min jitter
-    so that the cron never fires at the exact same time.
+    On startup: checks if today's run was missed (last_run_date < today).
+    If missed, fires immediately (with a short startup delay).
+    Then schedules the next run for tomorrow at a random anti-footprint time.
     """
     from api.autopilot import run_daily_all
-    while True:
-        now = datetime.now(timezone.utc)
-        # Pick random window (morning/midday/evening) + random jitter — anti-footprint
+
+    # Persist last-run date in DB so restarts don't lose state
+    async def _get_last_run_date() -> str:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "CREATE TABLE IF NOT EXISTS cron_state (key TEXT PRIMARY KEY, value TEXT)"
+                )
+                await db.commit()
+                async with db.execute(
+                    "SELECT value FROM cron_state WHERE key='autopilot_last_run_date'"
+                ) as cur:
+                    row = await cur.fetchone()
+            return row[0] if row else ""
+        except Exception:
+            return ""
+
+    async def _set_last_run_date(date_str: str):
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO cron_state (key, value) VALUES ('autopilot_last_run_date', ?)",
+                    (date_str,)
+                )
+                await db.commit()
+        except Exception:
+            pass
+
+    def _next_run_time(from_now: datetime) -> datetime:
         _windows = [(6, 10), (11, 14), (19, 22)]
         _win = random.choice(_windows)
-        rand_hour = random.randint(*_win)
-        rand_minute = random.randint(0, 59)
-        next_run = now.replace(hour=rand_hour, minute=rand_minute, second=0, microsecond=0)
-        if next_run <= now:
-            next_run += timedelta(days=1)
+        t = from_now.replace(
+            hour=random.randint(*_win),
+            minute=random.randint(0, 59),
+            second=0, microsecond=0
+        )
+        if t <= from_now:
+            t += timedelta(days=1)
             _win = random.choice(_windows)
-            next_run = next_run.replace(hour=random.randint(*_win), minute=random.randint(0, 59))
-        wait_sec = (next_run - now).total_seconds()
-        logger.info(f"[DailyCron] Next autopilot run scheduled at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
-        await asyncio.sleep(wait_sec)
-        try:
-            await run_daily_all()
-            logger.info(f"[DailyCron] Autopilot triggered at {datetime.now(timezone.utc).isoformat()}")
-        except Exception as e:
-            logger.error(f"[DailyCron] Error: {e}", exc_info=True)
+            t = t.replace(hour=random.randint(*_win), minute=random.randint(0, 59))
+        return t
+
+    # Short startup delay — let DB initialize fully
+    await asyncio.sleep(15)
+
+    while True:
+        now = datetime.now(timezone.utc)
+        today_str = now.strftime("%Y-%m-%d")
+        last_run = await _get_last_run_date()
+
+        if last_run < today_str:
+            # Missed today's run (or first ever run) — fire now
+            logger.info(f"[DailyCron] Missed run detected (last={last_run}, today={today_str}) — firing now")
+            try:
+                await run_daily_all()
+                await _set_last_run_date(today_str)
+                logger.info(f"[DailyCron] Run complete at {datetime.now(timezone.utc).isoformat()}")
+            except Exception as e:
+                logger.error(f"[DailyCron] Error: {e}", exc_info=True)
+            # Schedule next run tomorrow
+            next_run = _next_run_time(datetime.now(timezone.utc) + timedelta(days=1))
+        else:
+            # Already ran today — schedule next run
+            next_run = _next_run_time(now)
+
+        wait_sec = (next_run - datetime.now(timezone.utc)).total_seconds()
+        logger.info(f"[DailyCron] Next autopilot run at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
+        await asyncio.sleep(max(wait_sec, 60))
 
 
 async def _date_modified_refresh_cron():
