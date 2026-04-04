@@ -674,6 +674,91 @@ function AutopilotLogs() {
   )
 }
 
+function DiagnoseTab() {
+  const addToast = useToast()
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  const run = async () => {
+    setLoading(true)
+    try {
+      const r = await api.get('/api/autopilot/diagnose')
+      setData(r.data)
+    } catch (e) {
+      addToast('Błąd diagnozy: ' + (e.response?.data?.detail || e.message), 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-4 mb-5">
+        <button
+          onClick={run}
+          disabled={loading}
+          className="px-4 py-2 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 disabled:opacity-50 flex items-center gap-2"
+        >
+          {loading ? <><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />Sprawdzam WP...</> : '🔍 Sprawdź WP credentials'}
+        </button>
+        {data && (
+          <div className="flex gap-3 text-sm">
+            <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full font-medium">✓ OK: {data.ok}</span>
+            <span className="bg-red-100 text-red-700 px-3 py-1 rounded-full font-medium">✗ Problemy: {data.broken}</span>
+          </div>
+        )}
+      </div>
+
+      {data && (
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="border-b border-gray-100 bg-gray-50">
+              <tr>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Domena</th>
+                <th className="px-4 py-2 text-center text-xs font-semibold text-gray-500">Aktywna</th>
+                <th className="px-4 py-2 text-center text-xs font-semibold text-gray-500">Mapa</th>
+                <th className="px-4 py-2 text-center text-xs font-semibold text-gray-500">PPD</th>
+                <th className="px-4 py-2 text-center text-xs font-semibold text-gray-500">WP OK</th>
+                <th className="px-4 py-2 text-center text-xs font-semibold text-gray-500">Uruchomi</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Problemy</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {data.schedules.map(s => (
+                <tr key={s.schedule_id} className={s.will_run ? 'hover:bg-gray-50' : 'bg-red-50 hover:bg-red-100'}>
+                  <td className="px-4 py-2 font-medium text-gray-800 text-xs">{s.domain}</td>
+                  <td className="px-4 py-2 text-center text-xs">{s.active && s.domain_active ? '✓' : '✗'}</td>
+                  <td className="px-4 py-2 text-center text-xs">{s.map_generated ? '✓' : '✗'}</td>
+                  <td className="px-4 py-2 text-center text-xs">{s.posts_per_day}</td>
+                  <td className="px-4 py-2 text-center text-xs">
+                    <span className={s.wp_ok ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>
+                      {s.wp_ok ? '✓' : '✗'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2 text-center text-xs">
+                    <span className={s.will_run ? 'bg-green-100 text-green-700 px-2 py-0.5 rounded-full' : 'bg-red-100 text-red-700 px-2 py-0.5 rounded-full'}>
+                      {s.will_run ? 'TAK' : 'NIE'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2 text-xs text-red-600">
+                    {s.issues.length > 0 ? s.issues.join(', ') : <span className="text-green-600">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!data && !loading && (
+        <div className="text-center py-12 text-gray-400 text-sm">
+          Kliknij "Sprawdź WP credentials" aby zobaczyć które domeny są gotowe do publikacji
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Autopilot() {
   const addToast = useToast()
   const [schedules, setSchedules] = useState([])
@@ -1192,7 +1277,7 @@ export default function Autopilot() {
 
       {/* Main tabs */}
       <div className="flex gap-1 bg-gray-100 rounded-lg p-1 mb-5 w-fit">
-        {[['schedules', 'Harmonogramy'], ['bulk', '⚡ Bulk Setup'], ['logs', 'Logi']].map(([k, label]) => (
+        {[['schedules', 'Harmonogramy'], ['bulk', '⚡ Bulk Setup'], ['logs', 'Logi'], ['diagnose', '🔍 Diagnoza']].map(([k, label]) => (
           <button key={k} onClick={() => setMainTab(k)}
             className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${mainTab === k ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
@@ -1222,6 +1307,7 @@ export default function Autopilot() {
 
       {mainTab === 'bulk' && <BulkTab />}
       {mainTab === 'logs' && <AutopilotLogs />}
+      {mainTab === 'diagnose' && <DiagnoseTab />}
       {mainTab === 'schedules' && <>
 
 

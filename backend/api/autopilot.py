@@ -2215,6 +2215,76 @@ async def run_daily_all():
     return {"schedules_processed": len(final), "results": final}
 
 
+@router.get("/diagnose")
+async def diagnose_schedules():
+    """Sprawdź stan wszystkich harmonogramów — WP credentials, active, map_generated."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT s.id, s.active, s.map_generated, s.posts_per_day, s.seed_keyword,
+                      md.domain, md.wp_login, md.wp_pass, md.active as domain_active,
+                      COALESCE(md.http_user,'') as http_user,
+                      COALESCE(md.http_pass,'') as http_pass,
+                      md.wp_ok as last_wp_ok,
+                      (SELECT COUNT(*) FROM domain_keywords dk WHERE dk.schedule_id=s.id AND dk.status='pending') as pending,
+                      (SELECT COUNT(*) FROM domain_keywords dk WHERE dk.schedule_id=s.id AND dk.status='published') as published
+               FROM domain_schedules s
+               JOIN my_domains md ON md.id = s.my_domain_id
+               ORDER BY md.domain"""
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    # Check WP credentials concurrently (max 5 at a time)
+    sem = asyncio.Semaphore(5)
+    results = []
+
+    async def _check(row):
+        async with sem:
+            issues = []
+            if not row["domain_active"]:
+                issues.append("domain_inactive")
+            if not row["active"]:
+                issues.append("schedule_inactive")
+            if not row["map_generated"]:
+                issues.append("no_map")
+            if row["posts_per_day"] == 0:
+                issues.append("posts_per_day=0")
+            # Check WP
+            try:
+                wp_ok = await check_wp_credentials(
+                    row["domain"], row["wp_login"], row["wp_pass"],
+                    http_user=row["http_user"], http_pass=row["http_pass"]
+                )
+            except Exception as e:
+                wp_ok = False
+                issues.append(f"wp_error:{e}")
+            if not wp_ok:
+                issues.append("wp_credentials_invalid")
+
+            will_run = (row["active"] and row["domain_active"]
+                        and row["map_generated"] and row["posts_per_day"] > 0
+                        and wp_ok)
+            return {
+                "domain": row["domain"],
+                "schedule_id": row["id"],
+                "active": bool(row["active"]),
+                "domain_active": bool(row["domain_active"]),
+                "map_generated": bool(row["map_generated"]),
+                "posts_per_day": row["posts_per_day"],
+                "pending": row["pending"],
+                "published": row["published"],
+                "wp_ok": wp_ok,
+                "will_run": will_run,
+                "issues": issues,
+            }
+
+    results = await asyncio.gather(*[_check(r) for r in rows])
+    broken = [r for r in results if r["issues"]]
+    ok = [r for r in results if not r["issues"]]
+    return {"ok": len(ok), "broken": len(broken), "schedules": list(results)}
+
+
 @router.get("/stats")
 async def autopilot_stats():
     """Globalne statystyki autopilota — używane przez Dashboard widget."""
