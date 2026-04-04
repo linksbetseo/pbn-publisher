@@ -90,5 +90,12 @@ def get_plain_password(wp_pass: str) -> str:
     if not wp_pass:
         return wp_pass
     if is_encrypted(wp_pass):
-        return decrypt_password(wp_pass)
+        try:
+            return decrypt_password(wp_pass)
+        except Exception as e:
+            logger.error(
+                f"[Crypto] Decryption failed — PBN_ENCRYPTION_KEY mismatch? "
+                f"Returning raw value (may fail WP auth). Error: {e}"
+            )
+            return wp_pass  # Return as-is — WP auth will fail but won't crash
     return wp_pass

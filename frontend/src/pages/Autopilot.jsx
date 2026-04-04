@@ -702,9 +702,19 @@ function DiagnoseTab() {
           {loading ? <><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />Sprawdzam WP...</> : '🔍 Sprawdź WP credentials'}
         </button>
         {data && (
-          <div className="flex gap-3 text-sm">
+          <div className="flex gap-3 text-sm flex-wrap items-center">
             <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full font-medium">✓ OK: {data.ok}</span>
             <span className="bg-red-100 text-red-700 px-3 py-1 rounded-full font-medium">✗ Problemy: {data.broken}</span>
+            {data.encryption_key_warning && (
+              <span className="bg-red-600 text-white px-3 py-1 rounded-full font-medium text-xs">
+                ⚠ PBN_ENCRYPTION_KEY nie ustawiony — hasła WP tracone po restarcie!
+              </span>
+            )}
+            {!data.encryption_key_warning && (
+              <span className="bg-gray-100 text-gray-500 px-2 py-1 rounded-full text-xs">
+                klucz: {data.encryption_key_source}
+              </span>
+            )}
           </div>
         )}
       </div>

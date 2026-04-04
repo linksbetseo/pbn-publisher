@@ -2282,7 +2282,19 @@ async def diagnose_schedules():
     results = await asyncio.gather(*[_check(r) for r in rows])
     broken = [r for r in results if r["issues"]]
     ok = [r for r in results if not r["issues"]]
-    return {"ok": len(ok), "broken": len(broken), "schedules": list(results)}
+
+    # Check encryption key status
+    from services.crypto_service import _ENCRYPTION_KEY, _KEY_FILE
+    import os as _os
+    enc_key_source = "env_var" if _os.getenv("PBN_ENCRYPTION_KEY") else ("key_file" if _os.path.exists(_KEY_FILE) else "generated_volatile")
+
+    return {
+        "ok": len(ok),
+        "broken": len(broken),
+        "schedules": list(results),
+        "encryption_key_source": enc_key_source,
+        "encryption_key_warning": enc_key_source == "generated_volatile",
+    }
 
 
 @router.get("/stats")
