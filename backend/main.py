@@ -188,9 +188,10 @@ async def _daily_autopilot_cron():
         if last_run < today_str:
             # Missed today's run (or first ever run) — fire now
             logger.info(f"[DailyCron] Missed run detected (last={last_run}, today={today_str}) — firing now")
+            # Mark BEFORE running — prevents double-run if server restarts mid-run
+            await _set_last_run_date(today_str)
             try:
                 await run_daily_all()
-                await _set_last_run_date(today_str)
                 logger.info(f"[DailyCron] Run complete at {datetime.now(timezone.utc).isoformat()}")
             except Exception as e:
                 logger.error(f"[DailyCron] Error: {e}", exc_info=True)
