@@ -566,7 +566,7 @@ async def basic_auth_middleware(request: Request, call_next):
     # Skip auth for health check and static assets
     path = request.url.path
     # Pass-through: health, static assets, login endpoint, and all frontend SPA routes
-    if (path in ("/health", "/", "/api/auth/login")
+    if (path in ("/health", "/", "/api/auth/login", "/api/cron/status")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -625,6 +625,64 @@ app.include_router(internal_links.router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/cron/status")
+async def cron_status():
+    """Diagnostics: show cron state, active schedules, and DB path."""
+    result: dict = {"db_path": DB_PATH}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            # cron_state
+            try:
+                async with db.execute(
+                    "SELECT key, value FROM cron_state"
+                ) as cur:
+                    rows = await cur.fetchall()
+                result["cron_state"] = {r[0]: r[1] for r in rows}
+            except Exception as e:
+                result["cron_state"] = {"error": str(e)}
+
+            # active schedules
+            try:
+                async with db.execute(
+                    """SELECT s.id, s.active, s.map_generated, s.posts_per_day,
+                              s.seed_keyword, s.last_run_at,
+                              md.domain, md.active as domain_active
+                       FROM domain_schedules s
+                       JOIN my_domains md ON md.id = s.my_domain_id"""
+                ) as cur:
+                    rows = await cur.fetchall()
+                result["schedules"] = [
+                    {
+                        "id": r[0], "active": r[1], "map_generated": r[2],
+                        "posts_per_day": r[3], "seed_keyword": r[4],
+                        "last_run_at": r[5], "domain": r[6], "domain_active": r[7],
+                        "will_run": bool(r[1] and r[2] and r[7]),
+                    }
+                    for r in rows
+                ]
+            except Exception as e:
+                result["schedules"] = {"error": str(e)}
+
+            # pending keywords count per schedule
+            try:
+                async with db.execute(
+                    """SELECT schedule_id, COUNT(*) FROM domain_keywords
+                       WHERE status='pending' GROUP BY schedule_id"""
+                ) as cur:
+                    pending = {r[0]: r[1] for r in await cur.fetchall()}
+                if isinstance(result.get("schedules"), list):
+                    for s in result["schedules"]:
+                        s["pending_keywords"] = pending.get(s["id"], 0)
+            except Exception:
+                pass
+
+    except Exception as e:
+        result["db_error"] = str(e)
+
+    result["server_utc"] = datetime.now(timezone.utc).isoformat()
+    return result
 
 
 # Serve frontend static files (after API routes)
