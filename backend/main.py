@@ -162,26 +162,45 @@ async def _daily_autopilot_cron():
         except Exception:
             pass
 
+    async def _set_cron_state(key: str, value: str):
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO cron_state (key, value) VALUES (?, ?)",
+                    (key, value)
+                )
+                await db.commit()
+        except Exception:
+            pass
+
     # Short startup delay — let DB initialize fully
     await asyncio.sleep(15)
 
     while True:
         now = datetime.now(timezone.utc)
         today_str = now.strftime("%Y-%m-%d")
+        now_iso = now.isoformat()
+
+        # Zapisz heartbeat — widoczny w /api/cron/status
+        await _set_cron_state("autopilot_cron_heartbeat", now_iso)
+
         last_run = await _get_last_run_date()
 
         if last_run < today_str:
             logger.info(f"[DailyCron] Firing run — last_run={last_run} < today={today_str}")
+            await _set_cron_state("autopilot_cron_fired_at", now_iso)
             await _set_last_run_date(today_str)
             try:
                 await run_daily_all()
+                await _set_cron_state("autopilot_cron_finished_at", datetime.now(timezone.utc).isoformat())
                 logger.info(f"[DailyCron] Run complete at {datetime.now(timezone.utc).isoformat()}")
             except Exception as e:
+                await _set_cron_state("autopilot_cron_error", str(e))
                 logger.error(f"[DailyCron] Error: {e}", exc_info=True)
         else:
             logger.info(f"[DailyCron] Already ran today ({last_run}), next check in 30min")
 
-        # Sprawdzaj co 30 minut — po restarcie Railway max 30 min do wykrycia pominiętego dnia
+        # Sprawdzaj co 30 minut
         await asyncio.sleep(1800)
 
 
