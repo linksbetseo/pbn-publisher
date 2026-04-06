@@ -545,7 +545,7 @@ async def basic_auth_middleware(request: Request, call_next):
     # Skip auth for health check and static assets
     path = request.url.path
     # Pass-through: health, static assets, login endpoint, and all frontend SPA routes
-    if (path in ("/health", "/", "/api/auth/login", "/api/cron/status")
+    if (path in ("/health", "/", "/api/auth/login", "/api/cron/status", "/api/cron/reset-last-run")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -662,6 +662,17 @@ async def cron_status():
 
     result["server_utc"] = datetime.now(timezone.utc).isoformat()
     return result
+
+
+@app.post("/api/cron/reset-last-run")
+async def cron_reset_last_run():
+    """Reset last_run_date so cron fires on next 30-min check."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO cron_state (key, value) VALUES ('autopilot_last_run_date', '')"
+        )
+        await db.commit()
+    return {"ok": True, "message": "last_run_date cleared — cron will fire within 30 minutes"}
 
 
 # Serve frontend static files (after API routes)
