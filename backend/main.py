@@ -130,13 +130,12 @@ async def _weekly_cron():
 async def _daily_autopilot_cron():
     """Run autopilot for all active schedules once per day.
 
-    On startup: checks if today's run was missed (last_run_date < today).
-    If missed, fires immediately (with a short startup delay).
-    Then schedules the next run for tomorrow at a random anti-footprint time.
+    Sprawdza co 30 minut czy dzisiaj już był run.
+    Odpala gdy: brak runa dziś LUB liczba opublikowanych dziś < posts_per_day dla aktywnych harmonogramów.
+    Dzięki temu restart Railway nigdy nie pominie dnia.
     """
     from api.autopilot import run_daily_all
 
-    # Persist last-run date in DB so restarts don't lose state
     async def _get_last_run_date() -> str:
         try:
             async with aiosqlite.connect(DB_PATH) as db:
@@ -163,19 +162,34 @@ async def _daily_autopilot_cron():
         except Exception:
             pass
 
-    def _next_run_time(from_now: datetime) -> datetime:
-        _windows = [(6, 10), (11, 14), (19, 22)]
-        _win = random.choice(_windows)
-        t = from_now.replace(
-            hour=random.randint(*_win),
-            minute=random.randint(0, 59),
-            second=0, microsecond=0
-        )
-        if t <= from_now:
-            t += timedelta(days=1)
-            _win = random.choice(_windows)
-            t = t.replace(hour=random.randint(*_win), minute=random.randint(0, 59))
-        return t
+    async def _published_today_count() -> int:
+        """Ile artykułów zostało opublikowanych przez autopilota dziś (UTC)."""
+        try:
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM domain_keywords WHERE status='published' AND published_at >= ?",
+                    (today_str,)
+                ) as cur:
+                    row = await cur.fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
+
+    async def _total_expected_today() -> int:
+        """Suma posts_per_day wszystkich aktywnych harmonogramów z wygenerowaną mapą."""
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    """SELECT COALESCE(SUM(s.posts_per_day), 0)
+                       FROM domain_schedules s
+                       JOIN my_domains md ON md.id = s.my_domain_id
+                       WHERE s.active = 1 AND md.active = 1 AND s.map_generated = 1"""
+                ) as cur:
+                    row = await cur.fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
 
     # Short startup delay — let DB initialize fully
     await asyncio.sleep(15)
@@ -184,26 +198,32 @@ async def _daily_autopilot_cron():
         now = datetime.now(timezone.utc)
         today_str = now.strftime("%Y-%m-%d")
         last_run = await _get_last_run_date()
+        published_today = await _published_today_count()
+        expected_today = await _total_expected_today()
+
+        should_run = False
+        reason = ""
 
         if last_run < today_str:
-            # Missed today's run (or first ever run) — fire now
-            logger.info(f"[DailyCron] Missed run detected (last={last_run}, today={today_str}) — firing now")
-            # Mark BEFORE running — prevents double-run if server restarts mid-run
+            should_run = True
+            reason = f"last_run={last_run} < today={today_str}"
+        elif expected_today > 0 and published_today < expected_today:
+            # Dziś był run ale nie wszystkie artykuły się opublikowały (np. błąd WP)
+            should_run = True
+            reason = f"published_today={published_today} < expected={expected_today}"
+
+        if should_run:
+            logger.info(f"[DailyCron] Firing run — {reason}")
             await _set_last_run_date(today_str)
             try:
                 await run_daily_all()
                 logger.info(f"[DailyCron] Run complete at {datetime.now(timezone.utc).isoformat()}")
             except Exception as e:
                 logger.error(f"[DailyCron] Error: {e}", exc_info=True)
-            # Schedule next run tomorrow
-            next_run = _next_run_time(datetime.now(timezone.utc) + timedelta(days=1))
-        else:
-            # Already ran today — schedule next run
-            next_run = _next_run_time(now)
 
-        wait_sec = (next_run - datetime.now(timezone.utc)).total_seconds()
-        logger.info(f"[DailyCron] Next autopilot run at {next_run.strftime('%Y-%m-%d %H:%M')} UTC (in {wait_sec/3600:.1f}h)")
-        await asyncio.sleep(max(wait_sec, 60))
+        # Sprawdzaj co 30 minut — po restarcie Railway max 30 min do następnego runa
+        logger.info(f"[DailyCron] Heartbeat — last_run={last_run}, published_today={published_today}/{expected_today}, next check in 30min")
+        await asyncio.sleep(1800)
 
 
 async def _date_modified_refresh_cron():
