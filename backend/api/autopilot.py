@@ -1975,24 +1975,6 @@ async def _run_schedule_daily(sched: dict) -> dict:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT COUNT(*) FROM domain_keywords WHERE schedule_id=? AND status='pending'",
-                (schedule_id,)
-            ) as cur:
-                pending_count = (await cur.fetchone())[0]
-
-        # Auto-refill: gdy kolejka pusta lub prawie pusta — regeneruj topical mapę
-        _refill_threshold = max(limit * 3, 5)
-        if pending_count < _refill_threshold and DFS_LOGIN and DFS_PASSWORD:
-            logger.info(f"[Daily] Queue low ({pending_count} pending, threshold={_refill_threshold}) for {sched['domain']} — triggering map regeneration")
-            try:
-                await _do_generate_map(schedule_id, force_refresh=True)
-                logger.info(f"[Daily] Map regenerated for schedule {schedule_id} ({sched['domain']})")
-            except Exception as _regen_err:
-                logger.warning(f"[Daily] Map regeneration failed for {sched['domain']}: {_regen_err}")
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
                 """SELECT * FROM domain_keywords WHERE schedule_id=? AND status='pending'
                    ORDER BY CASE keyword_type WHEN 'pillar' THEN 0 ELSE 1 END,
                    keyword_difficulty ASC, search_volume DESC LIMIT ?""",
