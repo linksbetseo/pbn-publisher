@@ -644,16 +644,33 @@ async def cron_status():
             except Exception as e:
                 result["schedules"] = {"error": str(e)}
 
-            # pending keywords count per schedule
+            # keyword counts per schedule
             try:
                 async with db.execute(
-                    """SELECT schedule_id, COUNT(*) FROM domain_keywords
-                       WHERE status='pending' GROUP BY schedule_id"""
+                    """SELECT schedule_id,
+                              SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+                              SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published,
+                              SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
+                              COUNT(*) as total
+                       FROM domain_keywords GROUP BY schedule_id"""
                 ) as cur:
-                    pending = {r[0]: r[1] for r in await cur.fetchall()}
+                    counts = {r[0]: {"pending": r[1], "published": r[2], "failed": r[3], "total": r[4]} for r in await cur.fetchall()}
                 if isinstance(result.get("schedules"), list):
                     for s in result["schedules"]:
-                        s["pending_keywords"] = pending.get(s["id"], 0)
+                        c = counts.get(s["id"], {})
+                        s["pending_keywords"] = c.get("pending", 0)
+                        s["published_keywords"] = c.get("published", 0)
+                        s["failed_keywords"] = c.get("failed", 0)
+                        s["total_keywords"] = c.get("total", 0)
+            except Exception:
+                pass
+
+            # last cron run log
+            try:
+                async with db.execute(
+                    "SELECT key, value FROM cron_state ORDER BY key"
+                ) as cur:
+                    result["cron_state"] = {r[0]: r[1] for r in await cur.fetchall()}
             except Exception:
                 pass
 
