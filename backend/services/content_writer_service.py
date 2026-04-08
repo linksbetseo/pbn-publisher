@@ -243,12 +243,23 @@ Na podstawie powyższej analizy:
 
         serp_section = ai_block + full_block
 
+    from datetime import datetime as _dt_now
+    _current_date = _dt_now.now().strftime("%d.%m.%Y")
+    _current_year = _dt_now.now().year
+
     if language == "pl":
         system_prompt = (
             "Jesteś ekspertem SEO i copywriterem z doświadczeniem E-E-A-T. "
             "Tworzysz artykuły zoptymalizowane pod AI Overview Google, "
             "z H1 zawierającym bezpośrednią odpowiedź i <strong> dla kluczowych terminów. "
-            "Zwracaj treść w formacie HTML (tylko body, bez <html>/<body> tagów)."
+            "Zwracaj treść w formacie HTML (tylko body, bez <html>/<body> tagów). "
+            f"AKTUALNA DATA: {_current_date}. ROK: {_current_year}. "
+            "FACT-CHECK: Podawaj TYLKO aktualne fakty. Jeśli nie jesteś pewny aktualności danych "
+            "(np. kto pełni urząd, aktualne przepisy, ceny, statystyki) — napisz 'według danych z [rok]' "
+            "lub pomiń. NIE podawaj faktów które mogły się zdezaktualizować jako pewnik. "
+            "NAGŁÓWKI: Tekst H2/H3 to TYLKO krótki tytuł sekcji (3-8 słów). "
+            "NIGDY nie wstawiaj pełnych zdań, akapitów ani treści do wnętrza tagów <h2> lub <h3>. "
+            "Treść idzie WYŁĄCZNIE w tagach <p>, <ul>, <ol>."
         )
         user_prompt = f"""Napisz kompletny artykuł SEO na frazę: '{keyword}'.{variation}
 
@@ -261,14 +272,15 @@ WYMAGANIA TECHNICZNE SEO:
    Przykład: "<h1><strong>{keyword}</strong> — co to jest i jak działa?</h1>"
 2. Wstęp PRZED pierwszym H2: napisz 3-5 akapitów <p> (łącznie 4-10 zdań) które bezpośrednio odpowiadają na główne pytania wynikające z frazy. Styl AI Overview — odpowiedz na kto/co/dlaczego/jak od razu. Użyj <strong>{keyword}</strong> w pierwszym zdaniu. NIE umieszczaj żadnego H2 przed tymi akapitami wstępnymi.
 3. Spis treści zostanie dodany automatycznie po wstępie — NIE umieszczaj go ręcznie.
-4. 6-8 sekcji H2, każda z 1-2 podsekcjami H3
-4. Używaj <strong> dla kluczowych terminów, liczb i ważnych faktów
-5. Mix formatów: <p>, <ul>/<li>, <ol>/<li> — nie same akapity
-6. FAQ na końcu: min 8 pytań (użyj pytań PAA powyżej jeśli dostępne + własne), format <h3>Pytanie?</h3><p>Odpowiedź.</p>
-7. Podsumowanie z <ul> kluczowych wniosków
-8. Łączna długość: 1800-2500 słów
-9. '{keyword}' naturalnie 1-2% density
-10. ENCJE NLP: Używaj konkretnych nazw własnych (marki, firmy, produkty, osoby, miejsca, normy, instytucje) powiązanych z tematem. Google NLP rozpoznaje encje — im więcej trafnych nazw własnych, tym lepszy topical authority. Unikaj ogólników typu "eksperci twierdzą" — podaj KTO konkretnie.
+4. 6-8 sekcji H2, każda z 1-2 podsekcjami H3. KAŻDY <h2> i <h3> zawiera WYŁĄCZNIE krótki tytuł (3-8 słów) — żadnych zdań, żadnej treści w nagłówku.
+5. Używaj <strong> dla kluczowych terminów, liczb i ważnych faktów
+6. Mix formatów: <p>, <ul>/<li>, <ol>/<li> — nie same akapity
+7. FAQ na końcu: min 8 pytań (użyj pytań PAA powyżej jeśli dostępne + własne), format <h3>Pytanie?</h3><p>Odpowiedź.</p>
+8. Podsumowanie z <ul> kluczowych wniosków
+9. Łączna długość: 2500-3500 słów (wysoka jakość, szczegółowe omówienie każdej sekcji)
+10. '{keyword}' naturalnie 1-2% density
+11. ENCJE NLP: Używaj konkretnych nazw własnych (marki, firmy, produkty, osoby, miejsca, normy, instytucje) powiązanych z tematem. Google NLP rozpoznaje encje — im więcej trafnych nazw własnych, tym lepszy topical authority. Unikaj ogólników typu "eksperci twierdzą" — podaj KTO konkretnie.
+12. AKTUALNOŚĆ: Dzisiaj jest {_current_date} (rok {_current_year}). Wszystkie fakty, dane, osoby pełniące funkcje muszą być aktualne na ten rok. Jeśli podajesz statystyki lub dane liczbowe — zaznacz rok źródła.
 
 LINKOWANIE:
 - Umieść DOKŁADNIE RAZ link do klienta: {main_anchor}
@@ -278,7 +290,7 @@ LINKOWANIE:
 {f'DODATKOWE INSTRUKCJE: {custom_prompt}' if custom_prompt else ''}
 
 Zwróć JSON z polami:
-- "title": tytuł SEO (50-60 znaków, zawiera '{keyword}')
+- "title": tytuł SEO (50-60 znaków, KOMPLETNE zdanie/fraza — nie ucinaj w połowie słowa, zawiera '{keyword}')
 - "meta_description": meta opis (150-160 znaków, CTA na końcu)
 - "content": pełny HTML artykułu
 - "category": 1 główna kategoria bloga (1-3 słowa, np. "Poradniki", "Finanse", "Zdrowie")
@@ -289,7 +301,13 @@ Tylko JSON, bez markdown."""
             "You are an SEO expert and copywriter with E-E-A-T expertise. "
             "Create articles optimized for Google AI Overview, "
             "with H1 containing a direct answer and <strong> for key terms. "
-            "Return content in HTML format (body only, no <html>/<body> tags)."
+            "Return content in HTML format (body only, no <html>/<body> tags). "
+            f"TODAY'S DATE: {_current_date}. YEAR: {_current_year}. "
+            "FACT-CHECK: Only state facts you are confident are current. If unsure about recency "
+            "(officeholders, current laws, prices, statistics) — write 'as of [year]' or omit. "
+            "HEADINGS: H2/H3 text must be ONLY a short section title (3-8 words). "
+            "NEVER place full sentences, paragraphs or body content inside <h2> or <h3> tags. "
+            "Content goes ONLY inside <p>, <ul>, <ol> tags."
         )
         user_prompt = f"""Write a complete SEO article for keyword: '{keyword}'.{variation}
 
@@ -301,14 +319,15 @@ SEO REQUIREMENTS:
 1. H1 = DIRECT ANSWER + definition of '{keyword}' (1-2 sentences, AI Overview/Featured Snippet format)
 2. Intro BEFORE any H2: write 3-5 <p> paragraphs (4-10 sentences total) that directly answer the main questions implied by the keyword. AI Overview style — cover the who/what/why/how at a glance. Include <strong>{keyword}</strong> in the first sentence. Do NOT place any H2 heading before these intro paragraphs.
 3. Table of contents will be auto-inserted after the intro — do NOT include it manually.
-4. 6-8 H2 sections, each with 1-2 H3 subsections
-4. Use <strong> for key terms, numbers, and important facts
-5. Mix formats: <p>, <ul>/<li>, <ol>/<li> — not just paragraphs
-6. FAQ at the end: min 8 questions (use PAA questions above if available + your own), <h3>Question?</h3><p>Answer.</p>
-7. Summary with <ul> of key takeaways
-8. Total length: 1800-2500 words
-9. '{keyword}' naturally at 1-2% density
-10. NLP ENTITIES: Use specific proper nouns (brands, companies, products, people, places, standards, institutions) related to the topic. Google NLP recognizes entities — more relevant proper nouns means better topical authority. Avoid vague phrases like "experts say" — name WHO specifically.
+4. 6-8 H2 sections, each with 1-2 H3 subsections. Each <h2> and <h3> contains ONLY a short title (3-8 words) — no sentences, no content inside headings.
+5. Use <strong> for key terms, numbers, and important facts
+6. Mix formats: <p>, <ul>/<li>, <ol>/<li> — not just paragraphs
+7. FAQ at the end: min 8 questions (use PAA questions above if available + your own), <h3>Question?</h3><p>Answer.</p>
+8. Summary with <ul> of key takeaways
+9. Total length: 2500-3500 words (high quality, detailed coverage of each section)
+10. '{keyword}' naturally at 1-2% density
+11. NLP ENTITIES: Use specific proper nouns (brands, companies, products, people, places, standards, institutions) related to the topic. Google NLP recognizes entities — more relevant proper nouns means better topical authority. Avoid vague phrases like "experts say" — name WHO specifically.
+12. ACCURACY: Today is {_current_date} (year {_current_year}). All facts, officeholders, and data must be current for this year. When citing statistics or figures, state the source year.
 
 LINKS:
 - Place EXACTLY ONCE: {main_anchor}
@@ -318,7 +337,7 @@ LINKS:
 {f'ADDITIONAL INSTRUCTIONS: {custom_prompt}' if custom_prompt else ''}
 
 Return JSON with:
-- "title": SEO title (50-60 chars, contains '{keyword}')
+- "title": SEO title (50-60 chars, COMPLETE phrase — do not cut mid-word, contains '{keyword}')
 - "meta_description": meta description (150-160 chars, with CTA at the end)
 - "content": full HTML article
 - "category": 1 main blog category (1-3 words, e.g. "Guides", "Finance", "Health")
@@ -365,6 +384,29 @@ JSON only, no markdown."""
     data = json.loads(raw)
     content = data.get("content", "")
     title_out = data.get("title", keyword)
+
+    # Sanitize title: strip any HTML tags, then trim cleanly at word boundary
+    title_out = re.sub(r"<[^>]+>", "", title_out).strip()
+    if len(title_out) > 65:
+        # Trim to last complete word within 65 chars
+        trimmed = title_out[:65]
+        last_space = trimmed.rfind(" ")
+        if last_space > 40:
+            title_out = trimmed[:last_space].rstrip(" ,.;:-")
+
+    # Sanitize headings in content: remove any block-level content mistakenly placed inside h2/h3
+    def _clean_heading(m):
+        tag = m.group(1)
+        inner = m.group(2)
+        # Strip all tags, keep only text — headings must be plain short titles
+        plain = re.sub(r"<[^>]+>", " ", inner).strip()
+        # If heading is suspiciously long (>100 chars) it's likely a misplaced paragraph — truncate at sentence end
+        if len(plain) > 100:
+            dot = plain.find(". ")
+            plain = plain[:dot].strip() if dot > 10 else plain[:80].rsplit(" ", 1)[0]
+        return f"<{tag}>{plain}</{tag}>"
+    content = re.sub(r"<(h[23])[^>]*>(.*?)</h[23]>", _clean_heading, content, flags=re.DOTALL | re.IGNORECASE)
+
     # Ensure H1 exists — many WP themes don't add it automatically
     if content and not re.search(r"<h1", content, re.IGNORECASE):
         content = f"<h1>{title_out}</h1>\n\n" + content
