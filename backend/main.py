@@ -802,6 +802,7 @@ async def cron_activate_schedule(domain_name: str):
 async def cron_publish_one(domain_name: str, background_tasks: BackgroundTasks):
     """Public: trigger publish of 1 pending keyword for a domain (diagnostic/test)."""
     from api.autopilot import _run_job, ensure_tables, RunNowRequest
+    from api.autopilot_helpers import job_create as _job_create
     import uuid as _uuid
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -818,6 +819,8 @@ async def cron_publish_one(domain_name: str, background_tasks: BackgroundTasks):
 
     schedule_id = row[0]
     job_id = f"test-{_uuid.uuid4().hex[:8]}"
+    await ensure_tables()
+    await _job_create(job_id, schedule_id)
     req = RunNowRequest(schedule_id=schedule_id, limit=1)
     background_tasks.add_task(_run_job, job_id, schedule_id, req)
     return {"ok": True, "domain": domain_name, "schedule_id": schedule_id,
