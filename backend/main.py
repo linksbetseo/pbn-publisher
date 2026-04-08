@@ -773,7 +773,9 @@ async def cron_activate_schedule(domain_name: str):
     """Public: activate schedule by domain name + reset failed keywords to pending."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT id FROM domain_schedules WHERE domain LIKE ?",
+            """SELECT ds.id FROM domain_schedules ds
+               JOIN my_domains md ON md.id = ds.my_domain_id
+               WHERE md.domain LIKE ?""",
             (f"%{domain_name}%",)
         ) as cur:
             row = await cur.fetchone()
@@ -784,7 +786,6 @@ async def cron_activate_schedule(domain_name: str):
             "UPDATE domain_schedules SET active = 1 WHERE id = ?",
             (schedule_id,)
         )
-        # Reset failed keywords to pending
         cur2 = await db.execute(
             "UPDATE domain_keywords SET status = 'pending' WHERE schedule_id = ? AND status = 'failed'",
             (schedule_id,)
