@@ -568,6 +568,7 @@ async def basic_auth_middleware(request: Request, call_next):
             or path.startswith("/api/cron/test-wp/")
             or path.startswith("/api/cron/activate/")
             or path.startswith("/api/cron/publish-one/")
+            or path.startswith("/api/cron/job-status/")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -821,6 +822,29 @@ async def cron_publish_one(domain_name: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_job, job_id, schedule_id, req)
     return {"ok": True, "domain": domain_name, "schedule_id": schedule_id,
             "job_id": job_id, "message": "Publikacja 1 posta w tle — sprawdź job_id za 2-3 min"}
+
+
+@app.get("/api/cron/job-status/{job_id}")
+async def cron_job_status(job_id: str):
+    """Public: check publish job status and error details."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT job_id, status, published, failed, total, error, results_json, done FROM run_jobs WHERE job_id = ?",
+            (job_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {"ok": False, "error": "Job not found"}
+    d = dict(row)
+    try:
+        results = json.loads(d.pop("results_json") or "[]")
+        # Show only failed results with error details
+        d["failed_details"] = [r for r in results if r.get("status") == "failed"][:5]
+        d["published_details"] = [{"keyword": r.get("keyword"), "url": r.get("url")} for r in results if r.get("status") == "published"][:5]
+    except Exception:
+        pass
+    return d
 
 
 # Serve frontend static files (after API routes)
