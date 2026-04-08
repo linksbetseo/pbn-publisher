@@ -566,6 +566,7 @@ async def basic_auth_middleware(request: Request, call_next):
     # Pass-through: health, static assets, login endpoint, and all frontend SPA routes
     if (path in ("/health", "/", "/api/auth/login", "/api/cron/status", "/api/cron/reset-last-run")
             or path.startswith("/api/cron/test-wp/")
+            or path.startswith("/api/cron/activate/")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -765,6 +766,33 @@ async def cron_test_wp(domain_name: str):
         return {"ok": False, "domain": d["domain"], "error": "Timeout — domena nie odpowiada"}
     except Exception as e:
         return {"ok": False, "domain": d["domain"], "error": str(e)[:300]}
+
+
+@app.post("/api/cron/activate/{domain_name}")
+async def cron_activate_schedule(domain_name: str):
+    """Public: activate schedule by domain name + reset failed keywords to pending."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM autopilot_schedules WHERE domain LIKE ?",
+            (f"%{domain_name}%",)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "Schedule not found", "searched": domain_name}
+        schedule_id = row[0]
+        await db.execute(
+            "UPDATE autopilot_schedules SET active = 1 WHERE id = ?",
+            (schedule_id,)
+        )
+        # Reset failed keywords to pending
+        cur2 = await db.execute(
+            "UPDATE domain_keywords SET status = 'pending' WHERE schedule_id = ? AND status = 'failed'",
+            (schedule_id,)
+        )
+        reset_count = cur2.rowcount
+        await db.commit()
+    return {"ok": True, "domain": domain_name, "schedule_id": schedule_id,
+            "activated": True, "failed_reset_to_pending": reset_count}
 
 
 # Serve frontend static files (after API routes)
