@@ -729,8 +729,8 @@ async def generate_article(
     paa_questions = serp_data.get("paa_questions", [])
     serp_urls = serp_data.get("serp_urls", [])
 
-    # FIX #3: target 10-15% ABOVE competitor avg (beat not match), cap at 3000 to avoid fluff
-    target_words = max(800, min(3000, int(avg_words * 1.12)))
+    # FIX #3: target 15-20% ABOVE competitor avg (quality over quantity), cap at 3500
+    target_words = max(1200, min(3500, int(avg_words * 1.18)))
     # FIX #4: tighter density range — 0.8-1.8% sweet spot (enrichment blocks add ~0.2-0.5%)
     target_density = round(max(0.8, min(1.8, avg_density)), 1)
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
@@ -1001,7 +1001,10 @@ async def generate_article(
             "NIE używaj **tekst** ani *tekst*. TYLKO czysty HTML — tagi <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>.\n"
             "BEZWZGLĘDNY ZAKAZ #2: NIE generuj instrukcji, zadań, kroków, planów ani list TODO. "
             "NIE pisz 'Krok 1:', 'Zadanie:', 'Zidentyfikuj', 'Zbierz dane'. "
-            "Pisz GOTOWY artykuł dla czytelnika, NIE instrukcję jak go napisać."
+            "Pisz GOTOWY artykuł dla czytelnika, NIE instrukcję jak go napisać.\n"
+            "BEZWZGLĘDNY ZAKAZ #3: Tekst wewnątrz <h2> i <h3> to WYŁĄCZNIE krótki tytuł sekcji (3-8 słów). "
+            "NIE wstawiaj akapitów, zdań ani długiej treści do wnętrza tagów <h2>/<h3>. "
+            "Cała treść artykułu idzie WYŁĄCZNIE w <p>, <ul>, <ol> — nigdy w nagłówku."
         )
     else:
         section_system = (
@@ -1035,7 +1038,10 @@ async def generate_article(
             "Never use **text** or *text*. ONLY pure HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>.\n"
             "STRICT #2: Do NOT generate instructions, tasks, steps, plans or TODO lists. "
             "Do NOT write 'Step 1:', 'Task:', 'Identify', 'Collect data'. "
-            "Write FINISHED article content for readers, NOT instructions on how to write it."
+            "Write FINISHED article content for readers, NOT instructions on how to write it.\n"
+            "STRICT #3: Text inside <h2> and <h3> tags must be ONLY a short section title (3-8 words). "
+            "NEVER place paragraphs, sentences or body content inside <h2>/<h3> tags. "
+            "All article content goes ONLY in <p>, <ul>, <ol> — never inside a heading tag."
         )
 
     # Semaphore: max 4 concurrent GPT calls for sections (avoid rate limit)
@@ -1340,6 +1346,19 @@ async def generate_article(
 
     # Fix heading hierarchy (H3 before H2, skipped levels, etc.)
     content = _fix_heading_hierarchy(content)
+
+    # FIX: strip body content accidentally placed inside h2/h3 tags
+    def _clean_heading_openai(m: re.Match) -> str:
+        tag = m.group(1)
+        attrs = m.group(2)
+        inner = m.group(3)
+        plain = re.sub(r"<[^>]+>", " ", inner).strip()
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if len(plain) > 100:
+            dot = plain.find(". ")
+            plain = plain[:dot].strip() if dot > 10 else plain[:80].rsplit(" ", 1)[0]
+        return f"<{tag}{attrs}>{plain}</{tag}>"
+    content = re.sub(r"<(h[23])([^>]*)>(.*?)</h[23]>", _clean_heading_openai, content, flags=re.DOTALL | re.IGNORECASE)
 
     # FIX #51: deduplicate anchor links and also remove empty/broken links
     seen_hrefs: set = set()
