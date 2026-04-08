@@ -565,6 +565,7 @@ async def basic_auth_middleware(request: Request, call_next):
     path = request.url.path
     # Pass-through: health, static assets, login endpoint, and all frontend SPA routes
     if (path in ("/health", "/", "/api/auth/login", "/api/cron/status", "/api/cron/reset-last-run")
+            or path.startswith("/api/cron/test-wp/")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -709,6 +710,61 @@ async def cron_reset_last_run():
         )
         await db.commit()
     return {"ok": True, "message": "last_run_date cleared — cron will fire within 30 minutes"}
+
+
+@app.get("/api/cron/test-wp/{domain_name}")
+async def cron_test_wp(domain_name: str):
+    """Public diagnostic: test WP REST API connection for a domain (by domain name)."""
+    import base64 as _b64
+    import httpx as _httpx
+    from services.crypto_service import get_plain_password
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, domain, wp_login, wp_pass,
+                      COALESCE(http_user,'') as http_user,
+                      COALESCE(http_pass,'') as http_pass
+               FROM my_domains WHERE domain LIKE ?""",
+            (f"%{domain_name}%",)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {"ok": False, "error": "Domain not found in my_domains", "searched": domain_name}
+    d = dict(row)
+    domain_url = d["domain"].rstrip("/")
+    if not domain_url.startswith("http"):
+        domain_url = "https://" + domain_url
+    try:
+        plain_pass = get_plain_password(d["wp_pass"])
+    except Exception as e:
+        return {"ok": False, "domain": d["domain"], "error": f"Decrypt error: {e}"}
+    wp_creds = _b64.b64encode(f"{d['wp_login']}:{plain_pass}".encode()).decode()
+    headers = {"Authorization": f"Basic {wp_creds}"}
+    auth = None
+    if d.get("http_user"):
+        auth = _httpx.BasicAuth(d["http_user"], d["http_pass"])
+    try:
+        async with _httpx.AsyncClient(timeout=15, verify=False, auth=auth) as client:
+            # Test read
+            resp = await client.get(f"{domain_url}/wp-json/wp/v2/posts?per_page=1&_fields=id,title", headers=headers)
+            if resp.status_code != 200:
+                return {"ok": False, "domain": d["domain"], "status_code": resp.status_code,
+                        "error": resp.text[:300]}
+            # Test write — create draft post
+            payload = {"title": "TEST POST — usuń mnie", "content": "Testowy wpis diagnostyczny. Usuń.", "status": "draft"}
+            resp2 = await client.post(f"{domain_url}/wp-json/wp/v2/posts", headers={**headers, "Content-Type": "application/json"}, json=payload)
+            if resp2.status_code in (200, 201):
+                post_id = resp2.json().get("id")
+                # Delete immediately
+                await client.delete(f"{domain_url}/wp-json/wp/v2/posts/{post_id}?force=true", headers=headers)
+                return {"ok": True, "domain": d["domain"], "message": f"WP działa — draft #{post_id} utworzony i usunięty", "wp_login": d["wp_login"]}
+            else:
+                return {"ok": False, "domain": d["domain"], "write_status": resp2.status_code,
+                        "error": resp2.text[:300], "wp_login": d["wp_login"]}
+    except _httpx.ConnectTimeout:
+        return {"ok": False, "domain": d["domain"], "error": "Timeout — domena nie odpowiada"}
+    except Exception as e:
+        return {"ok": False, "domain": d["domain"], "error": str(e)[:300]}
 
 
 # Serve frontend static files (after API routes)
