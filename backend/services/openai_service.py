@@ -891,6 +891,8 @@ async def generate_article(
     title = title.strip('"\'').strip()
     # FIX #7: strip markdown artifacts from title (GPT sometimes adds # or *)
     title = re.sub(r'^[#*\s]+', '', title).strip()
+    # strip any HTML tags GPT may have wrapped around the title
+    title = re.sub(r"<[^>]+>", "", title).strip()
     # FIX #8: enforce max 65 chars for SERP display (truncated titles lose CTR)
     if len(title) > 65:
         # Try to cut at last word boundary before 65 chars

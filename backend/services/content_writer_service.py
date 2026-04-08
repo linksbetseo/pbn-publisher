@@ -259,7 +259,8 @@ Na podstawie powyższej analizy:
             "lub pomiń. NIE podawaj faktów które mogły się zdezaktualizować jako pewnik. "
             "NAGŁÓWKI: Tekst H2/H3 to TYLKO krótki tytuł sekcji (3-8 słów). "
             "NIGDY nie wstawiaj pełnych zdań, akapitów ani treści do wnętrza tagów <h2> lub <h3>. "
-            "Treść idzie WYŁĄCZNIE w tagach <p>, <ul>, <ol>."
+            "Treść idzie WYŁĄCZNIE w tagach <p>, <ul>, <ol>. "
+            "ENCJE OSOBOWE: NIE podawaj z pamięci nazwisk polityków, ministrów ani urzędników."
         )
         user_prompt = f"""Napisz kompletny artykuł SEO na frazę: '{keyword}'.{variation}
 
@@ -307,7 +308,8 @@ Tylko JSON, bez markdown."""
             "(officeholders, current laws, prices, statistics) — write 'as of [year]' or omit. "
             "HEADINGS: H2/H3 text must be ONLY a short section title (3-8 words). "
             "NEVER place full sentences, paragraphs or body content inside <h2> or <h3> tags. "
-            "Content goes ONLY inside <p>, <ul>, <ol> tags."
+            "Content goes ONLY inside <p>, <ul>, <ol> tags. "
+            "PERSONAL ENTITIES: Do NOT name from memory politicians, ministers or officeholders."
         )
         user_prompt = f"""Write a complete SEO article for keyword: '{keyword}'.{variation}
 
@@ -579,7 +581,7 @@ JSON only, no markdown."""
     tags_out = [t for t in raw_tags if isinstance(t, str) and t.strip()][:10]
 
     return {
-        "title": data.get("title", keyword),
+        "title": title_out,
         "meta_description": excerpt,
         "content": content,
         "category": data.get("category", ""),
