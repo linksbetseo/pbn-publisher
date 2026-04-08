@@ -279,7 +279,7 @@ WYMAGANIA TECHNICZNE SEO:
 8. Podsumowanie z <ul> kluczowych wniosków
 9. Łączna długość: 2500-3500 słów (wysoka jakość, szczegółowe omówienie każdej sekcji)
 10. '{keyword}' naturalnie 1-2% density
-11. ENCJE NLP: Używaj konkretnych nazw własnych (marki, firmy, produkty, osoby, miejsca, normy, instytucje) powiązanych z tematem. Google NLP rozpoznaje encje — im więcej trafnych nazw własnych, tym lepszy topical authority. Unikaj ogólników typu "eksperci twierdzą" — podaj KTO konkretnie.
+11. ENCJE NLP: Używaj konkretnych nazw własnych (marki, firmy, produkty, miejsca, normy, instytucje) powiązanych z tematem. Google NLP rozpoznaje encje — im więcej trafnych nazw własnych, tym lepszy topical authority. NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników — dane personalne są zmienne i GPT może mieć nieaktualne informacje. Użyj "aktualny minister X" lub podaj nazwisko WYŁĄCZNIE jeśli pochodzi z danych SERP powyżej.
 12. AKTUALNOŚĆ: Dzisiaj jest {_current_date} (rok {_current_year}). Wszystkie fakty, dane, osoby pełniące funkcje muszą być aktualne na ten rok. Jeśli podajesz statystyki lub dane liczbowe — zaznacz rok źródła.
 
 LINKOWANIE:
@@ -326,7 +326,7 @@ SEO REQUIREMENTS:
 8. Summary with <ul> of key takeaways
 9. Total length: 2500-3500 words (high quality, detailed coverage of each section)
 10. '{keyword}' naturally at 1-2% density
-11. NLP ENTITIES: Use specific proper nouns (brands, companies, products, people, places, standards, institutions) related to the topic. Google NLP recognizes entities — more relevant proper nouns means better topical authority. Avoid vague phrases like "experts say" — name WHO specifically.
+11. NLP ENTITIES: Use specific proper nouns (brands, companies, products, places, standards, institutions) related to the topic. Google NLP recognizes entities — more relevant proper nouns means better topical authority. Do NOT name from memory politicians, ministers, presidents or other officeholders — personnel data changes and GPT may have outdated training data. Use "current minister of X" or only name someone if explicitly found in the SERP data above.
 12. ACCURACY: Today is {_current_date} (year {_current_year}). All facts, officeholders, and data must be current for this year. When citing statistics or figures, state the source year.
 
 LINKS:
