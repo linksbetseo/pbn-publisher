@@ -729,8 +729,8 @@ async def generate_article(
     paa_questions = serp_data.get("paa_questions", [])
     serp_urls = serp_data.get("serp_urls", [])
 
-    # FIX #3: target 15-20% ABOVE competitor avg (quality over quantity), cap at 3500
-    target_words = max(1200, min(3500, int(avg_words * 1.18)))
+    # FIX #3: quality over quantity — minimum 2500, target 15-20% above avg, cap 3500
+    target_words = max(2500, min(3500, int(avg_words * 1.18)))
     # FIX #4: tighter density range — 0.8-1.8% sweet spot (enrichment blocks add ~0.2-0.5%)
     target_density = round(max(0.8, min(1.8, avg_density)), 1)
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
@@ -911,6 +911,8 @@ async def generate_article(
             "Używaj tagów <p> i <strong> dla kluczowych terminów.\n"
             f"AKTUALNOŚĆ: Mamy rok {_current_year}. NIE pisz 'W 2023 roku' ani 'trendy 2024' jako aktualne. "
             f"Używaj '{_current_year}' lub 'obecnie/aktualnie'.\n"
+            "ENCJE OSOBOWE — ZAKAZ: NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów "
+            "ani innych osób pełniących urzędy/funkcje. Używaj ogólnych ról ('aktualny minister X', 'prezes instytucji Y').\n"
             "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani # ani **tekst**. TYLKO tagi HTML <p> i <strong>."
         )
         intro_user = (
@@ -934,6 +936,8 @@ async def generate_article(
             "HUMANIZATION: Mix short and long sentences. Use 1 rhetorical question.\n"
             f"CURRENCY: Current year is {_current_year}. Do NOT write 'In 2023' or '2024 trends' as current. "
             f"Use '{_current_year}' or 'currently/nowadays'.\n"
+            "PERSONAL ENTITIES — NO HALLUCINATION: Do NOT name from memory any politicians, ministers, "
+            "presidents or other officeholders. Use generic roles ('current minister of X', 'head of institution Y').\n"
             "STRICT: NO markdown. Never use ## or # or **text**. ONLY HTML tags <p> and <strong>."
         )
         intro_user = (
@@ -1135,11 +1139,13 @@ async def generate_article(
     _concl_system = (
         "Jesteś ekspertem SEO. Piszesz zakończenie artykułu w HTML.\n"
         "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # ani **tekst**. "
-        "TYLKO tagi HTML: <h2>, <p>, <ul>, <li>, <strong>."
+        "TYLKO tagi HTML: <h2>, <p>, <ul>, <li>, <strong>.\n"
+        "ENCJE OSOBOWE: NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników."
     ) if lang_pl else (
         "You are an SEO expert. Write article conclusion in HTML.\n"
         "STRICT: NO markdown. Never use ## or ### or # or **text**. "
-        "ONLY HTML tags: <h2>, <p>, <ul>, <li>, <strong>."
+        "ONLY HTML tags: <h2>, <p>, <ul>, <li>, <strong>.\n"
+        "PERSONAL ENTITIES: Do NOT name from memory any politicians, ministers, presidents or other officeholders."
     )
 
     paa_block = ""
@@ -1186,8 +1192,11 @@ async def generate_article(
             f"STRICT: NO markdown. ONLY HTML."
         )
     _faq_system = (
-        "Jesteś ekspertem SEO. Tworzysz FAQ zoptymalizowane pod featured snippets, AI Overview i PAA (People Also Ask)." if lang_pl
-        else "You are an SEO expert creating FAQ optimized for featured snippets, AI Overview, and PAA (People Also Ask)."
+        "Jesteś ekspertem SEO. Tworzysz FAQ zoptymalizowane pod featured snippets, AI Overview i PAA (People Also Ask). "
+        "NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników — użyj ogólnych ról."
+        if lang_pl else
+        "You are an SEO expert creating FAQ optimized for featured snippets, AI Overview, and PAA (People Also Ask). "
+        "Do NOT name from memory any politicians, ministers, presidents or other officeholders — use generic roles."
     )
     # SEO #5: intent-based CTA for meta description
     _cta_map_pl = {

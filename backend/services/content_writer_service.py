@@ -397,15 +397,14 @@ JSON only, no markdown."""
     # Sanitize headings in content: remove any block-level content mistakenly placed inside h2/h3
     def _clean_heading(m):
         tag = m.group(1)
-        inner = m.group(2)
-        # Strip all tags, keep only text — headings must be plain short titles
+        attrs = m.group(2)  # preserve id= and other attributes
+        inner = m.group(3)
         plain = re.sub(r"<[^>]+>", " ", inner).strip()
-        # If heading is suspiciously long (>100 chars) it's likely a misplaced paragraph — truncate at sentence end
         if len(plain) > 100:
             dot = plain.find(". ")
             plain = plain[:dot].strip() if dot > 10 else plain[:80].rsplit(" ", 1)[0]
-        return f"<{tag}>{plain}</{tag}>"
-    content = re.sub(r"<(h[23])[^>]*>(.*?)</h[23]>", _clean_heading, content, flags=re.DOTALL | re.IGNORECASE)
+        return f"<{tag}{attrs}>{plain}</{tag}>"
+    content = re.sub(r"<(h[23])([^>]*)>(.*?)</h[23]>", _clean_heading, content, flags=re.DOTALL | re.IGNORECASE)
 
     # Ensure H1 exists — many WP themes don't add it automatically
     if content and not re.search(r"<h1", content, re.IGNORECASE):
