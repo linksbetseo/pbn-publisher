@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import aiosqlite
 import httpx
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -567,6 +567,7 @@ async def basic_auth_middleware(request: Request, call_next):
     if (path in ("/health", "/", "/api/auth/login", "/api/cron/status", "/api/cron/reset-last-run")
             or path.startswith("/api/cron/test-wp/")
             or path.startswith("/api/cron/activate/")
+            or path.startswith("/api/cron/publish-one/")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -794,6 +795,32 @@ async def cron_activate_schedule(domain_name: str):
         await db.commit()
     return {"ok": True, "domain": domain_name, "schedule_id": schedule_id,
             "activated": True, "failed_reset_to_pending": reset_count}
+
+
+@app.post("/api/cron/publish-one/{domain_name}")
+async def cron_publish_one(domain_name: str, background_tasks: BackgroundTasks):
+    """Public: trigger publish of 1 pending keyword for a domain (diagnostic/test)."""
+    from api.autopilot import _run_job, ensure_tables, RunNowRequest
+    import uuid as _uuid
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT ds.id FROM domain_schedules ds
+               JOIN my_domains md ON md.id = ds.my_domain_id
+               WHERE md.domain LIKE ? AND ds.active = 1""",
+            (f"%{domain_name}%",)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {"ok": False, "error": "Active schedule not found", "domain": domain_name}
+
+    schedule_id = row[0]
+    job_id = f"test-{_uuid.uuid4().hex[:8]}"
+    req = RunNowRequest(schedule_id=schedule_id, limit=1)
+    background_tasks.add_task(_run_job, job_id, schedule_id, req)
+    return {"ok": True, "domain": domain_name, "schedule_id": schedule_id,
+            "job_id": job_id, "message": "Publikacja 1 posta w tle — sprawdź job_id za 2-3 min"}
 
 
 # Serve frontend static files (after API routes)
