@@ -387,7 +387,9 @@ JSON only, no markdown."""
     content = data.get("content", "")
     title_out = data.get("title", keyword)
 
-    # Sanitize title: strip any HTML tags, then trim cleanly at word boundary
+    # Sanitize title: strip quotes, markdown artifacts, HTML tags, then trim cleanly at word boundary
+    title_out = title_out.strip('"\'').strip()
+    title_out = re.sub(r'^[#*\s]+', '', title_out).strip()
     title_out = re.sub(r"<[^>]+>", "", title_out).strip()
     if len(title_out) > 65:
         # Trim to last complete word within 65 chars
