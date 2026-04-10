@@ -2181,7 +2181,10 @@ async def run_daily_all():
     Uruchom dzienny autopilot dla WSZYSTKICH aktywnych harmonogramów.
     Każdy harmonogram dostaje posts_per_day artykułów.
     Harmonogramy przetwarzane równolegle (max 3 naraz).
-    Zwraca podsumowanie (nie streamuje).
+
+    QUALITY GATE: Przed publikacją dla danej domeny sprawdzamy czy przeszła quality gate.
+    Jeśli nie — uruchamiamy gate loop (generate+score) do osiągnięcia 80/100 przed publikacją.
+    Domains które nie przeszły gate nie dostają artykułów w tym dniu.
     """
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -2196,6 +2199,31 @@ async def run_daily_all():
         ) as cur:
             schedules = [dict(r) for r in await cur.fetchall()]
 
+    # Quality gate check — run gate loop for domains that haven't passed yet
+    try:
+        from services.quality_gate_service import quality_gate_check, quality_gate_run
+        _gate_enabled = True
+    except ImportError:
+        logger.warning("[Daily] quality_gate_service not available — skipping gate checks")
+        _gate_enabled = False
+
+    if _gate_enabled:
+        for sched in schedules:
+            domain = sched["domain"]
+            passed = await quality_gate_check(domain)
+            if not passed:
+                logger.info(f"[Daily] {domain} has not passed quality gate — running gate loop now")
+                gate_result = await quality_gate_run(domain, sched["id"])
+                gate_score = gate_result.get("score", 0)
+                gate_status = gate_result.get("status", "unknown")
+                logger.info(f"[Daily] {domain} gate result: {gate_status} score={gate_score}")
+                sched["_gate_passed"] = gate_status in ("passed",)
+                sched["_gate_score"] = gate_score
+            else:
+                logger.info(f"[Daily] {domain} already passed quality gate — proceeding with autopilot")
+                sched["_gate_passed"] = True
+                sched["_gate_score"] = 100  # already passed
+
     # Anti-fingerprint: stagger publishing across domains with random delays
     # Each domain publishes 3-15 minutes after the previous one
     results = []
@@ -2203,9 +2231,22 @@ async def run_daily_all():
     shuffled = list(schedules)
     random.shuffle(shuffled)
     for i, sched in enumerate(shuffled):
+        domain = sched["domain"]
+
+        # Skip domains that failed quality gate
+        if _gate_enabled and not sched.get("_gate_passed", True):
+            gate_score = sched.get("_gate_score", 0)
+            logger.warning(f"[Daily] {domain} SKIPPED — failed quality gate (score={gate_score})")
+            results.append((sched, {
+                "domain": domain, "schedule_id": sched["id"],
+                "published": 0, "failed": 0,
+                "skipped": True, "reason": f"quality_gate_failed (score={gate_score})"
+            }))
+            continue
+
         if i > 0:
             delay_minutes = random.uniform(3, 15)
-            logger.info(f"[Daily] Stagger delay: {delay_minutes:.1f}min before {sched['domain']}")
+            logger.info(f"[Daily] Stagger delay: {delay_minutes:.1f}min before {domain}")
             await asyncio.sleep(delay_minutes * 60)
         try:
             res = await _run_schedule_daily(sched)

@@ -569,6 +569,7 @@ async def basic_auth_middleware(request: Request, call_next):
             or path.startswith("/api/cron/activate/")
             or path.startswith("/api/cron/publish-one/")
             or path.startswith("/api/cron/job-status/")
+            or path.startswith("/api/quality-gate/")
             or path.startswith("/assets")
             or not path.startswith("/api")  # all non-API paths = SPA routes
             or path.endswith((".svg", ".ico", ".png", ".webmanifest", ".js", ".css"))):
@@ -796,6 +797,92 @@ async def cron_activate_schedule(domain_name: str):
         await db.commit()
     return {"ok": True, "domain": domain_name, "schedule_id": schedule_id,
             "activated": True, "failed_reset_to_pending": reset_count}
+
+
+# ─── Quality Gate Endpoints ────────────────────────────────────────────────────
+
+@app.post("/api/quality-gate/trigger/{domain_name}")
+async def quality_gate_trigger(domain_name: str, background_tasks: BackgroundTasks):
+    """
+    Trigger quality gate loop for a domain in the background.
+    Generates test articles and scores them with CEO (Opus/GPT-4o) until 80/100.
+    Once passed, the domain's autopilot is unlocked.
+    """
+    from services.quality_gate_service import quality_gate_run, quality_gate_get_status, _ensure_tables
+
+    await _ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT ds.id, md.domain FROM domain_schedules ds
+               JOIN my_domains md ON md.id = ds.my_domain_id
+               WHERE md.domain LIKE ? AND ds.active = 1""",
+            (f"%{domain_name}%",)
+        ) as cur:
+            row = await cur.fetchone()
+
+    if not row:
+        return {"ok": False, "error": "Active schedule not found", "domain": domain_name}
+
+    schedule_id, domain = row[0], row[1]
+    status = await quality_gate_get_status(domain)
+
+    if status.get("status") == "running":
+        return {"ok": False, "error": "Quality gate already running", "domain": domain, "status": status}
+
+    background_tasks.add_task(quality_gate_run, domain, schedule_id)
+    return {
+        "ok": True,
+        "domain": domain,
+        "schedule_id": schedule_id,
+        "message": f"Quality gate started — target {os.getenv('QUALITY_THRESHOLD', '80')}/100. Check /api/quality-gate/status/{domain_name}"
+    }
+
+
+@app.get("/api/quality-gate/status/{domain_name}")
+async def quality_gate_status(domain_name: str):
+    """Get quality gate status for a domain."""
+    from services.quality_gate_service import quality_gate_get_status
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT domain FROM my_domains WHERE domain LIKE ?",
+            (f"%{domain_name}%",)
+        ) as cur:
+            row = await cur.fetchone()
+    domain = row[0] if row else domain_name
+    return await quality_gate_get_status(domain)
+
+
+@app.get("/api/quality-gate/status")
+async def quality_gate_status_all():
+    """Get quality gate status for all domains."""
+    from services.quality_gate_service import _ensure_tables
+    await _ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM quality_gate_state ORDER BY updated_at DESC") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {"gates": rows}
+
+
+@app.post("/api/quality-gate/reset/{domain_name}")
+async def quality_gate_reset_endpoint(domain_name: str):
+    """Reset quality gate for a domain (will re-run on next autopilot cycle)."""
+    from services.quality_gate_service import quality_gate_reset
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT domain FROM my_domains WHERE domain LIKE ?",
+            (f"%{domain_name}%",)
+        ) as cur:
+            row = await cur.fetchone()
+    domain = row[0] if row else domain_name
+    await quality_gate_reset(domain)
+    return {"ok": True, "domain": domain, "message": "Quality gate reset — will re-check on next autopilot run"}
+
+
+# ─── End Quality Gate Endpoints ────────────────────────────────────────────────
 
 
 @app.post("/api/cron/publish-one/{domain_name}")
