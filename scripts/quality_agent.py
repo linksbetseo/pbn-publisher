@@ -75,7 +75,7 @@ OPENAI_SERVICE = REPO_ROOT / "backend" / "services" / "openai_service.py"
 CONTENT_WRITER_SERVICE = REPO_ROOT / "backend" / "services" / "content_writer_service.py"
 RAILWAY_DEPLOY_WAIT = 240  # seconds to wait after git push (Railway ~3-4 min)
 JOB_POLL_INTERVAL = 15   # seconds between job status checks
-JOB_MAX_WAIT = 300        # max seconds to wait for article generation
+JOB_MAX_WAIT = 600        # max seconds to wait for article generation (10 min)
 DEFAULT_DOMAIN = "zdrowosportowo.pl"
 DEFAULT_MAX_ITER = 8
 
