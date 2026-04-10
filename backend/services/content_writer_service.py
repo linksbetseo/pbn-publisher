@@ -427,6 +427,15 @@ JSON only, no markdown."""
         r"Jak\s+już\s+wspomniano,",
         r"W\s+tym\s+miejscu\s+warto",
         r"Jak\s+wynika\s+z\s+powyższego",
+        r"Warto\s+również\b",
+        r"Warto\s+zacząć\s+od",
+        r"Warto\s+zwrócić\s+uwagę",
+        r"W\s+dzisiejszym\s+(?:zabieganym|dynamicznym|nowoczesnym)\s+świecie",
+        r"kluczow[ya]\s+(?:element|rola|aspekt|kwestia)",
+        r"odgrywa\s+kluczow[aą]\s+rolę",
+        r"ma\s+kluczowe\s+znaczenie",
+        r"nie\s+można\s+(?:przecenić|zapominać\s+o)",
+        r"jest\s+nieodłączn[ym]\s+elementem",
     ]
     _AI_PHRASES_EN_CW = [
         r"In\s+practice,?\s+we\s+often\s+(?:see|encounter)",

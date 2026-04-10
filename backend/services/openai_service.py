@@ -1075,9 +1075,9 @@ async def generate_article(
                     f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
                     f"Nagłówek sekcji: '{heading}'\n"
                     f"Intencja: {intent_analysis}\n"
-                    f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian naturalnie w tekście (ok. {kw_per_section}x łącznie). "
-                    f"Preferuj odmiany i synonimy zamiast dokładnego powtarzania.{lsi_section_block}{_entity_block}\n"
+                    f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian MAKSYMALNIE {kw_per_section}x — preferuj synonimy i odmiany, NIE powtarzaj dokładnej frazy więcej niż 1-2x per sekcja.{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
+                    f"ENCJE: Każda sekcja musi wprowadzać NOWE encje (marki, badania, instytucje, osoby) których nie było w poprzednich sekcjach. NIE powtarzaj tych samych 3-4 encji przez cały artykuł.\n"
                     f"Pisz ekspercko: konkretne fakty, przykłady, porady praktyczne. Unikaj ogólników i zmyślonych statystyk.{custom_block}"
                 )
             else:
@@ -1085,9 +1085,9 @@ async def generate_article(
                     f"Write section for '{title}' (keyword: '{topic}').\n"
                     f"Section heading: '{heading}'\n"
                     f"Intent: {intent_analysis}\n"
-                    f"Target: ~{words_per_section} words. Use '{topic}' or its semantic variations naturally throughout (about {kw_per_section}x total). "
-                    f"Prefer synonyms and paraphrases over exact repetition.{lsi_section_block}{_entity_block}\n"
+                    f"Target: ~{words_per_section} words. Use '{topic}' or its semantic variations MAX {kw_per_section}x — prefer synonyms, do NOT repeat the exact phrase more than 1-2x per section.{lsi_section_block}{_entity_block}\n"
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
+                    f"ENTITIES: Each section must introduce NEW entities (brands, studies, institutions, people) not already used in previous sections. Do NOT repeat the same 3-4 entities throughout the entire article.\n"
                     f"Write expertly: specific facts, examples, practical tips. Avoid vague generalities and invented statistics.{custom_block}"
                 )
             sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=_mt_section, model=_resolved_model)
@@ -1393,6 +1393,15 @@ async def generate_article(
         r"Jak\s+już\s+wspomniano,",
         r"W\s+tym\s+miejscu\s+warto",
         r"Jak\s+wynika\s+z\s+powyższego",
+        r"Warto\s+również\b",
+        r"Warto\s+zacząć\s+od",
+        r"Warto\s+zwrócić\s+uwagę",
+        r"W\s+dzisiejszym\s+(?:zabieganym|dynamicznym|nowoczesnym)\s+świecie",
+        r"kluczow[ya]\s+(?:element|rola|aspekt|kwestia)",
+        r"odgrywa\s+kluczow[aą]\s+rolę",
+        r"ma\s+kluczowe\s+znaczenie",
+        r"nie\s+można\s+(?:przecenić|zapominać\s+o)",
+        r"jest\s+nieodłączn[ym]\s+elementem",
     ]
     _AI_PHRASES_EN = [
         r"In\s+practice,?\s+we\s+often\s+(?:see|encounter)",
