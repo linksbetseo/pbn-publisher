@@ -927,7 +927,7 @@ async def generate_article(
             f"PIERWSZY AKAPIT musi zaczynać się od precyzyjnej definicji '{topic}' — konkretna, prosta odpowiedź (np. '[Keyword] to...', '[Keyword] oznacza...').\n"
             f"Użyj '{topic}' {intro_kw_count}x naturalnie.{lsi_block}\n"
             f"Tylko HTML <p> i <strong>, bez nagłówków. OK do użycia <ul>/<li> jeśli pasuje.\n"
-            f"WAŻNE: Każdy akapit wstępu musi wnosić NOWĄ informację. NIE powtarzaj tych samych faktów ani korzyści w różnych akapitach. Każdy akapit musi wnosić nową informację. NIE powtarzaj tego samego zdania ani faktu w różnych akapitach.\n"
+            f"WAŻNE: Każdy akapit wstępu musi wnosić NOWĄ informację i być wzbogacony o szczegółowe dane, przykłady lub statystyki, jeśli dostępne. NIE powtarzaj tych samych faktów ani korzyści w różnych akapitach. Każda część musi mieć oryginalną treść.\n"
             f"HUMANIZACJA: Mieszaj krótkie i długie zdania. Użyj 1 pytania retorycznego.{custom_block}"
         )
     else:
@@ -1163,7 +1163,7 @@ async def generate_article(
         "ONLY HTML tags: <h2>, <p>, <ul>, <li>, <strong>.\n"
         "STATISTICS: Do NOT state specific percentages or numbers unless from provided SERP data. Write generally.\n"
         "PERSONAL ENTITIES: Do NOT name from memory any politicians, ministers, presidents or other officeholders.\n"
-        "DUPLICATES: Do NOT repeat sentences that appeared earlier in the article. The conclusion adds a new perspective."
+        "DUPLICATES: Do NOT repeat sentences or facts that appeared earlier in the article. The conclusion must introduce a new angle, highlight statistics or insights not previously emphasized, and offer practical applications."
     )
 
     paa_block = ""
@@ -1191,7 +1191,7 @@ async def generate_article(
             f"WYMAGANIA:\n"
             f"- 8 pytań i odpowiedzi\n"
             f"- Pierwsze pytanie = definicja/wyjaśnienie '{topic}'\n"
-            f"- Odpowiedzi: 2-4 zdania, konkretne, bez lania wody\n"
+            f"- Odpowiedzi: 2-4 zdania, konkretne, poparte przykładami i danymi, bez lania wody. Uwzględnij pytania dotyczące danych liczbowych, przypadków użycia oraz porównań.\n"
             f"- Mix: pytania informacyjne + praktyczne + porównawcze{paa_block}\n"
             f"HTML: <h2>{_faq_h2}</h2>\n"
             f"Format każdej pary: <h3>Pytanie?</h3><p>Odpowiedź.</p>\n"
