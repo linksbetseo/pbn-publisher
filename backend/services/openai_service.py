@@ -1080,7 +1080,7 @@ async def generate_article(
                     f"Napisz sekcję dla artykułu '{title}' (keyword: '{topic}').\n"
                     f"Nagłówek sekcji: '{heading}'\n"
                     f"Intencja: {intent_analysis}\n"
-                    f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej zrozumiałych synonimów/odmian {kw_per_section}x — uważaj, aby unikać wrażenia sztuczności. — preferuj synonimy i odmiany, NIE powtarzaj dokładnej frazy więcej niż 1-2x per sekcja.{lsi_section_block}{_entity_block}\n"
+                    f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian MAKSYMALNIE {kw_per_section}x — preferuj synonimy i odmiany naturalne, NIE powtarzaj dokładnej frazy więcej niż 1-2x per sekcja. Unikaj sztucznych powtórzeń.{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
                     f"ENCJE: Każda sekcja MUSI wprowadzać NOWE, różnorodne encje (nazwy instytucji, marki, produkty), które nie były użyte w poprzednich sekcjach. NIE powtarzaj tych samych encji przez cały artykuł.\n"
                     f"Pisz ekspercko już od pierwszych zdań: zawrzyj konkretne fakty, przykłady i porady praktyczne. Unikaj ogólników i zmyślonych statystyk.{custom_block}"
