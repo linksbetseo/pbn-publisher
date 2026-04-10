@@ -893,18 +893,19 @@ async def generate_article(
     title = re.sub(r'^[#*\s]+', '', title).strip()
     # strip any HTML tags GPT may have wrapped around the title
     title = re.sub(r"<[^>]+>", "", title).strip()
-    # FIX #8: enforce max 65 chars for SERP display (truncated titles lose CTR)
+    # title = full H1/post title — no length limit here
+    # seo_title = truncated version for meta title / Yoast / RankMath (max 65 chars)
     if len(title) > 65:
-        # Cut at last punctuation (? ! —) or word boundary before 65, never leave dangling prepositions
         _cut_match = re.search(r'[?!\u2014]', title[:65])
         if _cut_match:
-            title = title[:_cut_match.end()].strip()
+            seo_title = title[:_cut_match.end()].strip()
         else:
-            # cut at last word boundary, drop trailing prepositions/conjunctions (i, o, w, z, a, że)
             cut = title[:65].rsplit(' ', 1)[0]
             cut = re.sub(r'\s+(i|o|w|z|a|że|do|na|po|przez|dla|jak|co|się)$', '', cut, flags=re.IGNORECASE)
-            title = cut if len(cut) > 30 else title[:65]
-    logger.info(f"[Article] Title: {title}")
+            seo_title = cut if len(cut) > 30 else title[:65]
+    else:
+        seo_title = title
+    logger.info(f"[Article] Title: {title} | SEO title: {seo_title}")
 
     # ── STEP 5: Intro (direct answer first) ──────────────────────────────────
     intro_kw_count = max(1, round(target_words * target_density / 100 * 0.15))
@@ -1667,6 +1668,7 @@ async def generate_article(
 
     return {
         "title": title,
+        "seo_title": seo_title,  # truncated for meta title / Yoast / RankMath (max 65 chars)
         "content": content,
         "excerpt": excerpt,
         "fingerprint": fingerprint,

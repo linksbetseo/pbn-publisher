@@ -1496,6 +1496,7 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                             tags=lsi_tags,
                             http_user=sched.get("http_user", ""),
                             http_pass=sched.get("http_pass", ""),
+                            seo_title=article.get("seo_title"),
                         )
                         if not r.get("success"):
                             raise RuntimeError(r.get("error", "WP publish failed"))
@@ -1808,6 +1809,7 @@ async def generate_keyword_now(keyword_id: int):
         tags=lsi_tags,
         http_user=sched.get("http_user", ""),
         http_pass=sched.get("http_pass", ""),
+        seo_title=article.get("seo_title"),
     )
 
     if result.get("success"):
@@ -2101,6 +2103,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                                 tags=_tags,
                                 http_user=_s.get("http_user", ""),
                                 http_pass=_s.get("http_pass", ""),
+                                seo_title=_a.get("seo_title"),
                             )
                             if not r.get("success"):
                                 raise RuntimeError(r.get("error", "WP publish failed"))
@@ -3036,6 +3039,7 @@ async def _bulk_run_bg(job_id: str, schedule_ids: list[int], limit_override: int
                             keyword=_kw,
                             http_user=_s.get("http_user", ""),
                             http_pass=_s.get("http_pass", ""),
+                            seo_title=_a.get("seo_title"),
                         )
                         if not r.get("success"):
                             raise RuntimeError(r.get("error", "WP publish failed"))

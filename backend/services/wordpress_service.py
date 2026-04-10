@@ -364,7 +364,9 @@ async def publish_post(
     tags: Optional[list] = None,
     http_user: str = "",
     http_pass: str = "",
+    seo_title: Optional[str] = None,  # truncated title for meta/Yoast/RankMath (max 65 chars); defaults to title
 ) -> dict:
+    _meta_title = seo_title or title  # use seo_title for meta; fall back to full title
     auth = _auth_header(wp_login, wp_pass)
     headers = {
         "Authorization": auth,
@@ -455,23 +457,23 @@ async def publish_post(
                 if excerpt:
                     if _is_yoast:
                         meta["_yoast_wpseo_metadesc"] = excerpt[:160]
-                        meta["_yoast_wpseo_title"] = f"{title} %%sep%% %%sitename%%"
-                        meta["_yoast_wpseo_opengraph-title"] = title
+                        meta["_yoast_wpseo_title"] = f"{_meta_title} %%sep%% %%sitename%%"
+                        meta["_yoast_wpseo_opengraph-title"] = _meta_title
                         meta["_yoast_wpseo_opengraph-description"] = excerpt[:200]
-                        meta["_yoast_wpseo_twitter-title"] = title
+                        meta["_yoast_wpseo_twitter-title"] = _meta_title
                         meta["_yoast_wpseo_twitter-description"] = excerpt[:200]
                         meta["_yoast_wpseo_twitter-card-type"] = "summary_large_image"
                     if _is_rankmath:
                         meta["rank_math_description"] = excerpt[:160]
-                        meta["rank_math_title"] = title
-                        meta["rank_math_facebook_title"] = title
+                        meta["rank_math_title"] = _meta_title
+                        meta["rank_math_facebook_title"] = _meta_title
                         meta["rank_math_facebook_description"] = excerpt[:200]
                         meta["rank_math_twitter_title"] = title
                         meta["rank_math_twitter_description"] = excerpt[:200]
                         meta["rank_math_twitter_card_type"] = "summary_large_image"
                     if _is_aioseo:
                         meta["_aioseop_description"] = excerpt[:160]
-                        meta["_aioseop_title"] = title
+                        meta["_aioseop_title"] = _meta_title
                         # SEO #106: og:type for AIOSEO (defaults to website, should be article)
                         meta["_aioseop_opengraph_settings"] = '{"object_type":"article"}'
                     # SEO #8: OG article metadata for Facebook/Pinterest
