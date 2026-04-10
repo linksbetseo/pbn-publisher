@@ -1085,7 +1085,7 @@ async def generate_article(
                     f"Write section for '{title}' (keyword: '{topic}').\n"
                     f"Section heading: '{heading}'\n"
                     f"Intent: {intent_analysis}\n"
-                    f"Target: ~{words_per_section} words. Use '{topic}' or its semantic variations MAX {kw_per_section}x — prefer synonyms, do NOT repeat the exact phrase more than 1-2x per section.{lsi_section_block}{_entity_block}\n"
+                    f"Target: ~{words_per_section} words. Use relevant and detailed information about the '{topic}', its semantic variations and related entities MAX {kw_per_section}x — prefer synonyms, do NOT repeat the exact phrase more than 1-2x per section.{lsi_section_block}{_entity_block}\n"
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
                     f"ENTITIES: Each section must introduce NEW entities (brands, studies, institutions, people) not already used in previous sections. Do NOT repeat the same 3-4 entities throughout the entire article.\n"
                     f"Write expertly: specific facts, examples, practical tips. Avoid vague generalities and invented statistics.{custom_block}"
