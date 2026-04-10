@@ -853,7 +853,7 @@ async def generate_article(
             f"- 'Jak [działanie związane z keyword]? [X] kroków'\n"
             f"- 'Co to jest [keyword] i jak [korzyść]?'\n"
             f"- '[X] najważniejszych faktów o [keyword]'\n"
-            f"- '[Keyword]: wszystko co musisz wiedzieć'\n"
+            f"- '[Keyword]: kompletny poradnik dla każdego'\n"
             f"- '[Keyword] od A do Z — praktyczny poradnik'\n"
             f"- 'Dlaczego [keyword] jest tak ważne? Wyjaśniamy'\n"
             f"- '[Keyword] vs [alternatywa] — co wybrać?'\n"
@@ -895,9 +895,15 @@ async def generate_article(
     title = re.sub(r"<[^>]+>", "", title).strip()
     # FIX #8: enforce max 65 chars for SERP display (truncated titles lose CTR)
     if len(title) > 65:
-        # Try to cut at last word boundary before 65 chars
-        cut = title[:65].rsplit(' ', 1)[0]
-        title = cut if len(cut) > 30 else title[:65]
+        # Cut at last punctuation (? ! —) or word boundary before 65, never leave dangling prepositions
+        _cut_match = re.search(r'[?!\u2014]', title[:65])
+        if _cut_match:
+            title = title[:_cut_match.end()].strip()
+        else:
+            # cut at last word boundary, drop trailing prepositions/conjunctions (i, o, w, z, a, że)
+            cut = title[:65].rsplit(' ', 1)[0]
+            cut = re.sub(r'\s+(i|o|w|z|a|że|do|na|po|przez|dla|jak|co|się)$', '', cut, flags=re.IGNORECASE)
+            title = cut if len(cut) > 30 else title[:65]
     logger.info(f"[Article] Title: {title}")
 
     # ── STEP 5: Intro (direct answer first) ──────────────────────────────────
@@ -1304,13 +1310,11 @@ async def generate_article(
         ) if tldr_sentence else ""
         content_parts = [tldr_box, intro_html] + sections_html + [conclusion_html, faq_html]
     elif layout_variant == "short_answer":
-        # Featured snippet box — first full paragraph, no label
-        sa_intro = intro_html if intro_html else ""
-        sa_text = re.sub(r'<[^>]+>', '', sa_intro).strip()
-        # Take first complete sentence(s) up to ~400 chars, never cut mid-word
-        if len(sa_text) > 400:
-            cut = sa_text.rfind('.', 0, 400)
-            sa_text = sa_text[:cut + 1] if cut > 0 else sa_text[:400]
+        # Featured snippet box — first sentence only (definition), then full intro follows
+        # NOTE: sa_box takes only the FIRST SENTENCE to avoid duplicating the full intro
+        sa_intro_plain = re.sub(r'<[^>]+>', '', intro_html).strip()
+        first_dot = sa_intro_plain.find('.')
+        sa_text = sa_intro_plain[:first_dot + 1].strip() if first_dot > 0 and first_dot < 300 else sa_intro_plain[:200]
         sa_box = (
             f'<div style="background:#f0fdf4;border:1px solid #86efac;padding:16px 20px;'
             f'margin:16px 0 24px;border-radius:8px;">'
