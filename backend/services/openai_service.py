@@ -910,9 +910,12 @@ async def generate_article(
             "Zacznij od '<strong>[Keyword]</strong> to...' lub '[Keyword] polega na...'. Format AI Overview.\n"
             "2) Drugi akapit = dlaczego to ważne, kontekst praktyczny.\n"
             "3) Trzeci akapit = co czytelnik znajdzie w artykule (zapowiedź sekcji).\n"
-            "Używaj tagów <p> i <strong> dla kluczowych terminów.\n"
+            "Używaj tagów <p> i <strong> dla kluczowych terminów. "
+            f"<strong> na frazę główną użyj DOKŁADNIE RAZ — tylko w pierwszym zdaniu. NIE pogrubiaj tej frazy ponownie.\n"
             f"AKTUALNOŚĆ: Mamy rok {_current_year}. NIE pisz 'W 2023 roku' ani 'trendy 2024' jako aktualne. "
             f"Używaj '{_current_year}' lub 'obecnie/aktualnie'.\n"
+            "STATYSTYKI: NIE podawaj konkretnych wartości procentowych ani liczbowych jeśli nie ma ich w dostarczonych danych SERP. "
+            "Zamiast '30% mniejsze ryzyko' pisz 'znacząco mniejsze ryzyko'. Ogólne sformułowania są bezpieczniejsze niż zmyślone liczby.\n"
             "ENCJE OSOBOWE — ZAKAZ: NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów "
             "ani innych osób pełniących urzędy/funkcje. Używaj ogólnych ról ('aktualny minister X', 'prezes instytucji Y').\n"
             "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani # ani **tekst**. TYLKO tagi HTML <p> i <strong>."
@@ -924,6 +927,7 @@ async def generate_article(
             f"PIERWSZY AKAPIT musi zaczynać się od definicji '{topic}' — konkretna, prosta odpowiedź.\n"
             f"Użyj '{topic}' {intro_kw_count}x naturalnie.{lsi_block}\n"
             f"Tylko HTML <p> i <strong>, bez nagłówków. OK do użycia <ul>/<li> jeśli pasuje.\n"
+            f"WAŻNE: Każdy akapit wstępu musi wnosić NOWĄ informację. NIE powtarzaj tego samego zdania ani faktu w różnych akapitach.\n"
             f"HUMANIZACJA: Mieszaj krótkie i długie zdania. Użyj 1 pytania retorycznego.{custom_block}"
         )
     else:
@@ -934,10 +938,13 @@ async def generate_article(
             "Start with '<strong>[Keyword]</strong> is...' format. AI Overview style.\n"
             "2) Second = why it matters, practical context.\n"
             "3) Third = what reader will find (section preview).\n"
-            "Use <p> and <strong> for key terms.\n"
+            "Use <p> and <strong> for key terms. "
+            "Use <strong> on the main keyword EXACTLY ONCE — only in the first sentence. Do NOT bold it again.\n"
             "HUMANIZATION: Mix short and long sentences. Use 1 rhetorical question.\n"
             f"CURRENCY: Current year is {_current_year}. Do NOT write 'In 2023' or '2024 trends' as current. "
             f"Use '{_current_year}' or 'currently/nowadays'.\n"
+            "STATISTICS: Do NOT state specific percentages or numbers unless they appear in the provided SERP data. "
+            "Write 'significantly lower risk' instead of '30% lower risk'. Vague is safer than hallucinated figures.\n"
             "PERSONAL ENTITIES — NO HALLUCINATION: Do NOT name from memory any politicians, ministers, "
             "presidents or other officeholders. Use generic roles ('current minister of X', 'head of institution Y').\n"
             "STRICT: NO markdown. Never use ## or # or **text**. ONLY HTML tags <p> and <strong>."
@@ -948,14 +955,15 @@ async def generate_article(
             f"Sections: {', '.join(sections[:4])}\n"
             f"FIRST PARAGRAPH must start with a definition of '{topic}'.\n"
             f"Use '{topic}' {intro_kw_count}x naturally.{lsi_block}\n"
-            f"Only HTML <p> and <strong>, no headings. OK to use <ul>/<li> if appropriate.{custom_block}"
+            f"Only HTML <p> and <strong>, no headings. OK to use <ul>/<li> if appropriate.\n"
+            f"IMPORTANT: Each intro paragraph must add NEW information. Do NOT repeat the same fact in different paragraphs.{custom_block}"
         )
     intro_html = await _gpt(intro_system, intro_user, temperature=0.7, max_tokens=_mt_intro, model=_resolved_model)
     if not intro_html.strip().startswith("<"):
         intro_html = _markdown_to_html(intro_html)
     intro_html = _strip_markdown_remnants(intro_html)
-    # SEO #65: enforce <strong> on first keyword mention in intro
-    if re.search(r'\b' + re.escape(topic) + r'\b', intro_html, re.IGNORECASE) and f'<strong>{topic}' not in intro_html.lower():
+    # SEO #65: enforce <strong> on first keyword mention in intro (case-insensitive check)
+    if re.search(r'\b' + re.escape(topic) + r'\b', intro_html, re.IGNORECASE) and not re.search(r'<strong>' + re.escape(topic) + r'</strong>', intro_html, re.IGNORECASE):
         _kw_pattern = re.compile(re.escape(topic), re.IGNORECASE)
         _replaced = False
         def _strong_first(m):
@@ -980,12 +988,12 @@ async def generate_article(
             "WYMAGANIA:\n"
             "- Zacznij od <h2>, dodaj 1-2 <h3> pod-sekcje\n"
             "- Używaj <p>, <ul>/<li> lub <ol>/<li> tam gdzie pasuje\n"
-            "- Dodaj <strong> dla najważniejszych terminów i faktów\n"
+            "- <strong> używaj MAKSYMALNIE 1-2 razy per sekcja, tylko dla kluczowego terminu lub ważnej liczby. NIE pogrubiaj nazw marek, odmian frazy kluczowej ani każdego słowa — to wygląda jak spam.\n"
             "- Pisz konkretnie — dane, liczby, przykłady, porady praktyczne\n"
-            "- DOŚWIADCZENIE E-E-A-T: Wpleć 1-2 zdania z perspektywy praktycznej "
-            "('W praktyce często spotykamy...', 'Typowy błąd to...', 'Z doświadczenia wynika...'). "
-            "NIE pisz 'ja' — pisz w tonie eksperta który widział setki takich przypadków.\n"
-            "- Bez powtarzania wstępu ani zakończenia artykułu\n"
+            "- DOŚWIADCZENIE E-E-A-T: Wpleć 1-2 zdania z perspektywy praktycznej, "
+            "pisząc w tonie eksperta który widział setki takich przypadków. NIE pisz 'ja'. "
+            "NIE używaj szablonowych zwrotów — pisz oryginalnie.\n"
+            "- Każda sekcja musi pokrywać ODMIENNY aspekt tematu. NIE powtarzaj faktów z innych sekcji.\n"
             "- ENCJE: Używaj konkretnych nazw własnych (marki, firmy, produkty, miejsca, normy, "
             "instytucje) zamiast ogólników. Google NLP rozpoznaje encje — im więcej trafnych nazw "
             "własnych powiązanych z tematem, tym lepszy topical authority.\n"
@@ -994,10 +1002,12 @@ async def generate_article(
             "Dane osobowe zmieniają się — GPT może mieć nieaktualne dane. "
             "Jeśli potrzebujesz konkretnej osoby, użyj sformułowania ogólnego "
             "('aktualny minister', 'prezes instytucji X') LUB podaj tylko jeśli masz to wprost z dostarczonych danych SERP.\n"
-            "- INFORMATION GAIN: Dodaj 1-2 fakty/dane/perspektywy których BRAK w typowych artykułach "
-            "na ten temat — unikalne statystyki, mało znane porady, kontrintuicyjne wnioski.\n"
+            "- INFORMATION GAIN: Dodaj 1-2 fakty/perspektywy których BRAK w typowych artykułach "
+            "na ten temat — mało znane porady, kontrintuicyjne wnioski.\n"
+            "- STATYSTYKI: NIE podawaj konkretnych wartości % ani liczb jeśli nie ma ich w dostarczonych danych SERP. "
+            "Zamiast '30% mniejsze ryzyko' pisz 'znacząco mniejsze ryzyko'. Nigdy nie wymyślaj statystyk.\n"
             "- HUMANIZACJA: Mieszaj krótkie zdania (5-8 słów) z długimi (20-30 słów). "
-            "Używaj pytań retorycznych, porównań, konkretnych przykładów liczbowych. "
+            "Używaj pytań retorycznych, porównań, konkretnych przykładów. "
             "Nie pisz monotonnie — każdy akapit innym tonem.\n"
             f"AKTUALNOŚĆ: Mamy rok {_current_year}. NIE pisz o poprzednich latach jako aktualnych "
             f"(np. 'W 2023 roku...', 'trendy 2024'). Jeśli podajesz dane/statystyki — "
@@ -1018,12 +1028,12 @@ async def generate_article(
             "REQUIREMENTS:\n"
             "- Start with <h2>, add 1-2 <h3> subsections\n"
             "- Use <p>, <ul>/<li> or <ol>/<li> where appropriate\n"
-            "- Add <strong> for key terms and important facts\n"
+            "- Use <strong> MAX 1-2 times per section, only for the single most important term or a key number. Do NOT bold brand names, keyword variants, or multiple words per paragraph — it looks like spam.\n"
             "- Be specific — data, numbers, examples, practical tips\n"
-            "- E-E-A-T EXPERIENCE: Weave in 1-2 sentences from a practical perspective "
-            "('In practice, we often see...', 'A common mistake is...', 'Experience shows...'). "
-            "DON'T use first person 'I' — write as an expert who has seen hundreds of such cases.\n"
-            "- Don't repeat intro or conclusion\n"
+            "- E-E-A-T EXPERIENCE: Weave in 1-2 sentences from a practical perspective, "
+            "writing as an expert who has seen hundreds of such cases. Do NOT use first person 'I'. "
+            "Do NOT use template phrases — write originally.\n"
+            "- Each section must cover a DIFFERENT aspect of the topic. Do NOT repeat facts from other sections.\n"
             "- ENTITIES: Use specific proper nouns (brands, companies, products, places, standards, "
             "institutions) instead of generic terms. Google NLP recognizes entities — more relevant "
             "proper nouns related to the topic means better topical authority.\n"
@@ -1032,8 +1042,10 @@ async def generate_article(
             "Personnel changes frequently — GPT training data may be outdated. "
             "Use generic roles ('current minister', 'head of institution X') OR only name someone "
             "if they appear explicitly in the SERP data provided above.\n"
-            "- INFORMATION GAIN: Add 1-2 facts/data/perspectives that are MISSING from typical articles "
-            "on this topic — unique statistics, little-known tips, counterintuitive findings.\n"
+            "- INFORMATION GAIN: Add 1-2 facts/perspectives that are MISSING from typical articles "
+            "on this topic — little-known tips, counterintuitive findings.\n"
+            "- STATISTICS: Do NOT state specific percentages or numbers unless they appear in the provided SERP data. "
+            "Write 'significantly lower risk' instead of '30% lower risk'. Never invent statistics.\n"
             "- HUMANIZATION: Mix short sentences (5-8 words) with long ones (20-30 words). "
             "Use rhetorical questions, comparisons, specific numeric examples. "
             "Don't write monotonously — vary tone across paragraphs.\n"
@@ -1066,7 +1078,7 @@ async def generate_article(
                     f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian naturalnie w tekście (ok. {kw_per_section}x łącznie). "
                     f"Preferuj odmiany i synonimy zamiast dokładnego powtarzania.{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
-                    f"Pisz ekspercko: konkretne fakty, liczby, przykłady. Unikaj ogólników.{custom_block}"
+                    f"Pisz ekspercko: konkretne fakty, przykłady, porady praktyczne. Unikaj ogólników i zmyślonych statystyk.{custom_block}"
                 )
             else:
                 section_user = (
@@ -1076,7 +1088,7 @@ async def generate_article(
                     f"Target: ~{words_per_section} words. Use '{topic}' or its semantic variations naturally throughout (about {kw_per_section}x total). "
                     f"Prefer synonyms and paraphrases over exact repetition.{lsi_section_block}{_entity_block}\n"
                     f"Structure: <h2>{heading}</h2> → 1-2 <h3> subsections → <p> + lists/tables where relevant\n"
-                    f"Write expertly: specific facts, numbers, examples. Avoid vague generalities.{custom_block}"
+                    f"Write expertly: specific facts, examples, practical tips. Avoid vague generalities and invented statistics.{custom_block}"
                 )
             sec_html = await _gpt(section_system, section_user, temperature=0.7, max_tokens=_mt_section, model=_resolved_model)
             if not sec_html.strip().startswith("<"):
@@ -1142,12 +1154,16 @@ async def generate_article(
         "Jesteś ekspertem SEO. Piszesz zakończenie artykułu w HTML.\n"
         "BEZWZGLĘDNY ZAKAZ: NIE używaj markdown. NIE pisz ## ani ### ani # ani **tekst**. "
         "TYLKO tagi HTML: <h2>, <p>, <ul>, <li>, <strong>.\n"
-        "ENCJE OSOBOWE: NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników."
+        "STATYSTYKI: NIE podawaj konkretnych % ani liczb jeśli nie masz ich z danych SERP. Pisz ogólnie.\n"
+        "ENCJE OSOBOWE: NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników.\n"
+        "DUPLIKATY: NIE powtarzaj dosłownie zdań które pojawiły się wcześniej w artykule. Zakończenie wnosi nową perspektywę."
     ) if lang_pl else (
         "You are an SEO expert. Write article conclusion in HTML.\n"
         "STRICT: NO markdown. Never use ## or ### or # or **text**. "
         "ONLY HTML tags: <h2>, <p>, <ul>, <li>, <strong>.\n"
-        "PERSONAL ENTITIES: Do NOT name from memory any politicians, ministers, presidents or other officeholders."
+        "STATISTICS: Do NOT state specific percentages or numbers unless from provided SERP data. Write generally.\n"
+        "PERSONAL ENTITIES: Do NOT name from memory any politicians, ministers, presidents or other officeholders.\n"
+        "DUPLICATES: Do NOT repeat sentences that appeared earlier in the article. The conclusion adds a new perspective."
     )
 
     paa_block = ""
@@ -1195,10 +1211,12 @@ async def generate_article(
         )
     _faq_system = (
         "Jesteś ekspertem SEO. Tworzysz FAQ zoptymalizowane pod featured snippets, AI Overview i PAA (People Also Ask). "
-        "NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników — użyj ogólnych ról."
+        "NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników — użyj ogólnych ról. "
+        "STATYSTYKI: NIE podawaj konkretnych % ani liczb jeśli nie ma ich w danych SERP. Nigdy nie wymyślaj statystyk."
         if lang_pl else
         "You are an SEO expert creating FAQ optimized for featured snippets, AI Overview, and PAA (People Also Ask). "
-        "Do NOT name from memory any politicians, ministers, presidents or other officeholders — use generic roles."
+        "Do NOT name from memory any politicians, ministers, presidents or other officeholders — use generic roles. "
+        "STATISTICS: Do NOT state specific percentages or numbers unless from the provided SERP data. Never invent statistics."
     )
     # SEO #5: intent-based CTA for meta description
     _cta_map_pl = {
@@ -1357,6 +1375,59 @@ async def generate_article(
 
     # Fix heading hierarchy (H3 before H2, skipped levels, etc.)
     content = _fix_heading_hierarchy(content)
+
+    # Post-processing: remove AI-fingerprint template phrases
+    _AI_PHRASES_PL = [
+        r"W\s+praktyce\s+często\s+spotykamy",
+        r"Z\s+doświadczenia\s+wynika",
+        r"Typow[yi]\s+błąd\s+to",
+        r"Warto\s+zauważyć,?\s+że",
+        r"Warto\s+podkreślić,?\s+że",
+        r"Należy\s+zaznaczyć,?\s+że",
+        r"Nie\s+ulega\s+wątpliwości,?\s+że",
+        r"Co\s+więcej,",
+        r"Podsumowując,",
+        r"W\s+kontekście\s+(?:tego|powyższego),",
+        r"Warto\s+dodać,?\s+że",
+        r"Należy\s+pamiętać,?\s+że",
+        r"Jak\s+już\s+wspomniano,",
+        r"W\s+tym\s+miejscu\s+warto",
+        r"Jak\s+wynika\s+z\s+powyższego",
+    ]
+    _AI_PHRASES_EN = [
+        r"In\s+practice,?\s+we\s+often\s+(?:see|encounter)",
+        r"It\s+is\s+worth\s+(?:noting|mentioning)\s+that",
+        r"It\s+should\s+be\s+noted\s+that",
+        r"A\s+common\s+mistake\s+is",
+        r"Furthermore,",
+        r"In\s+summary,",
+        r"In\s+the\s+context\s+of",
+        r"It\s+goes\s+without\s+saying",
+        r"Needless\s+to\s+say,",
+        r"As\s+mentioned\s+above,",
+        r"As\s+previously\s+mentioned,",
+    ]
+    _phrases = _AI_PHRASES_PL if lang_pl else _AI_PHRASES_EN
+    for _phrase_pat in _phrases:
+        content = re.sub(r'(?i)' + _phrase_pat + r'\s*', '', content)
+    # Fix orphaned punctuation/conjunctions after phrase removal
+    content = re.sub(r'(<p[^>]*>)\s*,\s*', r'\1', content)
+    # Capitalize first word after <p> if it starts lowercase (result of phrase removal)
+    content = re.sub(r'(<p[^>]*>)\s*([a-ząćęłńóśźż])', lambda m: m.group(1) + m.group(2).upper(), content)
+    # Capitalize after ". " if next word is lowercase (phrase removed mid-sentence)
+    content = re.sub(r'(\.\s+)([a-ząćęłńóśźża-z])', lambda m: m.group(1) + m.group(2).upper(), content)
+
+    # Post-processing: limit <strong> usage — max 8 total in entire article
+    # GPT abuses <strong> on every keyword variant and brand name — cap it hard
+    _strong_all = re.findall(r'<strong>.*?</strong>', content, flags=re.DOTALL | re.IGNORECASE)
+    if len(_strong_all) > 8:
+        _strong_counter = [0]
+        def _limit_strong(m: re.Match) -> str:
+            _strong_counter[0] += 1
+            if _strong_counter[0] <= 8:
+                return m.group(0)
+            return re.sub(r'</?strong>', '', m.group(0))
+        content = re.sub(r'<strong>.*?</strong>', _limit_strong, content, flags=re.DOTALL | re.IGNORECASE)
 
     # FIX: strip body content accidentally placed inside h2/h3 tags
     def _clean_heading_openai(m: re.Match) -> str:

@@ -257,9 +257,14 @@ Na podstawie powyższej analizy:
             "FACT-CHECK: Podawaj TYLKO aktualne fakty. Jeśli nie jesteś pewny aktualności danych "
             "(np. kto pełni urząd, aktualne przepisy, ceny, statystyki) — napisz 'według danych z [rok]' "
             "lub pomiń. NIE podawaj faktów które mogły się zdezaktualizować jako pewnik. "
+            "STATYSTYKI: NIE podawaj konkretnych wartości % ani liczbowych jeśli nie ma ich w dostarczonych danych SERP. "
+            "Zamiast '30% mniejsze ryzyko' pisz 'znacząco mniejsze ryzyko'. Nigdy nie wymyślaj liczb. "
             "NAGŁÓWKI: Tekst H2/H3 to TYLKO krótki tytuł sekcji (3-8 słów). "
             "NIGDY nie wstawiaj pełnych zdań, akapitów ani treści do wnętrza tagów <h2> lub <h3>. "
             "Treść idzie WYŁĄCZNIE w tagach <p>, <ul>, <ol>. "
+            "POGRUBIENIE: Użyj <strong> na główną frazę kluczową DOKŁADNIE RAZ — tylko w pierwszym akapicie. "
+            "NIE pogrubiaj tej samej frazy wielokrotnie. "
+            "DUPLIKATY: Każdy akapit musi wnosić NOWĄ informację. NIE powtarzaj tych samych faktów w różnych akapitach. "
             "ENCJE OSOBOWE: NIE podawaj z pamięci nazwisk polityków, ministrów ani urzędników."
         )
         user_prompt = f"""Napisz kompletny artykuł SEO na frazę: '{keyword}'.{variation}
@@ -306,9 +311,14 @@ Tylko JSON, bez markdown."""
             f"TODAY'S DATE: {_current_date}. YEAR: {_current_year}. "
             "FACT-CHECK: Only state facts you are confident are current. If unsure about recency "
             "(officeholders, current laws, prices, statistics) — write 'as of [year]' or omit. "
+            "STATISTICS: Do NOT state specific percentages or numbers unless they appear in the provided SERP data. "
+            "Write 'significantly lower risk' instead of '30% lower risk'. Never invent statistics. "
             "HEADINGS: H2/H3 text must be ONLY a short section title (3-8 words). "
             "NEVER place full sentences, paragraphs or body content inside <h2> or <h3> tags. "
             "Content goes ONLY inside <p>, <ul>, <ol> tags. "
+            "BOLD: Use <strong> on the main keyword EXACTLY ONCE — only in the first paragraph. "
+            "Do NOT bold the same phrase multiple times. "
+            "DUPLICATES: Each paragraph must add NEW information. Do NOT repeat the same facts in different paragraphs. "
             "PERSONAL ENTITIES: Do NOT name from memory politicians, ministers or officeholders."
         )
         user_prompt = f"""Write a complete SEO article for keyword: '{keyword}'.{variation}
@@ -382,6 +392,8 @@ JSON only, no markdown."""
             await asyncio.sleep(2 ** attempt)
             logger.warning(f"[ContentWriter] GPT attempt {attempt+1} failed: {e}")
 
+    if not response.choices:
+        raise ValueError("[ContentWriter] GPT returned empty choices — possible content filter")
     raw = response.choices[0].message.content
     data = json.loads(raw)
     content = data.get("content", "")
@@ -397,6 +409,55 @@ JSON only, no markdown."""
         last_space = trimmed.rfind(" ")
         if last_space > 40:
             title_out = trimmed[:last_space].rstrip(" ,.;:-")
+
+    # Post-processing: remove AI-fingerprint template phrases (language-specific)
+    _AI_PHRASES_PL_CW = [
+        r"W\s+praktyce\s+często\s+spotykamy",
+        r"Z\s+doświadczenia\s+wynika",
+        r"Typow[yi]\s+błąd\s+to",
+        r"Warto\s+zauważyć,?\s+że",
+        r"Warto\s+podkreślić,?\s+że",
+        r"Należy\s+zaznaczyć,?\s+że",
+        r"Nie\s+ulega\s+wątpliwości,?\s+że",
+        r"Co\s+więcej,",
+        r"Podsumowując,",
+        r"W\s+kontekście\s+(?:tego|powyższego),",
+        r"Warto\s+dodać,?\s+że",
+        r"Należy\s+pamiętać,?\s+że",
+        r"Jak\s+już\s+wspomniano,",
+        r"W\s+tym\s+miejscu\s+warto",
+        r"Jak\s+wynika\s+z\s+powyższego",
+    ]
+    _AI_PHRASES_EN_CW = [
+        r"In\s+practice,?\s+we\s+often\s+(?:see|encounter)",
+        r"It\s+is\s+worth\s+(?:noting|mentioning)\s+that",
+        r"It\s+should\s+be\s+noted\s+that",
+        r"A\s+common\s+mistake\s+is",
+        r"Furthermore,",
+        r"In\s+summary,",
+        r"It\s+goes\s+without\s+saying",
+        r"Needless\s+to\s+say,",
+        r"As\s+mentioned\s+above,",
+        r"As\s+previously\s+mentioned,",
+    ]
+    _cw_phrases = _AI_PHRASES_PL_CW if language == "pl" else _AI_PHRASES_EN_CW
+    for _phrase_pat in _cw_phrases:
+        content = re.sub(r'(?i)' + _phrase_pat + r'\s*', '', content)
+    # Fix orphaned punctuation/lowercase after phrase removal
+    content = re.sub(r'(<p[^>]*>)\s*,\s*', r'\1', content)
+    content = re.sub(r'(<p[^>]*>)\s*([a-ząćęłńóśźż])', lambda m: m.group(1) + m.group(2).upper(), content)
+    content = re.sub(r'(\.\s+)([a-ząćęłńóśźża-z])', lambda m: m.group(1) + m.group(2).upper(), content)
+
+    # Limit <strong> usage — max 8 total in entire article
+    _cw_strong_all = re.findall(r'<strong>.*?</strong>', content, flags=re.DOTALL | re.IGNORECASE)
+    if len(_cw_strong_all) > 8:
+        _cw_strong_counter = [0]
+        def _limit_strong_cw(m: re.Match) -> str:
+            _cw_strong_counter[0] += 1
+            if _cw_strong_counter[0] <= 8:
+                return m.group(0)
+            return re.sub(r'</?strong>', '', m.group(0))
+        content = re.sub(r'<strong>.*?</strong>', _limit_strong_cw, content, flags=re.DOTALL | re.IGNORECASE)
 
     # Sanitize headings in content: remove any block-level content mistakenly placed inside h2/h3
     def _clean_heading(m):

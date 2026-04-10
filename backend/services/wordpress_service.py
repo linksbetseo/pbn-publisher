@@ -69,7 +69,7 @@ async def get_or_create_category(
     if not slug:
         slug = re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")
 
-    async with httpx.AsyncClient(verify=False, timeout=20, auth=site_auth) as client:
+    async with httpx.AsyncClient(verify=False, timeout=20, auth=site_auth, follow_redirects=True) as client:
         for base in _base_url(domain):
             try:
                 # Sprawdź czy kategoria już istnieje (po slug)
@@ -110,7 +110,7 @@ async def get_categories(domain: str, wp_login: str, wp_pass: str, http_user: st
     headers = {"Authorization": auth}
     site_auth = _http_auth(http_user, http_pass)
     result = []
-    async with httpx.AsyncClient(verify=False, timeout=20, auth=site_auth) as client:
+    async with httpx.AsyncClient(verify=False, timeout=20, auth=site_auth, follow_redirects=True) as client:
         for base in _base_url(domain):
             try:
                 resp = await client.get(
@@ -408,7 +408,7 @@ async def publish_post(
     urls_to_try = _base_url(domain)
 
     last_error = None
-    async with httpx.AsyncClient(verify=False, timeout=30, auth=site_auth) as client:
+    async with httpx.AsyncClient(verify=False, timeout=30, auth=site_auth, follow_redirects=True) as client:
         for base_url in urls_to_try:
             try:
                 media_id = None
@@ -657,7 +657,7 @@ async def check_wp_credentials(domain: str, wp_login: str, wp_pass: str, http_us
     """Quick WP REST API credentials check. Returns True if valid."""
     auth = _auth_header(wp_login, wp_pass)
     site_auth = _http_auth(http_user, http_pass)
-    async with httpx.AsyncClient(verify=False, timeout=10, auth=site_auth) as client:
+    async with httpx.AsyncClient(verify=False, timeout=10, auth=site_auth, follow_redirects=True) as client:
         for base in _base_url(domain):
             try:
                 resp = await client.get(
