@@ -16,6 +16,7 @@ Requirements:
 
 import argparse
 import asyncio
+import io
 import json
 import os
 import re
@@ -24,6 +25,12 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+# Force UTF-8 output on Windows (avoids UnicodeEncodeError for Polish chars / arrows)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import httpx
 
@@ -225,22 +232,45 @@ async def wait_for_job(job_id: str) -> Optional[str]:
 
 
 async def fetch_article_text(url: str) -> str:
-    """Fetch published article and extract text content."""
+    """Fetch published article text via WP REST API (slug-based), fallback to scrape."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    slug = parsed.path.strip("/").split("/")[-1]
+
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        # Try WordPress REST API first (gets full rendered content even with JS themes)
+        try:
+            api_url = f"{base}/wp-json/wp/v2/posts?slug={slug}&_fields=title,content,excerpt"
+            resp = await client.get(api_url)
+            data = resp.json()
+            if isinstance(data, list) and data:
+                post = data[0]
+                rendered = post.get("content", {}).get("rendered", "")
+                if rendered:
+                    soup = BeautifulSoup(rendered, "html.parser")
+                    text = soup.get_text(separator="\n", strip=True)
+                    if len(text.split()) > 100:
+                        return text
+        except Exception:
+            pass
+
+        # Fallback: direct page scrape
         try:
             resp = await client.get(url)
             soup = BeautifulSoup(resp.text, "html.parser")
-            # Try to extract main content
             article = (
                 soup.find("article") or
                 soup.find(class_=re.compile(r"entry-content|post-content|article-content")) or
                 soup.find("main")
             )
             if article:
-                # Remove navigation, sidebars, ads
                 for el in article.find_all(["nav", "aside", "footer", "script", "style"]):
                     el.decompose()
-                return article.get_text(separator="\n", strip=True)
+                text = article.get_text(separator="\n", strip=True)
+                if len(text.split()) > 50:
+                    return text
             return soup.get_text(separator="\n", strip=True)[:8000]
         except Exception as e:
             print(f"  [!] Failed to fetch article: {e}")
@@ -248,30 +278,48 @@ async def fetch_article_text(url: str) -> str:
 
 
 def score_article_with_ceo(article_text: str, iteration: int) -> dict:
-    """Send article to Claude Opus for scoring. Returns parsed JSON."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("\n  [!] ANTHROPIC_API_KEY not set!")
-        print("  [!] Add it to backend/.env or set as env var:")
-        print("  [!]   ANTHROPIC_API_KEY=sk-ant-...")
+    """Send article to Claude Opus (or GPT-4o fallback) for scoring. Returns parsed JSON."""
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
+
+    raw = None
+
+    if anthropic_key:
+        print(f"  [~] CEO (claude-opus-4-6) scoring iteration {iteration}...")
+        ceo_client = anthropic.Anthropic(api_key=anthropic_key)
+        message = ceo_client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=2000,
+            system=CEO_SYSTEM,
+            messages=[{"role": "user", "content": f"Oceń poniższy artykuł:\n\n{article_text[:7000]}"}]
+        )
+        raw = message.content[0].text
+
+    elif openai_key:
+        print(f"  [~] CEO (gpt-4o — fallback, no ANTHROPIC_API_KEY) scoring iteration {iteration}...")
+        try:
+            from openai import OpenAI as _OAI
+            oai = _OAI(api_key=openai_key)
+            resp = oai.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=2000,
+                messages=[
+                    {"role": "system", "content": CEO_SYSTEM},
+                    {"role": "user", "content": f"Oceń poniższy artykuł:\n\n{article_text[:7000]}"}
+                ]
+            )
+            raw = resp.choices[0].message.content
+        except ImportError:
+            print("  [!] pip install openai")
+            sys.exit(1)
+    else:
+        print("\n  [!] Neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set!")
+        print("  [!] Add to backend/.env:  ANTHROPIC_API_KEY=sk-ant-...")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
-    print(f"  [~] CEO (Opus 4.6) scoring iteration {iteration}...")
+    if not raw:
+        return {"total": 0, "verdict": "FAIL", "top_issues": ["Empty CEO response"], "prompt_fixes": []}
 
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=2000,
-        system=CEO_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Oceń poniższy artykuł:\n\n{article_text[:7000]}"
-            }
-        ]
-    )
-
-    raw = message.content[0].text
     # Extract JSON block
     json_match = re.search(r'```(?:json)?\s*(\{[\s\S]+?\})\s*```', raw)
     if not json_match:
@@ -290,14 +338,14 @@ def score_article_with_ceo(article_text: str, iteration: int) -> dict:
 
 def apply_prompt_fixes(fixes: list[str], top_issues: list[str], iteration: int) -> bool:
     """
-    Use Claude Opus to modify openai_service.py based on CEO feedback.
+    Use Claude Opus (or GPT-4o fallback) to modify openai_service.py based on CEO feedback.
     Returns True if changes were made.
     """
     if not fixes and not top_issues:
         return False
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    client = anthropic.Anthropic(api_key=api_key)
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
 
     # Read current service file
     current_code = OPENAI_SERVICE.read_text(encoding="utf-8")
@@ -345,13 +393,32 @@ KOD PLIKU (fragment z promptami — znaki 38000-75000):
 {current_code[38000:75000]}
 """
 
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    raw = None
+    if anthropic_key:
+        fix_client = anthropic.Anthropic(api_key=anthropic_key)
+        message = fix_client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = message.content[0].text
+    elif openai_key:
+        try:
+            from openai import OpenAI as _OAI
+            oai = _OAI(api_key=openai_key)
+            resp = oai.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            raw = resp.choices[0].message.content
+        except ImportError:
+            return False
+    else:
+        return False
 
-    raw = message.content[0].text
+    if not raw:
+        return False
     json_match = re.search(r'```(?:json)?\s*(\[[\s\S]+?\])\s*```', raw)
     if not json_match:
         json_match = re.search(r'(\[[\s\S]+\])', raw)
@@ -462,11 +529,11 @@ async def run_iteration(domain: str, iteration: int) -> Optional[dict]:
     issues = result.get("top_issues", [])
     fixes = result.get("prompt_fixes", [])
 
-    print(f"\n  CEO VERDICT: {verdict} — Total: {total}/100")
+    print(f"\n  CEO VERDICT: {verdict} -- Total: {total}/100")
     print("  Scores:")
     for k, v in scores.items():
-        bar = "█" * v + "░" * (10 - v)
-        print(f"    {k:25s} {bar} {v}/10")
+        bar = "#" * v + "." * (10 - v)
+        print(f"    {k:25s} [{bar}] {v}/10")
     print(f"\n  Top issues:")
     for issue in issues:
         print(f"    • {issue}")
