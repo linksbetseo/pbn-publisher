@@ -924,10 +924,10 @@ async def generate_article(
             f"Napisz wstęp do artykułu '{title}' (keyword: '{topic}').\n"
             f"Intencja wyszukiwania: {intent_analysis}\n"
             f"Sekcje artykułu: {', '.join(sections[:4])}\n"
-            f"PIERWSZY AKAPIT musi zaczynać się od definicji '{topic}' — konkretna, prosta odpowiedź.\n"
+            f"PIERWSZY AKAPIT musi zaczynać się od precyzyjnej definicji (np. 'Vitallokum oznacza...') '{topic}' — konkretna, prosta odpowiedź.\n"
             f"Użyj '{topic}' {intro_kw_count}x naturalnie.{lsi_block}\n"
             f"Tylko HTML <p> i <strong>, bez nagłówków. OK do użycia <ul>/<li> jeśli pasuje.\n"
-            f"WAŻNE: Każdy akapit wstępu musi wnosić NOWĄ informację. NIE powtarzaj tego samego zdania ani faktu w różnych akapitach.\n"
+            f"WAŻNE: Każdy akapit wstępu musi wnosić NOWĄ informację. NIE powtarzaj korzyści zdrowotnych tańca w różnych sekcjach artykułu. NIE powtarzaj tego samego zdania ani faktu w różnych akapitach.\n"
             f"HUMANIZACJA: Mieszaj krótkie i długie zdania. Użyj 1 pytania retorycznego.{custom_block}"
         )
     else:
@@ -1077,7 +1077,7 @@ async def generate_article(
                     f"Intencja: {intent_analysis}\n"
                     f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian MAKSYMALNIE {kw_per_section}x — preferuj synonimy i odmiany, NIE powtarzaj dokładnej frazy więcej niż 1-2x per sekcja.{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
-                    f"ENCJE: Każda sekcja musi wprowadzać NOWE encje (marki, badania, instytucje, osoby) których nie było w poprzednich sekcjach. NIE powtarzaj tych samych 3-4 encji przez cały artykuł.\n"
+                    f"ENCJE: Każda sekcja MUSI wprowadzać NOWE unikalne encje (np. nazwy konkretnych badań, instytucji) (marki, badania, instytucje, osoby) których nie było w poprzednich sekcjach. NIE powtarzaj tych samych 3-4 encji przez cały artykuł.\n"
                     f"Pisz ekspercko: konkretne fakty, przykłady, porady praktyczne. Unikaj ogólników i zmyślonych statystyk.{custom_block}"
                 )
             else:
@@ -1156,7 +1156,7 @@ async def generate_article(
         "TYLKO tagi HTML: <h2>, <p>, <ul>, <li>, <strong>.\n"
         "STATYSTYKI: NIE podawaj konkretnych % ani liczb jeśli nie masz ich z danych SERP. Pisz ogólnie.\n"
         "ENCJE OSOBOWE: NIE podawaj z pamięci nazwisk polityków, ministrów, prezydentów ani innych urzędników.\n"
-        "DUPLIKATY: NIE powtarzaj dosłownie zdań które pojawiły się wcześniej w artykule. Zakończenie wnosi nową perspektywę."
+        "DUPLIKATY: NIE powtarzaj informacji ani zdań, szczególnie tych dotyczących korzyści zdrowotnych tańca. Zakończenie wnosi nową perspektywę."
     ) if lang_pl else (
         "You are an SEO expert. Write article conclusion in HTML.\n"
         "STRICT: NO markdown. Never use ## or ### or # or **text**. "
