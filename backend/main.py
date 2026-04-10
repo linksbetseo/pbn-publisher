@@ -323,6 +323,53 @@ async def _weekly_deindex_cron():
             logger.error(f"[DeindexCron] Error: {e}", exc_info=True)
 
 
+async def _quality_gate_cron():
+    """Independent background worker — runs quality gate loop for domains not yet passed.
+
+    Runs every hour and checks all active domains. For each domain that hasn't passed yet
+    (status != 'passed') it kicks off the gate loop. This is non-blocking — autopilot
+    just reads the gate status and skips domains not yet passed; this cron does the heavy work.
+    """
+    await asyncio.sleep(60)  # startup delay — let DB init settle
+    while True:
+        try:
+            from services.quality_gate_service import quality_gate_check, quality_gate_run, _ensure_tables
+            await _ensure_tables()
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    """SELECT ds.id, md.domain
+                       FROM domain_schedules ds
+                       JOIN my_domains md ON md.id = ds.my_domain_id
+                       WHERE ds.active = 1 AND md.active = 1 AND ds.map_generated = 1"""
+                ) as cur:
+                    schedules = [dict(r) for r in await cur.fetchall()]
+
+            pending = []
+            for sched in schedules:
+                passed = await quality_gate_check(sched["domain"])
+                if not passed:
+                    pending.append(sched)
+
+            if pending:
+                logger.info(f"[QualityGateCron] {len(pending)} domain(s) pending gate: {[s['domain'] for s in pending]}")
+                for sched in pending:
+                    domain = sched["domain"]
+                    logger.info(f"[QualityGateCron] Starting gate loop for {domain}")
+                    try:
+                        result = await quality_gate_run(domain, sched["id"])
+                        logger.info(f"[QualityGateCron] {domain} gate finished: status={result.get('status')} score={result.get('score')}")
+                    except Exception as e:
+                        logger.error(f"[QualityGateCron] {domain} gate error: {e}", exc_info=True)
+            else:
+                logger.info("[QualityGateCron] All active domains have passed quality gate")
+
+        except Exception as e:
+            logger.error(f"[QualityGateCron] Error: {e}", exc_info=True)
+
+        await asyncio.sleep(3600)  # re-check every hour
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -467,6 +514,7 @@ async def lifespan(app: FastAPI):
         (_date_modified_refresh_cron(), "date-modified-refresh"),
         (_weekly_deindex_cron(), "weekly-deindex"),
         (_news_autopilot_cron(), "news-autopilot"),
+        (_quality_gate_cron(), "quality-gate"),
     ]:
         t = asyncio.create_task(_coro, name=_name)
         t.add_done_callback(_cron_done_callback)

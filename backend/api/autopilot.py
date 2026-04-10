@@ -2199,9 +2199,9 @@ async def run_daily_all():
         ) as cur:
             schedules = [dict(r) for r in await cur.fetchall()]
 
-    # Quality gate check — run gate loop for domains that haven't passed yet
+    # Quality gate check — fast status-only read; gate loop runs independently in _quality_gate_cron
     try:
-        from services.quality_gate_service import quality_gate_check, quality_gate_run
+        from services.quality_gate_service import quality_gate_check
         _gate_enabled = True
     except ImportError:
         logger.warning("[Daily] quality_gate_service not available — skipping gate checks")
@@ -2212,17 +2212,13 @@ async def run_daily_all():
             domain = sched["domain"]
             passed = await quality_gate_check(domain)
             if not passed:
-                logger.info(f"[Daily] {domain} has not passed quality gate — running gate loop now")
-                gate_result = await quality_gate_run(domain, sched["id"])
-                gate_score = gate_result.get("score", 0)
-                gate_status = gate_result.get("status", "unknown")
-                logger.info(f"[Daily] {domain} gate result: {gate_status} score={gate_score}")
-                sched["_gate_passed"] = gate_status in ("passed",)
-                sched["_gate_score"] = gate_score
+                logger.info(f"[Daily] {domain} skipped — quality gate not yet passed (gate runs in background)")
+                sched["_gate_passed"] = False
+                sched["_gate_score"] = 0
             else:
-                logger.info(f"[Daily] {domain} already passed quality gate — proceeding with autopilot")
+                logger.info(f"[Daily] {domain} quality gate passed — proceeding with autopilot")
                 sched["_gate_passed"] = True
-                sched["_gate_score"] = 100  # already passed
+                sched["_gate_score"] = 100
 
     # Anti-fingerprint: stagger publishing across domains with random delays
     # Each domain publishes 3-15 minutes after the previous one
