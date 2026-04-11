@@ -1317,8 +1317,8 @@ async def generate_article(
         ) if tldr_sentence else ""
         content_parts = [tldr_box, intro_html] + sections_html + [conclusion_html, faq_html]
     elif layout_variant == "short_answer":
-        # Featured snippet box — first sentence only (definition), then full intro follows
-        # NOTE: sa_box takes only the FIRST SENTENCE to avoid duplicating the full intro
+        # Featured snippet box — first sentence only (definition).
+        # Then intro_html with that first sentence STRIPPED to avoid literal duplication.
         sa_intro_plain = re.sub(r'<[^>]+>', '', intro_html).strip()
         first_dot = sa_intro_plain.find('.')
         sa_text = sa_intro_plain[:first_dot + 1].strip() if first_dot > 0 and first_dot < 300 else sa_intro_plain[:200]
@@ -1327,7 +1327,16 @@ async def generate_article(
             f'margin:16px 0 24px;border-radius:8px;">'
             f'{sa_text}</div>'
         ) if sa_text else ""
-        content_parts = [sa_box, intro_html] + sections_html + [conclusion_html, faq_html]
+        # Remove the first <p> from intro_html if it starts with the same sentence as sa_box
+        intro_html_trimmed = intro_html
+        if sa_text:
+            # Strip first <p>...</p> block if its text content starts with sa_text (or close match)
+            first_p_match = re.match(r'\s*<p[^>]*>(.*?)</p>', intro_html, re.DOTALL | re.IGNORECASE)
+            if first_p_match:
+                first_p_text = re.sub(r'<[^>]+>', '', first_p_match.group(1)).strip()
+                if first_p_text.startswith(sa_text[:60]):
+                    intro_html_trimmed = intro_html[first_p_match.end():].lstrip()
+        content_parts = [sa_box, intro_html_trimmed] + sections_html + [conclusion_html, faq_html]
     else:
         # Standard layout
         content_parts = [intro_html] + sections_html + [conclusion_html, faq_html]
