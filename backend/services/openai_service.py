@@ -989,7 +989,8 @@ async def generate_article(
     # ── STEP 6: Sections (parallel) ───────────────────────────────────────────
     # FIX #6: removed 1.2x multiplier — target_words already 12% above avg; don't double-inflate
     words_per_section = max(280, target_words // max(1, len(sections)))
-    kw_per_section = max(1, round(words_per_section * target_density / 100))
+    # Cap keyword density per section at 1.5% max (audit: max 3-4x/1000 words)
+    kw_per_section = max(1, min(round(words_per_section * target_density / 100), max(1, round(words_per_section * 0.015))))
     # Pick 3-4 LSI terms per section (rotate through the list)
     lsi_per_section = lsi_terms[:15] if lsi_terms else []
 
@@ -1001,14 +1002,17 @@ async def generate_article(
             "- Używaj <p>, <ul>/<li> lub <ol>/<li> tam gdzie pasuje\n"
             "- <strong> używaj MAKSYMALNIE 1-2 razy per sekcja, tylko dla kluczowego terminu lub ważnej liczby. NIE pogrubiaj nazw marek, odmian frazy kluczowej ani każdego słowa — to wygląda jak spam.\n"
             "- Pisz szczegółowo — używaj konkretnych i praktycznych przykładów, badań w kontekście zdrowia, liczby i dane, porady praktyczne z głęboką analizą każdego aspektu.\n"
-            "- DOŚWIADCZENIE E-E-A-T: Wpleć 1-2 zdania z perspektywy praktycznej — "
-            "konkretna obserwacja eksperta, specyficzny przypadek, wynik badania lub kontrargument. "
-            "Np. 'Badania na Uniwersytecie Harvarda pokazują...' lub 'W praktyce klinicznej najczęstszym błędem jest...'. "
-            "NIE pisz 'ja'. NIE używaj szablonowych zwrotów — pisz oryginalnie i konkretnie.\n"
-            "- Każda sekcja musi pokrywać ODMIENNY aspekt tematu z unikalnymi i specyficznymi informacjami oraz nowymi perspektywami. Unikaj powtarzania faktów i upewnij się, że każda sekcja wnosi coś unikalnego do artykułu.\n"
-            "- ENCJE: Używaj konkretnych nazw własnych (marki, firmy, produkty, miejsca, normy, "
-            "instytucje) zamiast ogólników. Google NLP rozpoznaje encje — im więcej trafnych nazw "
-            "własnych powiązanych z tematem, tym lepszy topical authority.\n"
+            "- E-E-A-T CYTOWANIA: W każdej sekcji wpleć MINIMUM 1 konkretne badanie lub źródło w formacie: "
+            "'[Nazwa badania/programu/instytucji] ([rok]) wykazało/pokazuje/podaje, że...'. "
+            "Przykłady akceptowane: 'Raport WHO (2024) wskazuje...', 'Program Moje Zdrowie NFZ (2023) obejmuje...', "
+            "'Badanie opublikowane w European Heart Journal (2023) wykazało...'. "
+            "ZAKAZ: nie pisz 'badania pokazują', 'eksperci twierdzą', 'według naukowców' bez konkretnej nazwy. "
+            "Jeśli nie masz weryfikowalnego źródła z SERP — opisz zjawisko bez statystyki.\n"
+            "- ENCJE — MINIMUM 3 NOWE per sekcja: Każda sekcja MUSI wprowadzać co najmniej 3 unikalne nazwy własne "
+            "(marki, instytucje, produkty, programy, normy, aplikacje) których NIE było w poprzednich sekcjach. "
+            "Google NLP ocenia topical authority przez liczbę unikalnych encji. "
+            "NIE powtarzaj tych samych 3-4 encji (np. NFZ, WHO, MZ) przez cały artykuł — każda sekcja to nowe nazwy.\n"
+            "- Każda sekcja musi pokrywać ODMIENNY aspekt tematu. Zakaz powtarzania faktów z poprzednich sekcji.\n"
             f"- ENCJE OSOBOWE — ZAKAZ HALUCYNACJI: NIE podawaj z pamięci nazwisk polityków, "
             "ministrów, prezydentów, premierów, dyrektorów ani innych osób pełniących urzędy/funkcje. "
             "Dane osobowe zmieniają się — GPT może mieć nieaktualne dane. "
@@ -1089,8 +1093,10 @@ async def generate_article(
                     f"Intencja: {intent_analysis}\n"
                     f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian MAKSYMALNIE {kw_per_section}x — preferuj synonimy i odmiany naturalne, NIE powtarzaj dokładnej frazy więcej niż 1-2x per sekcja. Unikaj sztucznych powtórzeń.{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
-                    f"ENCJE: Każda sekcja MUSI wprowadzać NOWE, różnorodne encje (nazwy instytucji, marki, produkty), które nie były użyte w poprzednich sekcjach. NIE powtarzaj tych samych encji przez cały artykuł.\n"
-                    f"Pisz ekspercko już od pierwszych zdań: zawrzyj konkretne fakty, przykłady i porady praktyczne. Unikaj ogólników i zmyślonych statystyk.{custom_block}"
+                    f"ENCJE: Wprowadź MINIMUM 3 NOWE nazwy własne (instytucje, marki, produkty, programy, aplikacje) nieużyte w poprzednich sekcjach. Sekcja bez 3 nowych encji = thin content.\n"
+                    f"E-E-A-T: Podaj MINIMUM 1 konkretne źródło z nazwą i rokiem, np. 'Raport GUS (2024)' lub 'Wytyczne PTK (2023)'. NIE pisz 'badania pokazują' bez nazwy — to AI footprint.\n"
+                    f"KEYWORD: użyj frazy '{topic}' MAX {kw_per_section}x w tej sekcji. Przekroczenie = keyword stuffing.\n"
+                    f"Pisz ekspercko: konkretne fakty, przykłady praktyczne. Unikaj ogólników.{custom_block}"
                 )
             else:
                 section_user = (
