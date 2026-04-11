@@ -729,8 +729,8 @@ async def generate_article(
     paa_questions = serp_data.get("paa_questions", [])
     serp_urls = serp_data.get("serp_urls", [])
 
-    # FIX #3: quality over quantity — minimum 2500, target 15-20% above avg, cap 3500
-    target_words = max(2500, min(3500, int(avg_words * 1.18)))
+    # FIX #3: quality over quantity — minimum 2800, target 15-20% above avg, cap 3500
+    target_words = max(2800, min(3500, int(avg_words * 1.18)))
     # FIX #4: tighter density range — 0.8-1.8% sweet spot (enrichment blocks add ~0.2-0.5%)
     target_density = round(max(0.8, min(1.8, avg_density)), 1)
     lsi_block = f"\nSłowa semantyczne LSI do użycia: {', '.join(lsi_terms[:15])}" if lsi_terms else ""
@@ -811,7 +811,8 @@ async def generate_article(
     _entity_block = f"\nEncje do użycia (entity gap fill — użyj WSZYSTKICH): {_extracted_entities}" if _extracted_entities else ""
 
     # FIX #5: section count based on 250-300 words per section (was 200 → too many thin sections)
-    n_sections = max(4, min(8, round(target_words / 280)))
+    # Minimum 5 sections for PL articles — 4 was too few for 2800+ word target
+    n_sections = max(5 if lang_pl else 4, min(8, round(target_words / 280)))
     if lang_pl:
         outline_user = (
             f"Stwórz outline artykułu SEO dla frazy: '{topic}'\n"
@@ -1443,7 +1444,9 @@ async def generate_article(
     ]
     _phrases = _AI_PHRASES_PL if lang_pl else _AI_PHRASES_EN
     for _phrase_pat in _phrases:
-        content = re.sub(r'(?i)' + _phrase_pat + r'\s*', '', content)
+        # Remove the phrase AND trailing fragment up to next sentence boundary or comma
+        # Avoids leaving orphaned "się z sytuacjami" after removing "W praktyce często spotykamy"
+        content = re.sub(r'(?i)' + _phrase_pat + r'[^.!?<]*', '', content)
     # Fix orphaned punctuation/conjunctions after phrase removal
     content = re.sub(r'(<p[^>]*>)\s*,\s*', r'\1', content)
     # Capitalize first word after <p> if it starts lowercase (result of phrase removal)
