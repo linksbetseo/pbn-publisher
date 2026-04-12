@@ -456,6 +456,180 @@ def _cluster(
     return sorted(result, key=lambda x: x["total_volume"], reverse=True)
 
 
+# ── Semantic clustering via GPT ───────────────────────────────────────────────
+
+async def _cluster_semantic(
+    keywords: list[dict],
+    seed: str,
+    max_clusters: int = 8,
+    language_code: str = "pl",
+    min_coherence: float = 0.0,
+) -> list[dict]:
+    """
+    GPT-based semantic clustering — groups keywords by real sub-topics, not token differentiators.
+    Sends top-80 keywords to GPT, asks for sub-topic grouping, maps back to full keyword dicts.
+    Falls back to _cluster() on any GPT failure.
+    """
+    from openai import AsyncOpenAI as _AO
+    from services.openai_service import get_gpt_model
+    from config import OPENAI_API_KEY
+
+    if len(keywords) < 20:
+        return _cluster(keywords, seed, max_clusters, min_coherence)
+
+    client = _AO(api_key=OPENAI_API_KEY)
+    model = await get_gpt_model()
+    is_pl = language_code == "pl"
+
+    # Use top-80 by volume for GPT clustering (rest assigned by token proximity)
+    top_kws = sorted(keywords, key=lambda k: k.get("search_volume", 0), reverse=True)[:80]
+    kw_lines = "\n".join(f"{i+1}. {k['keyword']}" for i, k in enumerate(top_kws))
+
+    if is_pl:
+        system = (
+            f"Jesteś ekspertem SEO tworzącym topical authority map.\n"
+            f"SEED (główny temat): {seed}\n\n"
+            f"Podziel poniższe frazy na maksymalnie {max_clusters} semantycznych sub-tematów.\n"
+            f"Każdy sub-temat = osobny artykuł-pillar na stronie.\n\n"
+            f"ZASADY GRUPOWANIA:\n"
+            f"- Grupuj po RZECZYWISTYM aspekcie tematu: 'konserwacja', 'rodzaje', 'jak wybrać', 'cena', 'dla kogo'\n"
+            f"- NIE grupuj po modifierach: 'tani', 'online', 'ranking', 'najlepszy', '2024'\n"
+            f"- Każdy cluster_name to krótka nazwa sub-tematu (2-4 słowa), nie fraza kluczowa\n"
+            f"- Frazy niepasujące do żadnego sub-tematu wrzuć do 'inne'\n\n"
+            f"Odpowiedz TYLKO valid JSON:\n"
+            f'[{{"cluster_name": "nazwa sub-tematu", "keywords": ["fraza1", "fraza2"]}}, ...]\n'
+            f"Bez wyjaśnień, bez dodatkowego tekstu."
+        )
+    else:
+        system = (
+            f"You are an SEO expert building a topical authority map.\n"
+            f"SEED (main topic): {seed}\n\n"
+            f"Group the following phrases into max {max_clusters} semantic sub-topics.\n"
+            f"Each sub-topic = a separate pillar article.\n\n"
+            f"GROUPING RULES:\n"
+            f"- Group by REAL topic aspect: 'maintenance', 'types', 'how to choose', 'pricing', 'for whom'\n"
+            f"- Do NOT group by modifiers: 'cheap', 'online', 'ranking', 'best', '2024'\n"
+            f"- Each cluster_name is a short sub-topic name (2-4 words), not a keyword\n"
+            f"- Phrases not fitting any sub-topic go into 'other'\n\n"
+            f"Respond ONLY with valid JSON:\n"
+            f'[{{"cluster_name": "sub-topic name", "keywords": ["phrase1", "phrase2"]}}, ...]\n'
+            f"No explanations, no extra text."
+        )
+
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": kw_lines},
+            ],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        raw = resp.choices[0].message.content.strip()
+        # Extract JSON array
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            raise ValueError(f"No JSON array in GPT response: {raw[:200]}")
+        gpt_clusters = _json.loads(match.group())
+    except Exception as e:
+        logger.warning(f"[TopicalMap] _cluster_semantic GPT failed: {e} — falling back to _cluster()")
+        return _cluster(keywords, seed, max_clusters, min_coherence)
+
+    # Build keyword lookup dict (keyword text → full dict)
+    kw_lookup: dict[str, dict] = {k["keyword"]: k for k in keywords}
+
+    result_clusters = []
+    assigned_kw_keys: set = set()
+
+    for gpt_cl in gpt_clusters:
+        cluster_name = gpt_cl.get("cluster_name", "inne")
+        if cluster_name.lower() in ("inne", "other", "pozostałe", "pozostale"):
+            continue
+        matched_kws = []
+        for kw_text in gpt_cl.get("keywords", []):
+            # Exact match first
+            if kw_text in kw_lookup and kw_text not in assigned_kw_keys:
+                matched_kws.append(kw_lookup[kw_text])
+                assigned_kw_keys.add(kw_text)
+            else:
+                # Fuzzy: find closest unassigned keyword by token overlap
+                kw_fold = _ascii_fold(kw_text.lower())
+                for orig_kw, kw_dict in kw_lookup.items():
+                    if orig_kw in assigned_kw_keys:
+                        continue
+                    if _ascii_fold(orig_kw.lower()) == kw_fold:
+                        matched_kws.append(kw_dict)
+                        assigned_kw_keys.add(orig_kw)
+                        break
+
+        if not matched_kws:
+            continue
+
+        total_vol = sum(k.get("search_volume", 0) for k in matched_kws)
+        avg_kd = sum(k.get("keyword_difficulty", 50) for k in matched_kws) / len(matched_kws)
+        avg_cpc = sum(k.get("cpc", 0) for k in matched_kws) / len(matched_kws)
+        focus = _cluster_focus_score(matched_kws, cluster_name)
+
+        result_clusters.append({
+            "anchor": cluster_name,
+            "label": cluster_name.title(),
+            "keywords": matched_kws,
+            "total_volume": total_vol,
+            "avg_difficulty": round(avg_kd, 1),
+            "avg_cpc": round(avg_cpc, 2),
+            "focus_score": round(focus, 3),
+        })
+
+    # Assign remaining unmatched keywords to closest cluster by token overlap
+    unmatched = [k for k in keywords if k["keyword"] not in assigned_kw_keys]
+    if unmatched and result_clusters:
+        seed_toks = _seed_tokens(seed)
+        for kw in unmatched:
+            kw_toks = set(_tokenize(kw["keyword"])) - seed_toks
+            best_cl = max(
+                result_clusters,
+                key=lambda cl: len(kw_toks & set(
+                    t for kw2 in cl["keywords"] for t in _tokenize(kw2["keyword"])
+                ) - seed_toks) / max(len(kw_toks), 1)
+            )
+            best_cl["keywords"].append(kw)
+            best_cl["total_volume"] += kw.get("search_volume", 0)
+
+    if not result_clusters:
+        logger.warning("[TopicalMap] _cluster_semantic returned 0 clusters — falling back to _cluster()")
+        return _cluster(keywords, seed, max_clusters, min_coherence)
+
+    logger.info(f"[TopicalMap] _cluster_semantic: {len(result_clusters)} semantic clusters (GPT-based)")
+    return sorted(result_clusters, key=lambda x: x["total_volume"], reverse=True)
+
+
+def _check_intent_coherence(clusters: list[dict]) -> list[dict]:
+    """
+    Flags clusters with mixed search intent (<60% dominant intent).
+    Adds 'dominant_intent', 'intent_coherence', 'mixed_intent' fields.
+    """
+    for cluster in clusters:
+        intents = [k.get("intent", "informational") for k in cluster.get("keywords", [])]
+        total = len(intents)
+        if total == 0:
+            cluster["dominant_intent"] = "informational"
+            cluster["intent_coherence"] = 1.0
+            cluster["mixed_intent"] = False
+            continue
+        most_common_intent, count = Counter(intents).most_common(1)[0]
+        coherence_ratio = count / total
+        cluster["dominant_intent"] = most_common_intent
+        cluster["intent_coherence"] = round(coherence_ratio, 2)
+        cluster["mixed_intent"] = coherence_ratio < 0.60
+        if cluster["mixed_intent"]:
+            logger.info(
+                f"[TopicalMap] Mixed-intent cluster: '{cluster.get('anchor', '?')}' "
+                f"({most_common_intent} {coherence_ratio:.0%}, {total} kws)"
+            )
+    return clusters
+
+
 # ── Site-level SiteFocus / SiteRadius metrics ──────────────────────────────────
 
 # FIX #30: uses pre-computed coherence from kw dict
@@ -566,7 +740,9 @@ async def _gpt_relevance_filter(
         "- Tylko przypadkowo zawiera te same słowa co seed\n"
         f"- Zawiera przestarzały rok (2018, 2019, 2020, 2021, 2022, 2023, 2024) — odrzuć\n"
         "- Jest hasłem krzyżówkowym, pytaniem quizowym, lub encyklopedycznym niezwiązanym z tematem\n\n"
-        "Odpowiedz TYLKO tablicą JSON z 1 i 0, np: [1,1,0,1,0]\n"
+        "Odpowiedz TYLKO tablicą JSON obiektów, np:\n"
+        '[{"score":1,"subtopic":"konserwacja"},{"score":0,"subtopic":null},{"score":1,"subtopic":"jak wybrać"}]\n'
+        "Dla score=0 subtopic zawsze null. Subtopic to prawdziwy aspekt tematu (2-4 słowa), NIE modifier ('tani','online').\n"
         "Bez wyjaśnień, bez dodatkowego tekstu."
     ) if is_pl else (
         "You are an SEO expert evaluating keyword relevance for a topical map.\n\n"
@@ -584,7 +760,9 @@ async def _gpt_relevance_filter(
         "- It only accidentally shares words with the seed\n"
         "- It contains an outdated year (2018-2024) — reject\n"
         "- It's a crossword clue, quiz question, or unrelated encyclopedic query\n\n"
-        "Respond ONLY with a JSON array of 1s and 0s, e.g: [1,1,0,1,0]\n"
+        "Respond ONLY with a JSON array of objects, e.g:\n"
+        '[{"score":1,"subtopic":"maintenance"},{"score":0,"subtopic":null},{"score":1,"subtopic":"how to choose"}]\n'
+        "For score=0 subtopic is always null. Subtopic is a real topic aspect (2-4 words), NOT a modifier ('cheap','online').\n"
         "No explanations, no extra text."
     )
 
@@ -621,28 +799,42 @@ async def _gpt_relevance_filter(
                 text = text.strip()
                 logger.info(f"[TopicalMap] GPT response batch {batch_num}: {text[:200]}")
 
-                # Parse JSON array from response
-                match = re.search(r'\[[\d\s,]+\]', text)
+                # Parse JSON array — supports new object format [{score,subtopic}] and legacy [1,0,1]
+                match = re.search(r'\[.*?\]', text, re.DOTALL)
+                verdicts = []
+                subtopics = []
                 if match:
-                    verdicts = _json.loads(match.group())
+                    parsed = _json.loads(match.group())
+                    if parsed and isinstance(parsed[0], dict):
+                        # New format: [{"score": 1, "subtopic": "konserwacja"}, ...]
+                        verdicts = [int(item.get("score", 1)) for item in parsed]
+                        subtopics = [item.get("subtopic") for item in parsed]
+                    else:
+                        # Legacy format: [1, 0, 1, ...]
+                        verdicts = [int(v) for v in parsed]
+                        subtopics = [None] * len(verdicts)
                 else:
-                    # Only use char-level fallback if text is mostly 0s and 1s
+                    # Char-level fallback
                     digit_ratio = sum(1 for c in text if c in '01') / max(len(text), 1)
                     if digit_ratio > 0.3:
                         verdicts = [int(c) for c in text if c in '01']
+                        subtopics = [None] * len(verdicts)
                     else:
                         raise ValueError(f"GPT response not parseable as verdicts: {text[:100]}")
 
                 if len(verdicts) >= len(batch):
                     verdicts = verdicts[:len(batch)]
+                    subtopics = (subtopics + [None] * len(batch))[:len(batch)]
                 elif len(verdicts) < len(batch):
-                    # Pad with KEEP (1) — better to let coherence filter decide than to silently drop
                     logger.warning(f"[TopicalMap] GPT returned {len(verdicts)} verdicts for batch of {len(batch)} — padding with KEEP (1)")
                     verdicts.extend([1] * (len(batch) - len(verdicts)))
+                    subtopics.extend([None] * (len(batch) - len(subtopics)))
 
                 kept = 0
-                for kw, v in zip(batch, verdicts):
+                for kw, v, subtopic in zip(batch, verdicts, subtopics):
                     if v == 1:
+                        if subtopic:
+                            kw["gpt_subtopic"] = subtopic
                         relevant.append(kw)
                         kept += 1
 
@@ -785,44 +977,102 @@ async def generate_topical_map(
             k["already_ranking"] = False
             k["current_position"] = 0
 
-    clusters = _cluster(keywords, seed, max_clusters, min_coherence)
+    # Use GPT semantic clustering if enough keywords, else fall back to token-based
+    if len(keywords) >= 20:
+        clusters = await _cluster_semantic(keywords, seed, max_clusters, language_code, min_coherence)
+    else:
+        clusters = _cluster(keywords, seed, max_clusters, min_coherence)
     logger.info(f"[TopicalMap] clusters: {len(clusters)}")
 
     if len(clusters) <= 1 and max_clusters < 15:
-        clusters = _cluster(keywords, seed, 15, min_coherence)
+        if len(keywords) >= 20:
+            clusters = await _cluster_semantic(keywords, seed, 15, language_code, min_coherence)
+        else:
+            clusters = _cluster(keywords, seed, 15, min_coherence)
         logger.info(f"[TopicalMap] retry with max_clusters=15: {len(clusters)}")
 
-    # FIX #13: unified pillar score formula used for both pillar selection and priority
+    # Check intent coherence per cluster — flags mixed-intent clusters
+    clusters = _check_intent_coherence(clusters)
+
+    # Pillar score: breadth-first (broad informational topics preferred)
+    # REMOVED cpc_bonus — CPC favours commercial keywords as pillar (wrong)
+    # ADDED breadth_bonus — shorter phrases are broader topics (better pillar)
+    # ADDED intent_bonus — informational strongly preferred as pillar
     def _pillar_score(k):
         vol = k.get("search_volume", 0)
         kd = k.get("keyword_difficulty", 50)
         coherence = k.get("coherence", 0.5)
-        cpc = k.get("cpc", 0)
-        # FIX #12: CPC bonus for commercially valuable keywords
-        cpc_bonus = 1.0 + min(0.3, cpc / 10.0) if cpc > 0 else 1.0
-        return (vol / (kd + 1)) * (0.5 + coherence) * cpc_bonus
+        word_count = len(k.get("keyword", "").split())
+        breadth_bonus = 1.3 if word_count <= 3 else (1.1 if word_count <= 4 else 0.85)
+        intent = k.get("intent", "informational")
+        intent_bonus = 1.2 if intent == "informational" else (1.0 if intent == "commercial" else 0.75)
+        return (vol / (kd + 1)) * (0.5 + coherence) * breadth_bonus * intent_bonus
 
     pillars = []
     for cluster in clusters:
-        informational = [k for k in cluster["keywords"] if k.get("intent", "informational") in ("informational", "")]
+        all_cluster_kws = cluster["keywords"]
+        informational = [k for k in all_cluster_kws if k.get("intent", "informational") in ("informational", "")]
 
-        pillar_candidates = informational if informational else cluster["keywords"]
+        pillar_candidates = informational if informational else all_cluster_kws
         pillar_candidates_sorted = sorted(pillar_candidates, key=_pillar_score, reverse=True)
         pillar_kw = pillar_candidates_sorted[0] if pillar_candidates_sorted else {"keyword": cluster["anchor"], "search_volume": 0}
 
-        supporting = [k for k in cluster["keywords"] if k["keyword"] != pillar_kw["keyword"]]
-
-        supporting_sorted = sorted(
-            supporting,
+        # 3-tier: remaining keywords after pillar → cluster pages + supporting
+        remaining = [k for k in all_cluster_kws if k["keyword"] != pillar_kw["keyword"]]
+        remaining_sorted = sorted(
+            remaining,
             key=lambda x: (x.get("search_volume", 0) * (0.5 + x.get("coherence", 0.5))),
-            reverse=True
+            reverse=True,
         )
 
-        all_cluster_kws = cluster["keywords"]
+        # Build cluster pages (mid-tier): top 3-5 keywords by volume×coherence
+        # Prefer informational; each cluster page gets 2-4 supporting keywords
+        cluster_pages_raw = remaining_sorted[:5]  # up to 5 cluster pages
+        cluster_page_keys = {k["keyword"] for k in cluster_pages_raw}
+        leftover = [k for k in remaining_sorted[5:] if k["keyword"] not in cluster_page_keys]
+
+        # Assign leftover supporting keywords to nearest cluster page by token overlap
+        seed_toks_local = _seed_tokens(seed)
+        cluster_pages_built = []
+        for cp_kw in cluster_pages_raw:
+            cp_toks = set(_tokenize(cp_kw["keyword"])) - seed_toks_local
+            # Find 2-4 supporting: lower volume, semantically closest to this cluster page
+            sup_for_cp = sorted(
+                leftover,
+                key=lambda x: len((set(_tokenize(x["keyword"])) - seed_toks_local) & cp_toks) / max(len(cp_toks), 1),
+                reverse=True,
+            )[:4]
+            used_sup = {k["keyword"] for k in sup_for_cp}
+            leftover = [k for k in leftover if k["keyword"] not in used_sup]
+
+            cluster_pages_built.append({
+                "keyword": cp_kw["keyword"],
+                "search_volume": cp_kw.get("search_volume", 0),
+                "keyword_difficulty": cp_kw.get("keyword_difficulty", 0),
+                "coherence": round(cp_kw.get("coherence", 0), 3),
+                "intent": cp_kw.get("intent", "informational"),
+                "cpc": round(cp_kw.get("cpc", 0), 2),
+                "gpt_subtopic": cp_kw.get("gpt_subtopic", ""),
+                "supporting_keywords": [
+                    {
+                        "keyword": s["keyword"],
+                        "search_volume": s.get("search_volume", 0),
+                        "keyword_difficulty": s.get("keyword_difficulty", 0),
+                        "coherence": round(s.get("coherence", 0), 3),
+                        "intent": s.get("intent", "informational"),
+                        "cpc": round(s.get("cpc", 0), 2),
+                        "gpt_subtopic": s.get("gpt_subtopic", ""),
+                    }
+                    for s in sup_for_cp
+                ],
+            })
+
+        # Backward-compat flat supporting_keywords = all non-pillar kws (cluster pages + their supporting)
+        all_supporting_flat = remaining_sorted
         intent_counts = Counter(k.get("intent", "informational") for k in all_cluster_kws)
         intent_dist = {intent: count for intent, count in intent_counts.most_common()}
 
-        sup_limit = min(25, max(5, len(supporting)))
+        sup_limit = min(20, max(4, len(all_supporting_flat)))
 
         # FIX #14: detect trend from monthly_searches
         def _detect_trend(k: dict) -> str:
@@ -856,6 +1106,9 @@ async def generate_topical_map(
             "pillar_current_position": pillar_kw.get("current_position", 0),
             "focus_score": cluster["focus_score"],
             "pillar_intent": pillar_kw.get("intent", "informational"),
+            # 3-tier hierarchy: cluster pages (mid-tier) each with their supporting pages
+            "clusters": cluster_pages_built,
+            # Backward-compat flat list: all non-pillar keywords
             "supporting_keywords": [
                 {
                     "keyword": k["keyword"],
@@ -868,7 +1121,7 @@ async def generate_topical_map(
                     "already_ranking": k.get("already_ranking", False),
                     "current_position": k.get("current_position", 0),
                 }
-                for k in supporting_sorted[:sup_limit]
+                for k in all_supporting_flat[:sup_limit]
             ],
             "total_volume": cluster["total_volume"],
             "avg_difficulty": cluster["avg_difficulty"],
@@ -876,11 +1129,11 @@ async def generate_topical_map(
             "intent_distribution": intent_dist,
             "cannibalization_risk": cannibal_count,
             "content_gap": {
-                "total_subtopics": len(supporting),
-                "high_volume_gaps": len([k for k in supporting if k.get("search_volume", 0) >= 100]),
-                "low_kd_opportunities": len([k for k in supporting if k.get("keyword_difficulty", 50) < 30]),
+                "total_subtopics": len(all_supporting_flat),
+                "high_volume_gaps": len([k for k in all_supporting_flat if k.get("search_volume", 0) >= 100]),
+                "low_kd_opportunities": len([k for k in all_supporting_flat if k.get("keyword_difficulty", 50) < 30]),
                 "quick_wins": len([
-                    k for k in supporting
+                    k for k in all_supporting_flat
                     if k.get("search_volume", 0) >= 50 and k.get("keyword_difficulty", 50) < 25
                 ]),
             },

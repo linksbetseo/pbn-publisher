@@ -403,11 +403,11 @@ JSON only, no markdown."""
     title_out = title_out.strip('"\'').strip()
     title_out = re.sub(r'^[#*\s]+', '', title_out).strip()
     title_out = re.sub(r"<[^>]+>", "", title_out).strip()
-    if len(title_out) > 65:
-        # Trim to last complete word within 65 chars
-        trimmed = title_out[:65]
+    if len(title_out) > 120:
+        # Safety cap only — post_title/H1 has no strict limit; meta title is separate
+        trimmed = title_out[:120]
         last_space = trimmed.rfind(" ")
-        if last_space > 40:
+        if last_space > 60:
             title_out = trimmed[:last_space].rstrip(" ,.;:-")
 
     # Post-processing: remove AI-fingerprint template phrases (language-specific)
@@ -456,6 +456,25 @@ JSON only, no markdown."""
     content = re.sub(r'(<p[^>]*>)\s*,\s*', r'\1', content)
     content = re.sub(r'(<p[^>]*>)\s*([a-ząćęłńóśźż])', lambda m: m.group(1) + m.group(2).upper(), content)
     content = re.sub(r'(\.\s+)([a-ząćęłńóśźża-z])', lambda m: m.group(1) + m.group(2).upper(), content)
+
+    # MLM/controversial brand filter — remove mentions from content
+    _MLM_BRANDS = [
+        "Herbalife", "Amway", "Forever Living", "Oriflame", "Avon",
+        "Nu Skin", "USANA", "4Life", "Arbonne", "doTERRA", "Young Living",
+        "Tupperware", "Mary Kay", "Primerica", "ACN Inc", "Monat",
+        "LuLaRoe", "Isagenix", "Plexus", "Beachbody", "Jeunesse",
+    ]
+    for _brand in _MLM_BRANDS:
+        # Replace in paragraph text but preserve headings — simple whole-word removal
+        content = re.sub(
+            r'\b' + re.escape(_brand) + r'\b',
+            '',
+            content,
+            flags=re.IGNORECASE
+        )
+    # Clean up any double spaces or orphaned commas left by brand removal
+    content = re.sub(r'  +', ' ', content)
+    content = re.sub(r'\s*,\s*,', ',', content)
 
     # Limit <strong> usage — max 8 total in entire article
     _cw_strong_all = re.findall(r'<strong>.*?</strong>', content, flags=re.DOTALL | re.IGNORECASE)
