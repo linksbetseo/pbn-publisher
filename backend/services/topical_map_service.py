@@ -41,6 +41,87 @@ logger = logging.getLogger(__name__)
 _MAP_CACHE_TTL = 7 * 86400  # 7 days
 _map_cache_table_created = False
 
+# ── Strategy presets ──────────────────────────────────────────────────────────
+# Each strategy overrides defaults for generate_topical_map.
+# The caller can still override individual params on top of the preset.
+STRATEGY_PRESETS: dict[str, dict] = {
+    # Szeroka mapa — dużo pillars, luźna semantyka.
+    # Dla nowych domen, które chcą budować widoczność szeroko.
+    "breadth": {
+        "max_clusters": 10,
+        "min_coherence": 0.05,
+        "min_volume": 30,
+        "_description": "Szeroka mapa: dużo pillars, niska kohezja — dla nowych domen.",
+        "_pillar_min_word_count": None,  # no restriction
+        "_quick_wins_only": False,
+    },
+    # Głęboka mapa — mało pillars, dużo supporting.
+    # Dla domen, które chcą budować autorytet w jednej niszy.
+    "depth": {
+        "max_clusters": 5,
+        "min_coherence": 0.25,
+        "min_volume": 20,
+        "_description": "Głęboka mapa: mało pillars, gęste supporting — dla autorytatywnych domen.",
+        "_pillar_min_word_count": None,
+        "_quick_wins_only": False,
+    },
+    # Gap analysis vs. konkurent — wymaga competitor_domain.
+    # Skupia się na keyword gaps: frazy których konkurent NIE ma.
+    "competitor_gap": {
+        "max_clusters": 8,
+        "min_coherence": 0.10,
+        "min_volume": 50,
+        "_description": "Gap analysis: frazy których konkurent nie pokrywa. Wymaga competitor_domain.",
+        "_pillar_min_word_count": None,
+        "_quick_wins_only": False,
+    },
+    # Tylko łatwe frazy — niski KD, przyzwoity wolumen.
+    # Szybkie rankingi dla nowych lub słabych domen.
+    "quick_wins": {
+        "max_clusters": 6,
+        "min_coherence": 0.10,
+        "min_volume": 100,
+        "_description": "Szybkie rankingi: tylko frazy z niskim KD i solidnym wolumenem.",
+        "_pillar_min_word_count": None,
+        "_quick_wins_only": True,   # extra KD filter applied post-clustering
+    },
+    # Pełne pokrycie tematu — ścisła semantyka, wszystkie sub-tematy.
+    # Dla E-E-A-T / YMYL, gdzie trzeba pokazać topical authority.
+    "topical_authority": {
+        "max_clusters": 12,
+        "min_coherence": 0.20,
+        "min_volume": 20,
+        "_description": "Pełne pokrycie: ścisła semantyka, wszystkie sub-tematy — dla E-E-A-T/YMYL.",
+        "_pillar_min_word_count": None,
+        "_quick_wins_only": False,
+    },
+}
+
+_STRATEGY_INTERNAL_KEYS = {"_description", "_pillar_min_word_count", "_quick_wins_only"}
+
+def apply_strategy(strategy: str, kwargs: dict) -> dict:
+    """
+    Merge strategy preset into kwargs dict.
+    Caller-supplied values take precedence over preset defaults.
+    Returns updated kwargs + adds '_strategy_meta' key.
+    """
+    if not strategy or strategy == "default":
+        kwargs.setdefault("_strategy_meta", {"name": "default", "description": "Domyślna mapa bez presetu."})
+        return kwargs
+    preset = STRATEGY_PRESETS.get(strategy)
+    if not preset:
+        raise ValueError(f"Nieznana strategia: '{strategy}'. Dostępne: {list(STRATEGY_PRESETS)}")
+    meta = {
+        "name": strategy,
+        "description": preset.get("_description", ""),
+        "quick_wins_only": preset.get("_quick_wins_only", False),
+    }
+    for k, v in preset.items():
+        if k not in _STRATEGY_INTERNAL_KEYS:
+            kwargs.setdefault(k, v)  # preset fills in only if not already set
+    kwargs["_strategy_meta"] = meta
+    return kwargs
+
 
 async def _ensure_map_cache_table() -> None:
     global _map_cache_table_created
@@ -875,15 +956,35 @@ async def generate_topical_map(
     competitor_domain: str = "",
     domain_url: str = "",
     site_description: str = "",
+    strategy: str = "default",
 ) -> dict:
     """
     Generate topical map: pillar pages + supporting pages.
-    FIX #17: competitor_domain — check what domain already ranks for.
-    FIX #25/#26: force_refresh and min_coherence now exposed via API.
-    FIX #14: monthly_searches trend data extracted from DataForSEO.
-    FIX #12: CPC used in priority scoring.
-    FIX #13: unified pillar_score formula used everywhere.
+
+    strategy — named preset that overrides defaults:
+      'breadth'          — wide map, many pillars, loose semantics (new domains)
+      'depth'            — few pillars, deep supporting (niche authority)
+      'competitor_gap'   — gap analysis vs competitor_domain
+      'quick_wins'       — low-KD, decent-volume keywords only
+      'topical_authority'— full topic coverage, strict semantics (E-E-A-T/YMYL)
+      'default'          — no preset applied
+
+    Caller-supplied params always override strategy defaults.
     """
+    # Apply strategy preset (caller params take precedence)
+    _kw: dict = {}
+    _kw = apply_strategy(strategy, _kw)
+    _strategy_meta = _kw.pop("_strategy_meta", {"name": "default", "description": ""})
+    _quick_wins_only: bool = _kw.pop("_quick_wins_only", False) if "_quick_wins_only" in _kw else \
+        STRATEGY_PRESETS.get(strategy, {}).get("_quick_wins_only", False)
+    # Apply preset defaults only where caller used the function default value
+    if min_volume == 10 and "min_volume" in _kw:
+        min_volume = _kw["min_volume"]
+    if max_clusters == 8 and "max_clusters" in _kw:
+        max_clusters = _kw["max_clusters"]
+    if min_coherence == 0.0 and "min_coherence" in _kw:
+        min_coherence = _kw["min_coherence"]
+
     # Include domain context + filter version in cache key
     # v2: GPT relevance filter always runs (invalidates all pre-filter caches)
     _desc_hash = hashlib.md5(site_description.encode(), usedforsecurity=False).hexdigest()[:8] if site_description else ""
@@ -976,6 +1077,16 @@ async def generate_topical_map(
         else:
             k["already_ranking"] = False
             k["current_position"] = 0
+
+    # Strategy: quick_wins — keep only keywords with KD < 30 (easy to rank)
+    # Applied before clustering so cluster composition reflects the filter
+    if _quick_wins_only:
+        pre_qw = len(keywords)
+        keywords = [k for k in keywords if k.get("keyword_difficulty", 100) < 30]
+        if not keywords:
+            logger.warning("[TopicalMap] quick_wins filter removed ALL keywords — reverting to volume-filtered list")
+            keywords = list(filtered)  # restore post-volume filtered list
+        logger.info(f"[TopicalMap] quick_wins filter: {pre_qw} → {len(keywords)} (KD<30)")
 
     # Use GPT semantic clustering if enough keywords, else fall back to token-based
     if len(keywords) >= 20:
@@ -1249,6 +1360,8 @@ async def generate_topical_map(
 
     result = {
         "seed": seed,
+        "strategy": _strategy_meta.get("name", "default"),
+        "strategy_description": _strategy_meta.get("description", ""),
         "total_keywords": len(keywords),
         "pillars": pillars,
         "nodes": nodes,

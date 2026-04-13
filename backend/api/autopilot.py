@@ -63,6 +63,7 @@ class ScheduleCreate(BaseModel):
     image_source: str = "freepik_flux"
     custom_prompt: str = ""
     tone_of_voice: str = "ekspert"
+    strategy: str = "default"  # topical map strategy preset
 
 
 class ScheduleUpdate(BaseModel):
@@ -76,6 +77,7 @@ class ScheduleUpdate(BaseModel):
     min_coherence: Optional[float] = None
     language: Optional[str] = None
     tone_of_voice: Optional[str] = None
+    strategy: Optional[str] = None  # topical map strategy preset
 
 
 class RunNowRequest(BaseModel):
@@ -460,6 +462,7 @@ async def ensure_tables():
             ("min_coherence", "REAL DEFAULT 0.0"),
             ("tone_of_voice", "TEXT DEFAULT 'ekspert'"),
             ("site_description", "TEXT DEFAULT ''"),
+            ("strategy", "TEXT DEFAULT 'default'"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE domain_schedules ADD COLUMN {col} {typedef}")
@@ -536,11 +539,11 @@ async def create_schedule(body: ScheduleCreate):
 
         cursor = await db.execute(
             """INSERT INTO domain_schedules
-               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, min_coherence, client_domain, anchor_text, image_source, custom_prompt, tone_of_voice)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               (my_domain_id, seed_keyword, posts_per_day, language, min_volume, min_coherence, client_domain, anchor_text, image_source, custom_prompt, tone_of_voice, strategy)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (body.my_domain_id, body.seed_keyword, body.posts_per_day,
              body.language, body.min_volume, body.min_coherence, body.client_domain, body.anchor_text,
-             body.image_source, body.custom_prompt, body.tone_of_voice)
+             body.image_source, body.custom_prompt, body.tone_of_voice, body.strategy)
         )
         schedule_id = cursor.lastrowid
         await db.commit()
@@ -555,7 +558,7 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate):
         # FIX #64: consolidate into single UPDATE instead of N separate queries per field
         updates = {}
         for field in ("posts_per_day", "active", "client_domain", "anchor_text",
-                      "image_source", "custom_prompt", "min_volume", "min_coherence", "language", "tone_of_voice"):
+                      "image_source", "custom_prompt", "min_volume", "min_coherence", "language", "tone_of_voice", "strategy"):
             val = getattr(body, field, None)
             if val is not None:
                 updates[field] = val
@@ -752,6 +755,7 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False, new_se
         min_coherence=float(sched.get("min_coherence") or 0.15),
         domain_url=domain_url,
         site_description=site_desc,
+        strategy=sched.get("strategy") or "default",
     )
 
     # FIX #67: use module-level re import instead of inline import re as _re_cann
@@ -2874,6 +2878,7 @@ async def bulk_generate_maps(body: BulkActionRequest):
                     min_coherence=float(sched.get("min_coherence") or 0.15),
                     domain_url=domain_url,
                     site_description=site_desc,
+                    strategy=sched.get("strategy") or "default",
                 )
             await asyncio.sleep(0.5)  # small delay between DFS requests
             inserted = 0
