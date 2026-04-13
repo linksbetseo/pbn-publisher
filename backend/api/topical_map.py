@@ -24,15 +24,16 @@ class TopicalMapRequest(BaseModel):
     seed: str
     location_code: int = 2616
     language_code: str = "pl"
-    min_volume: int = 50
-    max_clusters: int = 8
+    # None = let strategy preset decide; explicit value overrides preset
+    min_volume: int | None = None
+    max_clusters: int | None = None
     force_refresh: bool = False
-    min_coherence: float = 0.15
+    min_coherence: float | None = None
     competitor_domain: str = ""
     domain_url: str = ""
     site_description: str = ""
-    # Strategy preset — overrides min_volume / max_clusters / min_coherence defaults
-    # 'default'           — no preset (use explicit params above)
+    # Strategy preset — overrides min_volume / max_clusters / min_coherence when not set
+    # 'default'           — fallback defaults: min_volume=10, max_clusters=8, min_coherence=0.0
     # 'breadth'           — wide map, many pillars, loose semantics
     # 'depth'             — few pillars, deep supporting
     # 'competitor_gap'    — gap analysis vs competitor_domain
@@ -52,12 +53,16 @@ class TopicalMapRequest(BaseModel):
 
     @field_validator("max_clusters")
     @classmethod
-    def validate_clusters(cls, v: int) -> int:
+    def validate_clusters(cls, v):
+        if v is None:
+            return v
         return max(2, min(15, v))
 
     @field_validator("min_coherence")
     @classmethod
-    def validate_coherence(cls, v: float) -> float:
+    def validate_coherence(cls, v):
+        if v is None:
+            return v
         return max(0.0, min(0.5, v))
 
     @field_validator("strategy")

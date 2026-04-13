@@ -1003,12 +1003,12 @@ async def generate_article(
             "- Używaj <p>, <ul>/<li> lub <ol>/<li> tam gdzie pasuje\n"
             "- <strong> używaj MAKSYMALNIE 1-2 razy per sekcja, tylko dla kluczowego terminu lub ważnej liczby. NIE pogrubiaj nazw marek, odmian frazy kluczowej ani każdego słowa — to wygląda jak spam.\n"
             "- Pisz szczegółowo — używaj konkretnych i praktycznych przykładów, badań w kontekście zdrowia, liczby i dane, porady praktyczne z głęboką analizą każdego aspektu.\n"
-            "- E-E-A-T CYTOWANIA: W każdej sekcji wpleć MINIMUM 1 konkretne badanie lub źródło w formacie: "
-            "'[Nazwa badania/programu/instytucji] ([rok]) wykazało/pokazuje/podaje, że...'. "
-            "Przykłady akceptowane: 'Raport WHO (2024) wskazuje...', 'Program Moje Zdrowie NFZ (2023) obejmuje...', "
-            "'Badanie opublikowane w European Heart Journal (2023) wykazało...'. "
-            "ZAKAZ: nie pisz 'badania pokazują', 'eksperci twierdzą', 'według naukowców' bez konkretnej nazwy. "
-            "Jeśli nie masz weryfikowalnego źródła z SERP — opisz zjawisko bez statystyki.\n"
+            "- E-E-A-T CYTOWANIA: TYLKO jeśli w dostarczonych danych SERP powyżej pojawiają się konkretne badania, "
+            "raporty, programy lub instytucje — cytuj je z nazwą i rokiem w formacie: "
+            "'[Nazwa] ([rok]) wykazało/wskazuje/podaje, że...'. "
+            "ZAKAZ wymyślania źródeł: NIE pisz 'Raport WHO (2024)' jeśli nie masz tego z SERP — to halucynacja. "
+            "ZAKAZ: 'badania pokazują', 'eksperci twierdzą', 'według naukowców' bez konkretnej nazwy. "
+            "Jeśli SERP nie zawiera weryfikowalnych źródeł — opisz zjawisko konkretnie bez fikcyjnych cytowań.\n"
             "- ENCJE — MINIMUM 3 NOWE per sekcja: Każda sekcja MUSI wprowadzać co najmniej 3 unikalne nazwy własne "
             "(marki, instytucje, produkty, programy, normy, aplikacje) których NIE było w poprzednich sekcjach. "
             "Google NLP ocenia topical authority przez liczbę unikalnych encji. "
@@ -1095,7 +1095,7 @@ async def generate_article(
                     f"Cel: ~{words_per_section} słów. Użyj frazy '{topic}' lub jej synonimów/odmian MAKSYMALNIE {kw_per_section}x — preferuj synonimy i odmiany naturalne, NIE powtarzaj dokładnej frazy więcej niż 1-2x per sekcja. Unikaj sztucznych powtórzeń.{lsi_section_block}{_entity_block}\n"
                     f"Struktura: <h2>{heading}</h2> → 1-2 <h3> podsekcje → <p> akapity + listy/tabele gdzie sens\n"
                     f"ENCJE: Wprowadź MINIMUM 3 NOWE nazwy własne (instytucje, marki, produkty, programy, aplikacje) nieużyte w poprzednich sekcjach. Sekcja bez 3 nowych encji = thin content.\n"
-                    f"E-E-A-T: Podaj MINIMUM 1 konkretne źródło z nazwą i rokiem, np. 'Raport GUS (2024)' lub 'Wytyczne PTK (2023)'. NIE pisz 'badania pokazują' bez nazwy — to AI footprint.\n"
+                    f"E-E-A-T: TYLKO jeśli dane SERP zawierają weryfikowalne źródło — cytuj z nazwą i rokiem. NIE wymyślaj źródeł (np. fałszywy 'Raport GUS (2024)'). Bez weryfikowalnego źródła: pisz konkretnie bez fikcyjnych cytowań.\n"
                     f"KEYWORD: użyj frazy '{topic}' MAX {kw_per_section}x w tej sekcji. Przekroczenie = keyword stuffing.\n"
                     f"Pisz ekspercko: konkretne fakty, przykłady praktyczne. Unikaj ogólników.{custom_block}"
                 )
@@ -1444,9 +1444,9 @@ async def generate_article(
     ]
     _phrases = _AI_PHRASES_PL if lang_pl else _AI_PHRASES_EN
     for _phrase_pat in _phrases:
-        # Remove the phrase AND trailing fragment up to next sentence boundary or comma
-        # Avoids leaving orphaned "się z sytuacjami" after removing "W praktyce często spotykamy"
-        content = re.sub(r'(?i)' + _phrase_pat + r'[^.!?<]*', '', content)
+        # Remove the phrase + optional trailing conjunction/comma (e.g. ", że", ", iż", ", który")
+        # Do NOT swallow the rest of the sentence — that breaks adjacent content
+        content = re.sub(r'(?i)' + _phrase_pat + r'(?:\s*,\s*(?:że|iż|który|która|które|aby|by|więc|jednak|dlatego|lecz|ale|to)\s*)?', '', content)
     # Fix orphaned punctuation/conjunctions after phrase removal
     content = re.sub(r'(<p[^>]*>)\s*,\s*', r'\1', content)
     # Capitalize first word after <p> if it starts lowercase (result of phrase removal)

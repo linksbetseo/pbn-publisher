@@ -85,7 +85,20 @@ def evaluate_map(topical_map: dict) -> dict:
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.strip()
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        _criteria_keys = [
+            "pillar_breadth", "cluster_semantics", "intent_coherence", "hierarchy_3tier",
+            "supporting_specificity", "entity_coverage", "serp_alignment",
+            "internal_link_logic", "topical_coverage", "keyword_quality",
+        ]
+        return {
+            "scores": {k: 0 for k in _criteria_keys},
+            "verdict": "REJECT",
+            "weak_points": [f"CEO evaluation failed — GPT returned invalid JSON: {str(e)[:120]}"],
+            "fix_instructions": ["Re-run CEO evaluation (GPT response was malformed)"],
+        }
 
 
 def _summarize_map(m: dict) -> str:
@@ -107,7 +120,8 @@ def _summarize_map(m: dict) -> str:
                 cvol = c.get("search_volume", 0)
                 cintent = c.get("intent", "?")
                 lines.append(f"  CLUSTER: {ckw} (vol={cvol}, intent={cintent})")
-                for s in c.get("supporting_keywords", [])[:3]:
+                sups = c.get("supporting_keywords", [])
+                for s in sups[:5]:
                     skw = s.get("keyword", "?") if isinstance(s, dict) else str(s)
                     svol = s.get("search_volume", 0) if isinstance(s, dict) else 0
                     lines.append(f"    SUPPORTING: {skw} (vol={svol})")

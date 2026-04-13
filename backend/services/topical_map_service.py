@@ -555,6 +555,13 @@ async def _cluster_semantic(
     from services.openai_service import get_gpt_model
     from config import OPENAI_API_KEY
 
+    # Apply coherence filter before GPT (same as _cluster does) — prune outliers early
+    if min_coherence > 0:
+        before = len(keywords)
+        keywords = [k for k in keywords if k.get("coherence", 0) >= min_coherence]
+        if before - len(keywords):
+            logger.info(f"[TopicalMap] _cluster_semantic: pruned {before - len(keywords)} outliers (coherence<{min_coherence})")
+
     if len(keywords) < 20:
         return _cluster(keywords, seed, max_clusters, min_coherence)
 
@@ -874,7 +881,7 @@ async def _gpt_relevance_filter(
                         {"role": "user", "content": kw_list},
                     ],
                     temperature=0.0,
-                    max_tokens=len(batch) * 3 + 20,
+                    max_tokens=len(batch) * 45 + 60,  # ~45 tokens per {score,subtopic} object
                 )
                 text = resp.choices[0].message.content or ""
                 text = text.strip()
@@ -947,12 +954,12 @@ async def generate_topical_map(
     seed: str,
     location_code: int = 2616,
     language_code: str = "pl",
-    min_volume: int = 10,
-    max_clusters: int = 8,
+    min_volume: int | None = None,
+    max_clusters: int | None = None,
     dfs_login: str = "",
     dfs_password: str = "",
     force_refresh: bool = False,
-    min_coherence: float = 0.0,
+    min_coherence: float | None = None,
     competitor_domain: str = "",
     domain_url: str = "",
     site_description: str = "",
@@ -961,35 +968,34 @@ async def generate_topical_map(
     """
     Generate topical map: pillar pages + supporting pages.
 
-    strategy — named preset that overrides defaults:
+    strategy — named preset that overrides defaults when caller omits numeric params:
       'breadth'          — wide map, many pillars, loose semantics (new domains)
       'depth'            — few pillars, deep supporting (niche authority)
       'competitor_gap'   — gap analysis vs competitor_domain
-      'quick_wins'       — low-KD, decent-volume keywords only
+      'quick_wins'       — low-KD (KD<30), decent-volume keywords only
       'topical_authority'— full topic coverage, strict semantics (E-E-A-T/YMYL)
       'default'          — no preset applied
 
-    Caller-supplied params always override strategy defaults.
+    Caller-supplied params (non-None) always override strategy defaults.
     """
-    # Apply strategy preset (caller params take precedence)
-    _kw: dict = {}
-    _kw = apply_strategy(strategy, _kw)
-    _strategy_meta = _kw.pop("_strategy_meta", {"name": "default", "description": ""})
-    _quick_wins_only: bool = _kw.pop("_quick_wins_only", False) if "_quick_wins_only" in _kw else \
-        STRATEGY_PRESETS.get(strategy, {}).get("_quick_wins_only", False)
-    # Apply preset defaults only where caller used the function default value
-    if min_volume == 10 and "min_volume" in _kw:
-        min_volume = _kw["min_volume"]
-    if max_clusters == 8 and "max_clusters" in _kw:
-        max_clusters = _kw["max_clusters"]
-    if min_coherence == 0.0 and "min_coherence" in _kw:
-        min_coherence = _kw["min_coherence"]
+    # Apply strategy preset: None params → preset value → hardcoded fallback
+    preset = STRATEGY_PRESETS.get(strategy, {})
+    _strategy_meta = {"name": strategy, "description": preset.get("_description", "")}
+    _quick_wins_only: bool = preset.get("_quick_wins_only", False)
+
+    if min_volume is None:
+        min_volume = preset.get("min_volume", 10)
+    if max_clusters is None:
+        max_clusters = preset.get("max_clusters", 8)
+    if min_coherence is None:
+        min_coherence = preset.get("min_coherence", 0.0)
 
     # Include domain context + filter version in cache key
     # v2: GPT relevance filter always runs (invalidates all pre-filter caches)
     _desc_hash = hashlib.md5(site_description.encode(), usedforsecurity=False).hexdigest()[:8] if site_description else ""
+    _qw_flag = "qw" if _quick_wins_only else ""
     cache_key = hashlib.md5(
-        f"v2:{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}:{competitor_domain}:{domain_url}:{_desc_hash}".encode(),
+        f"v2:{seed.lower().strip()}:{location_code}:{language_code}:{min_volume}:{min_coherence}:{max_clusters}:{competitor_domain}:{domain_url}:{_desc_hash}:{strategy}:{_qw_flag}".encode(),
         usedforsecurity=False,
     ).hexdigest()
     if not force_refresh:
@@ -1062,6 +1068,8 @@ async def generate_topical_map(
         keywords, seed, site_description, domain_url, language_code,
     )
     logger.info(f"[TopicalMap] after GPT relevance filter: {len(keywords)}")
+    # Snapshot post-GPT list for safe fallback (quick_wins may need it)
+    keywords_post_gpt = list(keywords)
 
     # Add coherence score to each keyword (computed once, reused everywhere — FIX #30)
     # FIX #17: mark keywords the competitor domain already ranks for
@@ -1084,8 +1092,8 @@ async def generate_topical_map(
         pre_qw = len(keywords)
         keywords = [k for k in keywords if k.get("keyword_difficulty", 100) < 30]
         if not keywords:
-            logger.warning("[TopicalMap] quick_wins filter removed ALL keywords — reverting to volume-filtered list")
-            keywords = list(filtered)  # restore post-volume filtered list
+            logger.warning("[TopicalMap] quick_wins filter removed ALL keywords — reverting to post-GPT list")
+            keywords = keywords_post_gpt  # fallback to post-GPT (not pre-GPT) list
         logger.info(f"[TopicalMap] quick_wins filter: {pre_qw} → {len(keywords)} (KD<30)")
 
     # Use GPT semantic clustering if enough keywords, else fall back to token-based
@@ -1114,7 +1122,15 @@ async def generate_topical_map(
         kd = k.get("keyword_difficulty", 50)
         coherence = k.get("coherence", 0.5)
         word_count = len(k.get("keyword", "").split())
-        breadth_bonus = 1.3 if word_count <= 3 else (1.1 if word_count <= 4 else 0.85)
+        # 1-word pillars (e.g. "zdrowie") are too generic for PBN — severely demote
+        if word_count <= 1:
+            breadth_bonus = 0.7
+        elif word_count <= 3:
+            breadth_bonus = 1.3
+        elif word_count <= 4:
+            breadth_bonus = 1.1
+        else:
+            breadth_bonus = 0.85
         intent = k.get("intent", "informational")
         intent_bonus = 1.2 if intent == "informational" else (1.0 if intent == "commercial" else 0.75)
         return (vol / (kd + 1)) * (0.5 + coherence) * breadth_bonus * intent_bonus
@@ -1177,6 +1193,21 @@ async def generate_topical_map(
                     for s in sup_for_cp
                 ],
             })
+
+        # Distribute any leftover keywords round-robin across cluster pages
+        # so no keyword is lost from the 3-tier hierarchy
+        if leftover and cluster_pages_built:
+            for idx, kw in enumerate(leftover):
+                target = cluster_pages_built[idx % len(cluster_pages_built)]
+                target["supporting_keywords"].append({
+                    "keyword": kw["keyword"],
+                    "search_volume": kw.get("search_volume", 0),
+                    "keyword_difficulty": kw.get("keyword_difficulty", 0),
+                    "coherence": round(kw.get("coherence", 0), 3),
+                    "intent": kw.get("intent", "informational"),
+                    "cpc": round(kw.get("cpc", 0), 2),
+                    "gpt_subtopic": kw.get("gpt_subtopic", ""),
+                })
 
         # Backward-compat flat supporting_keywords = all non-pillar kws (cluster pages + their supporting)
         all_supporting_flat = remaining_sorted
