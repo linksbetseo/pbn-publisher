@@ -1293,6 +1293,8 @@ async def generate_article(
 
     # Post-process excerpt
     excerpt = excerpt_raw.strip('"\'').strip()
+    # Strip HTML tags — GPT sometimes wraps in <p> which goes to WP meta description
+    excerpt = re.sub(r'<[^>]+>', '', excerpt).strip()
     # FIX #9: enforce 150-155 char limit for meta description (Google truncates at ~155)
     if len(excerpt) > 155:
         excerpt = excerpt[:155].rsplit(' ', 1)[0].rstrip('.,;:') + '.'
@@ -1641,7 +1643,8 @@ async def generate_article(
     # Inject all validated schema blocks
     if _valid_schema_blocks:
         all_schema = "\n".join(
-            f'<script type="application/ld+json">{_json.dumps(s, ensure_ascii=False)}</script>'
+            # Replace </script> inside JSON-LD to prevent HTML parser injection
+            f'<script type="application/ld+json">{_json.dumps(s, ensure_ascii=False).replace("</", "<\\/")}</script>'
             for s in _valid_schema_blocks
         )
         content = all_schema + "\n" + content

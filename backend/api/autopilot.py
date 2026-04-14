@@ -90,6 +90,12 @@ class RunNowRequest(BaseModel):
 _map_generating: dict = {}
 _MAP_GEN_TIMEOUT = 600  # 10 minutes max
 
+# In-flight run guard — prevents duplicate /run calls for the same schedule
+_running_schedules: set = set()
+
+# Daily-run guard — prevents concurrent /run-daily executions
+_daily_running: bool = False
+
 # ── Tone of voice ────────────────────────────────────────────────────────────
 _TONE_PRESETS = {
     "ekspert": "Pisz w tonie eksperckim, autorytatywnym.",
@@ -131,6 +137,8 @@ async def _gpt_call(system: str, user: str, temperature: float = 0.5,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            if not resp.choices or resp.choices[0].message.content is None:
+                raise ValueError("GPT returned empty choices or null content")
             return resp.choices[0].message.content.strip()
         except Exception as e:
             if attempt == 2:
@@ -1623,9 +1631,20 @@ async def run_schedule_now(schedule_id: int, body: RunNowRequest, background_tas
     Uruchom publikację w tle — zwraca job_id natychmiast.
     Frontned odpytuje GET /schedules/{id}/run-status/{job_id} co 3s.
     """
+    global _running_schedules
+    if schedule_id in _running_schedules:
+        raise HTTPException(409, f"Schedule {schedule_id} is already running — wait for it to complete")
+    _running_schedules.add(schedule_id)
     job_id = str(_uuid.uuid4())
     await _job_create(job_id, schedule_id)
-    background_tasks.add_task(_run_job, job_id, schedule_id, body)
+
+    async def _run_job_guarded(*args, **kwargs):
+        try:
+            await _run_job(*args, **kwargs)
+        finally:
+            _running_schedules.discard(schedule_id)
+
+    background_tasks.add_task(_run_job_guarded, job_id, schedule_id, body)
     return {"job_id": job_id, "status": "running"}
 
 
@@ -2097,6 +2116,18 @@ async def _run_schedule_daily(sched: dict) -> dict:
                         ))
                         excerpt = article.get("excerpt", "")
                         lsi_tags = article.get("lsi_tags", [])
+                        _d_content = article.get("content", "")
+
+                        # Guard: empty content from GPT → mark failed, never retry
+                        if not _d_content or not _d_content.strip():
+                            logger.error(f"[Daily] Empty article content for '{keyword}' — marking failed")
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                await db.execute(
+                                    "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                    ("Empty content from GPT", kw_row["id"])
+                                )
+                                await db.commit()
+                            continue
 
                         # Quality gate — lower threshold for custom/local LLMs
                         _d_wc = article.get("word_count", 0)
@@ -2222,6 +2253,17 @@ async def run_daily_all():
     Jeśli nie — uruchamiamy gate loop (generate+score) do osiągnięcia 80/100 przed publikacją.
     Domains które nie przeszły gate nie dostają artykułów w tym dniu.
     """
+    global _daily_running
+    if _daily_running:
+        raise HTTPException(409, "Daily run is already in progress — wait for it to complete")
+    _daily_running = True
+    try:
+        return await _run_daily_all_inner()
+    finally:
+        _daily_running = False
+
+
+async def _run_daily_all_inner():
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
