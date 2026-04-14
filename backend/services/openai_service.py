@@ -677,7 +677,9 @@ async def generate_article(
     _t0 = time.time()
 
     # Resolve GPT model once for entire article generation (avoids 8+ cache lookups)
-    _resolved_model = await get_gpt_model()
+    # Use get_openai_client() — returns custom LLM model name when custom LLM is active,
+    # falls back to standard OpenAI model otherwise. get_gpt_model() ignores custom LLM config.
+    _, _resolved_model, _ = await get_openai_client()
 
     def clean_url(url: str) -> str:
         url = url.strip()

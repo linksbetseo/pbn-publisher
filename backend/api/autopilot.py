@@ -1470,9 +1470,8 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                         await _job_update(job_id, published=_published, failed=_failed, results=_results)
                         continue
 
-                    # SEO #111: inject rel prev/next for series articles (same cluster)
-                    if _prev_url:
-                        content = f'<link rel="prev" href="{_prev_url}" />\n{content}'
+                    # SEO #111: rel prev/next belongs in <head>, not post body
+                    # WordPress (Yoast/RankMath) handles this automatically via wp_head hooks
 
                     # SEO #28: quality gate — lower threshold for custom/local LLMs
                     _wc_min = 300 if _job_is_custom else 600
@@ -1835,7 +1834,7 @@ async def generate_keyword_now(keyword_id: int):
         try:
             category_id = await get_or_create_category(
                 domain=sched["domain"], wp_login=sched["wp_login"], wp_pass=sched["wp_pass"],
-                category_name=kw_row["pillar_label"],
+                name=kw_row["pillar_label"],
                 http_user=sched.get("http_user", ""), http_pass=sched.get("http_pass", ""),
             )
         except Exception:
@@ -1965,10 +1964,20 @@ async def retry_failed_keywords(schedule_id: int, background_tasks: BackgroundTa
         )
         await db.commit()
 
+    if schedule_id in _running_schedules:
+        raise HTTPException(409, f"Schedule {schedule_id} is already running — wait for it to complete")
+    _running_schedules.add(schedule_id)
     job_id = str(_uuid.uuid4())
     body = RunNowRequest(schedule_id=schedule_id, limit=count)
     await _job_create(job_id, schedule_id)
-    background_tasks.add_task(_run_job, job_id, schedule_id, body)
+
+    async def _retry_job_guarded(*args, **kwargs):
+        try:
+            await _run_job(*args, **kwargs)
+        finally:
+            _running_schedules.discard(schedule_id)
+
+    background_tasks.add_task(_retry_job_guarded, job_id, schedule_id, body)
     return {"job_id": job_id, "reset": count, "status": "running"}
 
 
