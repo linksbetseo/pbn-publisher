@@ -256,6 +256,7 @@ async def _gpt(system: str, user: str, temperature: float = 0.7, max_tokens: int
             wait = 2 ** attempt + random.uniform(0, 1.5)
             logger.warning(f"[GPT] attempt {attempt+1} failed: {e} — retrying in {wait:.1f}s")
             await asyncio.sleep(wait)
+    return ""  # satisfies return type; loop always returns or raises with range(3)
 
 
 

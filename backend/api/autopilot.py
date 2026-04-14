@@ -1828,6 +1828,27 @@ async def generate_keyword_now(keyword_id: int):
     excerpt = article.get("excerpt", "")
     lsi_tags = article.get("lsi_tags", [])
 
+    # Guard: empty content
+    if not content or not content.strip():
+        async with aiosqlite.connect(DB_PATH) as _gdb:
+            await _gdb.execute(
+                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                ("Empty content from GPT", keyword_id)
+            )
+            await _gdb.commit()
+        raise HTTPException(500, "GPT returned empty content")
+
+    # Quality gate
+    _gen_wc = article.get("word_count", 0)
+    if _gen_wc < 600:
+        async with aiosqlite.connect(DB_PATH) as _gdb:
+            await _gdb.execute(
+                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                (f"Too short: {_gen_wc} words", keyword_id)
+            )
+            await _gdb.commit()
+        raise HTTPException(422, f"Article too short ({_gen_wc} words, min 600)")
+
     # WP category
     category_id = kw_row.get("wp_category_id")
     if not category_id and kw_row.get("pillar_label"):
@@ -1936,10 +1957,20 @@ async def run_all_keywords(schedule_id: int, background_tasks: BackgroundTasks, 
                 )
                 await db.commit()
 
+    if schedule_id in _running_schedules:
+        raise HTTPException(409, f"Schedule {schedule_id} is already running — wait for it to complete")
+    _running_schedules.add(schedule_id)
     job_id = str(_uuid.uuid4())
     body = RunNowRequest(schedule_id=schedule_id, limit=pending_count)
     await _job_create(job_id, schedule_id)
-    background_tasks.add_task(_run_job, job_id, schedule_id, body)
+
+    async def _run_all_guarded(*args, **kwargs):
+        try:
+            await _run_job(*args, **kwargs)
+        finally:
+            _running_schedules.discard(schedule_id)
+
+    background_tasks.add_task(_run_all_guarded, job_id, schedule_id, body)
     return {"job_id": job_id, "total_pending": pending_count, "status": "running"}
 
 
@@ -2136,6 +2167,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                                     ("Empty content from GPT", kw_row["id"])
                                 )
                                 await db.commit()
+                            failed += 1
                             continue
 
                         # Quality gate — lower threshold for custom/local LLMs
@@ -2149,6 +2181,7 @@ async def _run_schedule_daily(sched: dict) -> dict:
                                     (f"Too short: {_d_wc} words", kw_row["id"])
                                 )
                                 await db.commit()
+                            failed += 1
                             continue
 
                         img_prompt_daily = await _build_image_prompt(keyword, article["title"])
@@ -2748,14 +2781,8 @@ async def bulk_create_auto(body: BulkCreateAutoRequest):
             site_keywords = []
 
         # 2) GPT picks the best seed — from DFS data or from domain name analysis
-        gpt_model = "gpt-4o-mini"
-        try:
-            gpt_model = await get_gpt_model()
-        except Exception:
-            pass
-
-        from openai import AsyncOpenAI as _AO
-        _oai = _AO()
+        from services.openai_service import get_openai_client as _get_auto_oa
+        _oai, gpt_model, _ = await _get_auto_oa()
 
         if site_keywords:
             # Domain has rankings — pick seed from actual keyword data
@@ -3104,6 +3131,27 @@ async def _bulk_run_bg(job_id: str, schedule_ids: list[int], limit_override: int
                         domain_fingerprints=domain_fingerprints,
                         pbn_domain=sched["domain"],
                     )
+                    _bulk_content = article.get("content", "")
+                    if not _bulk_content or not _bulk_content.strip():
+                        failed += 1
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                ("Empty content from GPT", kw_row["id"])
+                            )
+                            await db.commit()
+                        continue
+                    _bulk_wc = article.get("word_count", 0)
+                    if _bulk_wc < 600:
+                        failed += 1
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                (f"Too short: {_bulk_wc} words", kw_row["id"])
+                            )
+                            await db.commit()
+                        continue
+
                     img_prompt_bulk = await _build_image_prompt(keyword, article["title"])
                     image_b64, _ = await _fetch_image(
                         sched.get("image_source", "freepik_flux"), keyword, article["title"], img_prompt_bulk
