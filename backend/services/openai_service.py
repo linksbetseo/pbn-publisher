@@ -42,7 +42,7 @@ from services.article_helpers import (
     slugify_heading as _slugify_heading,
 )
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=180.0, max_retries=2)
 logger = logging.getLogger(__name__)
 
 # Default GPT model — can be overridden via GPT_MODEL env var or DB settings

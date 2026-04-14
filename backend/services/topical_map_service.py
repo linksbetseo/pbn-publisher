@@ -551,9 +551,7 @@ async def _cluster_semantic(
     Sends top-80 keywords to GPT, asks for sub-topic grouping, maps back to full keyword dicts.
     Falls back to _cluster() on any GPT failure.
     """
-    from openai import AsyncOpenAI as _AO
-    from services.openai_service import get_gpt_model
-    from config import OPENAI_API_KEY
+    from services.openai_service import get_openai_client
 
     # Apply coherence filter before GPT (same as _cluster does) — prune outliers early
     if min_coherence > 0:
@@ -565,8 +563,7 @@ async def _cluster_semantic(
     if len(keywords) < 20:
         return _cluster(keywords, seed, max_clusters, min_coherence)
 
-    client = _AO(api_key=OPENAI_API_KEY)
-    model = await get_gpt_model()
+    client, model, _is_custom = await get_openai_client()
     is_pl = language_code == "pl"
 
     # Use top-80 by volume for GPT clustering (rest assigned by token proximity)
@@ -604,24 +601,38 @@ async def _cluster_semantic(
             f"No explanations, no extra text."
         )
 
+    import random as _random_cs
+    raw = None
+    for _attempt in range(3):
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": kw_lines},
+                    ],
+                    temperature=0.1,
+                    max_tokens=2000,
+                ),
+                timeout=120.0,
+            )
+            raw = resp.choices[0].message.content.strip()
+            break
+        except Exception as e:
+            logger.warning(f"[TopicalMap] _cluster_semantic GPT attempt {_attempt+1} failed: {e}")
+            if _attempt == 2:
+                logger.warning("[TopicalMap] _cluster_semantic all retries failed — falling back to _cluster()")
+                return _cluster(keywords, seed, max_clusters, min_coherence)
+            await asyncio.sleep(2 ** _attempt + _random_cs.uniform(0, 1))
+
     try:
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": kw_lines},
-            ],
-            temperature=0.1,
-            max_tokens=2000,
-        )
-        raw = resp.choices[0].message.content.strip()
-        # Extract JSON array
         match = re.search(r'\[.*\]', raw, re.DOTALL)
         if not match:
             raise ValueError(f"No JSON array in GPT response: {raw[:200]}")
         gpt_clusters = _json.loads(match.group())
     except Exception as e:
-        logger.warning(f"[TopicalMap] _cluster_semantic GPT failed: {e} — falling back to _cluster()")
+        logger.warning(f"[TopicalMap] _cluster_semantic JSON parse failed: {e} — falling back to _cluster()")
         return _cluster(keywords, seed, max_clusters, min_coherence)
 
     # Build keyword lookup dict (keyword text → full dict)
@@ -790,12 +801,9 @@ async def _gpt_relevance_filter(
     Always runs — uses seed alone if no site_description provided.
     Returns only the relevant keywords.
     """
-    from openai import AsyncOpenAI as _AO
-    from services.openai_service import get_gpt_model
-    from config import OPENAI_API_KEY
+    from services.openai_service import get_openai_client
 
-    client = _AO(api_key=OPENAI_API_KEY)
-    model = await get_gpt_model()
+    client, model, _is_custom_filter = await get_openai_client()
     logger.info(f"[TopicalMap] GPT relevance filter starting: {len(keywords)} keywords, model={model}, seed='{seed}'")
 
     is_pl = language_code == "pl"

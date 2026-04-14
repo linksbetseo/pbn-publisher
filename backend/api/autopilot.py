@@ -477,6 +477,13 @@ async def ensure_tables():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_schedule_status ON domain_keywords(schedule_id, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_domain_status ON domain_keywords(my_domain_id, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_dk_schedule_keyword ON domain_keywords(schedule_id, keyword)")
+        # UNIQUE constraint: prevents duplicate keywords per schedule (dedup guard)
+        try:
+            await db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_dk_unique_kw ON domain_keywords(schedule_id, keyword)"
+            )
+        except Exception:
+            pass  # existing data may have duplicates — index creation is best-effort
         await db.commit()
     _tables_ensured = True
 
@@ -832,7 +839,7 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False, new_se
                 if init_status == "cannibal_risk":
                     cannibal_flagged += 1
                 await db.execute(
-                    """INSERT INTO domain_keywords
+                    """INSERT OR IGNORE INTO domain_keywords
                        (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, coherence, status)
                        VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (schedule_id, sched["my_domain_id"], pk, "pillar",
@@ -852,7 +859,7 @@ async def _do_generate_map(schedule_id: int, force_refresh: bool = False, new_se
                     if init_status == "cannibal_risk":
                         cannibal_flagged += 1
                     await db.execute(
-                        """INSERT INTO domain_keywords
+                        """INSERT OR IGNORE INTO domain_keywords
                            (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, coherence, status)
                            VALUES (?,?,?,?,?,?,?,?,?,?)""",
                         (schedule_id, sched["my_domain_id"], kw, "supporting",
@@ -1441,6 +1448,20 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     _wc = article.get("word_count", 0)
                     _kd = article.get("keyword_density", 0)
 
+                    # Guard: empty content from GPT → mark failed, never retry
+                    if not content or not content.strip():
+                        logger.error(f"[Autopilot] Empty article content for '{keyword}' — marking failed")
+                        _failed += 1
+                        async with aiosqlite.connect(DB_PATH) as _edb:
+                            await _edb.execute(
+                                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                ("Empty content from GPT", kw_row["id"])
+                            )
+                            await _edb.commit()
+                        _results.append({"status": "failed", "keyword": keyword, "error": "Empty content"})
+                        await _job_update(job_id, published=_published, failed=_failed, results=_results)
+                        continue
+
                     # SEO #111: inject rel prev/next for series articles (same cluster)
                     if _prev_url:
                         content = f'<link rel="prev" href="{_prev_url}" />\n{content}'
@@ -1448,8 +1469,16 @@ async def _run_job(job_id: str, schedule_id: int, body: RunNowRequest):
                     # SEO #28: quality gate — lower threshold for custom/local LLMs
                     _wc_min = 300 if _job_is_custom else 600
                     if _wc < _wc_min:
-                        logger.warning(f"[Autopilot] Quality gate: '{keyword}' too short ({_wc} words, min={_wc_min}) — skipping")
+                        logger.warning(f"[Autopilot] Quality gate: '{keyword}' too short ({_wc} words, min={_wc_min}) — marking failed")
+                        _failed += 1
+                        async with aiosqlite.connect(DB_PATH) as _qdb:
+                            await _qdb.execute(
+                                "UPDATE domain_keywords SET status='failed', error_detail=? WHERE id=?",
+                                (f"Quality gate: too short ({_wc} words, min={_wc_min})", kw_row["id"])
+                            )
+                            await _qdb.commit()
                         _results.append({"status": "skipped", "keyword": keyword, "error": f"Too short: {_wc} words"})
+                        await _job_update(job_id, published=_published, failed=_failed, results=_results)
                         continue
                     if _kd > 0 and (_kd < 0.5 or _kd > 3.0):
                         logger.warning(f"[Autopilot] Quality gate: '{keyword}' KW density {_kd}% out of range — publishing anyway")
@@ -1708,7 +1737,7 @@ async def add_keyword_manually(schedule_id: int, req: AddKeywordRequest):
                     pillar_anchor = row["pillar_anchor"]
 
         await db.execute(
-            """INSERT INTO domain_keywords
+            """INSERT OR IGNORE INTO domain_keywords
                (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor,
                 search_volume, keyword_difficulty, status)
                VALUES (?,?,?,?,?,?,?,?,?)""",
@@ -2496,7 +2525,7 @@ async def import_topical_map(body: ImportMapRequest):
             pk = pillar.get("pillar_keyword", "")
             if pk:
                 await db.execute(
-                    """INSERT INTO domain_keywords
+                    """INSERT OR IGNORE INTO domain_keywords
                        (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, status)
                        VALUES (?,?,?,?,?,?,?,?,?)""",
                     (schedule_id, body.my_domain_id, pk, "pillar",
@@ -2509,7 +2538,7 @@ async def import_topical_map(body: ImportMapRequest):
                 kw = sk.get("keyword", "")
                 if kw:
                     await db.execute(
-                        """INSERT INTO domain_keywords
+                        """INSERT OR IGNORE INTO domain_keywords
                            (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty, status)
                            VALUES (?,?,?,?,?,?,?,?,?)""",
                         (schedule_id, body.my_domain_id, kw, "supporting",
@@ -2900,7 +2929,7 @@ async def bulk_generate_maps(body: BulkActionRequest):
                     pk = pillar["pillar_keyword"]
                     if pk and pk not in existing_kws:
                         await db.execute(
-                            """INSERT INTO domain_keywords
+                            """INSERT OR IGNORE INTO domain_keywords
                                (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty)
                                VALUES (?,?,?,?,?,?,?,?)""",
                             (schedule_id, sched["my_domain_id"], pk, "pillar",
@@ -2912,7 +2941,7 @@ async def bulk_generate_maps(body: BulkActionRequest):
                         kw = sk["keyword"]
                         if kw and kw not in existing_kws:
                             await db.execute(
-                                """INSERT INTO domain_keywords
+                                """INSERT OR IGNORE INTO domain_keywords
                                    (schedule_id, my_domain_id, keyword, keyword_type, pillar_label, pillar_anchor, search_volume, keyword_difficulty)
                                    VALUES (?,?,?,?,?,?,?,?)""",
                                 (schedule_id, sched["my_domain_id"], kw, "supporting",
